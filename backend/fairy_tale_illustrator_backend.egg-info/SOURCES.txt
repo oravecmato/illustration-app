@@ -1,0 +1,6 @@
+pyproject.toml
+fairy_tale_illustrator_backend.egg-info/PKG-INFO
+fairy_tale_illustrator_backend.egg-info/SOURCES.txt
+fairy_tale_illustrator_backend.egg-info/dependency_links.txt
+fairy_tale_illustrator_backend.egg-info/requires.txt
+fairy_tale_illustrator_backend.egg-info/top_level.txt
