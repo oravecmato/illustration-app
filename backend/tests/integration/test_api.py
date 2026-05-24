@@ -17,7 +17,8 @@ from httpx import AsyncClient
 
 from app.api import runs as runs_api
 from app.config import Settings
-from app.db.session import create_tables, init_db
+from app.db.migrations import upgrade_to_head_async
+from app.db.session import init_db
 from app.main import create_app
 from app.services.character_config import load_character_config
 from app.services.claude import ClaudeClient, load_agent_prompts
@@ -139,9 +140,11 @@ async def app_client(tmp_path):
 
     settings = make_settings(db_file, output_dir)
 
-    # Manually boot the app components (bypassing lifespan for tests)
+    # Manually boot the app components (bypassing lifespan for tests).
+    # Schema is applied via Alembic to exercise the same DDL path as
+    # production.
+    await upgrade_to_head_async(settings.database_url)
     init_db(settings.database_url)
-    await create_tables()
 
     backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     agents_dir = os.path.join(backend_root, "app", "agents")

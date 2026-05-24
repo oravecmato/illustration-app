@@ -12,7 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from app.api import runs as runs_api
 from app.api import sessions as sessions_api
 from app.config import Settings, get_settings
-from app.db.session import create_tables, init_db
+from app.db.migrations import upgrade_to_head_async
+from app.db.session import init_db
 from app.services.character_config import CharacterConfigError, load_character_config
 from app.services.claude import ClaudeClient, ClaudeError, load_agent_prompts
 from app.services.runpod import RunPodClient
@@ -34,8 +35,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Apply any pending Alembic migrations before serving traffic.
+        await upgrade_to_head_async(settings.database_url)
         init_db(settings.database_url)
-        await create_tables()
 
         os.makedirs(settings.output_dir, exist_ok=True)
 
