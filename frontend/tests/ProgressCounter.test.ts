@@ -24,7 +24,7 @@ describe("ProgressCounter", () => {
     expect(wrapper.find(".progress-bar").exists()).toBe(true);
   });
 
-  it("is hidden when hidden prop is true (e.g. NO_SUITABLE_SCENES)", () => {
+  it("is hidden when hidden prop is true", () => {
     const wrapper = mount(ProgressCounter, {
       props: { completedCount: 0, illustrationCount: null, hidden: true },
     });

@@ -1,4 +1,10 @@
-"""Top-level run orchestration."""
+"""Top-level run orchestration.
+
+The story has already been authored by Agent 0b before this pipeline runs.
+``run.style_guide_json`` is populated and the ``illustrations`` rows already
+exist with ``state == PENDING``. This pipeline only orchestrates the
+per-illustration branches (Agents 1–4 + RunPod).
+"""
 
 import asyncio
 import json
@@ -11,7 +17,8 @@ from app.db.models import IllustrationState, Run, RunStatus
 from app.db.repositories import RunRepository
 from app.orchestrator.branch import run_branch
 from app.orchestrator.events import EventBus
-from app.services.claude import ClaudeClient, ClaudeError
+from app.schemas.claude import StyleGuide
+from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
 
 logger = logging.getLogger(__name__)
@@ -29,70 +36,28 @@ async def run_pipeline(
     character_config: dict | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Orchestrate the full pipeline for a run."""
+    """Orchestrate the per-illustration branches for an already-authored run."""
     char_config = character_config or {}
 
     try:
-        # Step 0: Analyze story
-        try:
-            analyze_result = await claude.analyze_story(run.story_text)
-        except ClaudeError as e:
-            logger.error("Step 0 (analyze_story) failed: %s", e)
+        style_guide = StyleGuide(**json.loads(run.style_guide_json))
+        illustrations = await repo.get_illustrations_for_run(run.id)
+
+        if not illustrations:
+            # build_story validator guarantees at least 1, but be defensive.
+            msg = "Run has no illustrations to render."
             await repo.update_run(
                 run,
                 status=RunStatus.FAILED,
-                error_code="STEP0_FAILED",
-                error_message=str(e),
-            )
-            await event_bus.publish(
-                "run_failed", {"error_code": "STEP0_FAILED", "error_message": str(e)}
-            )
-            return
-
-        style_guide = analyze_result.style_guide
-        illustrations_data = analyze_result.illustrations  # already truncated by validator
-
-        # Empty illustrations → NO_SUITABLE_SCENES (valid terminal state)
-        if not illustrations_data:
-            msg = "The story contains no scenes suitable for single-character illustration."
-            await repo.update_run(
-                run,
-                status=RunStatus.FAILED,
-                illustration_count=0,
-                error_code="NO_SUITABLE_SCENES",
+                error_code="INTERNAL_ERROR",
                 error_message=msg,
             )
             await event_bus.publish(
-                "run_failed", {"error_code": "NO_SUITABLE_SCENES", "error_message": msg}
+                "run_failed", {"error_code": "INTERNAL_ERROR", "error_message": msg}
             )
             return
 
-        await repo.update_run(
-            run,
-            style_guide_json=style_guide.model_dump_json(),
-            illustration_count=len(illustrations_data),
-        )
-        await event_bus.publish(
-            "style_guide_ready",
-            {
-                "style_guide": style_guide.model_dump(),
-                "illustration_count": len(illustrations_data),
-            },
-        )
-
-        # Create illustration records
-        illustrations = []
-        for item in illustrations_data:
-            ill = await repo.create_illustration(
-                run_id=run.id,
-                scene_index=item.scene_index,
-                scene_excerpt=item.scene_excerpt,
-                concept=item.concept,
-                character_role=item.character_role,
-            )
-            illustrations.append(ill)
-
-        # Update snapshot with initial illustration state
+        # Refresh snapshot with starting illustration state.
         _update_snapshot(event_bus, run, illustrations)
 
         # Run branches in parallel with semaphore
@@ -179,17 +144,17 @@ async def run_pipeline(
 
 
 def _update_snapshot(event_bus: EventBus, run: Run, illustrations) -> None:
-
-    style_guide_data = None
-    if run.style_guide_json:
-        style_guide_data = json.loads(run.style_guide_json)
+    style_guide_data = json.loads(run.style_guide_json) if run.style_guide_json else None
+    story_blocks = json.loads(run.story_blocks_json) if run.story_blocks_json else []
 
     event_bus.set_snapshot(
         {
             "run": {
                 "id": run.id,
+                "session_id": run.session_id,
                 "status": run.status,
-                "story_text": run.story_text,
+                "story_title": run.story_title,
+                "story_blocks": story_blocks,
                 "style_guide": style_guide_data,
                 "illustration_count": run.illustration_count,
                 "completed_count": run.completed_count,

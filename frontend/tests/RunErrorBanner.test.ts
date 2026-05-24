@@ -1,14 +1,25 @@
 import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import RunErrorBanner from "../src/components/RunErrorBanner.vue";
-import type { Run } from "../src/types";
+import type { Run, StyleGuide } from "../src/types";
+
+function makeStyleGuide(): StyleGuide {
+  return {
+    overall_style_positive: "watercolor",
+    overall_style_negative: "photorealistic",
+    character_lora: "mha_character",
+    character_baseline_description: "A boy",
+  };
+}
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   return {
     id: "run-1",
+    session_id: "sess-1",
     status: "RUNNING",
-    story_text: "story",
-    style_guide: null,
+    story_title: "Skúšobný príbeh",
+    story_blocks: [{ type: "paragraph", text: "Bol raz." }],
+    style_guide: makeStyleGuide(),
     illustration_count: 0,
     completed_count: 0,
     failed_count: 0,
@@ -44,13 +55,13 @@ describe("RunErrorBanner", () => {
     expect(wrapper.find(".run-error-banner").exists()).toBe(true);
   });
 
-  it("shows the NO_SUITABLE_SCENES guidance message for that error code", () => {
+  it("shows the STORY_BUILD_FAILED guidance message for that error code", () => {
     const wrapper = mount(RunErrorBanner, {
       props: {
-        run: makeRun({ status: "FAILED", error_code: "NO_SUITABLE_SCENES" }),
+        run: makeRun({ status: "FAILED", error_code: "STORY_BUILD_FAILED" }),
       },
     });
-    expect(wrapper.text()).toContain("Zadaný text nie je vhodný");
+    expect(wrapper.text()).toContain("Tvorba príbehu");
   });
 
   it("falls back to INTERNAL_ERROR message for unknown error_code", () => {

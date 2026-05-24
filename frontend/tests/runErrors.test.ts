@@ -2,15 +2,14 @@ import { describe, it, expect } from "vitest";
 import { getRunErrorMessage } from "../src/i18n/runErrors";
 
 describe("getRunErrorMessage", () => {
-  it("maps NO_SUITABLE_SCENES to the dedicated Slovak message", () => {
-    const msg = getRunErrorMessage("NO_SUITABLE_SCENES");
-    expect(msg).toContain("Zadaný text nie je vhodný");
-    expect(msg).toContain("jednou postavou");
+  it("maps CHAT_FAILED to the correct Slovak message", () => {
+    const msg = getRunErrorMessage("CHAT_FAILED");
+    expect(msg).toContain("Konverzácia");
   });
 
-  it("maps STEP0_FAILED to the correct Slovak message", () => {
-    const msg = getRunErrorMessage("STEP0_FAILED");
-    expect(msg).toContain("Analýza textu zlyhala");
+  it("maps STORY_BUILD_FAILED to the correct Slovak message", () => {
+    const msg = getRunErrorMessage("STORY_BUILD_FAILED");
+    expect(msg).toContain("Tvorba príbehu");
   });
 
   it("maps INTERNAL_ERROR to the correct Slovak message", () => {

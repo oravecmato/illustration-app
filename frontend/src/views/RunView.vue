@@ -1,8 +1,8 @@
 <template>
   <div class="run-view">
     <div class="run-header">
-      <router-link to="/" class="back-link">← Nový text</router-link>
-      <h1>Generovanie anime ilustrácií</h1>
+      <router-link to="/" class="back-link">← Nový príbeh</router-link>
+      <h1>{{ store.run?.story_title ?? "Anime ilustrátor" }}</h1>
     </div>
 
     <div v-if="store.run" class="run-meta">
@@ -16,26 +16,20 @@
       <ProgressCounter
         :completed-count="store.run.completed_count"
         :illustration-count="store.run.illustration_count > 0 ? store.run.illustration_count : null"
-        :hidden="store.run.status === 'FAILED' && store.run.error_code === 'NO_SUITABLE_SCENES'"
       />
 
-      <CancelButton
-        :run-status="store.run.status"
-        @cancel="handleCancel"
-      />
+      <CancelButton :run-status="store.run.status" @cancel="handleCancel" />
     </div>
 
     <div v-if="store.sseError" class="sse-error">
       {{ store.sseError }}
     </div>
 
-    <div v-if="store.illustrations.length > 0" class="illustration-grid">
-      <IllustrationCard
-        v-for="ill in store.illustrations"
-        :key="ill.id"
-        :illustration="ill"
-      />
-    </div>
+    <StoryView
+      v-if="store.run"
+      :blocks="store.run.story_blocks"
+      :illustration-by-scene="store.illustrationByScene"
+    />
   </div>
 </template>
 
@@ -43,7 +37,7 @@
 import { computed, onMounted, onUnmounted } from "vue";
 import { useRoute } from "vue-router";
 import { useRunStore } from "@/stores/run";
-import IllustrationCard from "@/components/IllustrationCard.vue";
+import StoryView from "@/components/StoryView.vue";
 import ProgressCounter from "@/components/ProgressCounter.vue";
 import CancelButton from "@/components/CancelButton.vue";
 import RunErrorBanner from "@/components/RunErrorBanner.vue";
@@ -55,11 +49,16 @@ const runId = computed(() => route.params.run_id as string);
 
 const statusLabel = computed(() => {
   switch (store.run?.status) {
-    case "RUNNING": return "Beží";
-    case "COMPLETED": return "Hotovo";
-    case "FAILED": return "Zlyhalo";
-    case "CANCELLED": return "Zrušené";
-    default: return "";
+    case "RUNNING":
+      return "Beží";
+    case "COMPLETED":
+      return "Hotovo";
+    case "FAILED":
+      return "Zlyhalo";
+    case "CANCELLED":
+      return "Zrušené";
+    default:
+      return "";
   }
 });
 
@@ -75,6 +74,7 @@ async function handleCancel() {
 }
 
 onMounted(async () => {
+  store.reset();
   try {
     await store.loadRun(runId.value);
   } catch {
@@ -90,7 +90,7 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .run-view {
-  max-width: 1000px;
+  max-width: 760px;
   margin: 32px auto;
   padding: 0 24px;
 }
@@ -169,16 +169,9 @@ h1 {
   }
 }
 
-.run-error,
 .sse-error {
   color: #c62828;
   margin-bottom: 16px;
   font-size: 0.9em;
-}
-
-.illustration-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
 }
 </style>

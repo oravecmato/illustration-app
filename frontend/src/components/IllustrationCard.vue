@@ -31,9 +31,9 @@
       </a>
     </template>
 
-    <div v-if="illustration.state === 'FAILED' && illustration.error_message" class="error-message">
+    <div v-if="illustration.state === 'FAILED'" class="error-message">
       <span class="sad-face">:(</span>
-      {{ illustration.error_message }}
+      Túto ilustráciu sa nepodarilo vytvoriť.
     </div>
   </div>
 </template>

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/app.db"
     output_dir: str = "./output"
     workflow_path: str = "./app/workflows/default.json"
+    agents_dir: str = "./app/agents"
     allowed_origin: str = "http://localhost:5173"
 
 

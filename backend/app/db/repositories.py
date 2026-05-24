@@ -3,15 +3,69 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Illustration, Run
+from app.db.models import Illustration, Run, Session, SessionMessage
+
+
+class SessionRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_session(self) -> Session:
+        s = Session()
+        self.session.add(s)
+        await self.session.commit()
+        await self.session.refresh(s)
+        return s
+
+    async def get_session(self, session_id: str) -> Session | None:
+        result = await self.session.execute(select(Session).where(Session.id == session_id))
+        return result.scalar_one_or_none()
+
+    async def update_session(self, session_obj: Session, **kwargs) -> Session:
+        for key, value in kwargs.items():
+            setattr(session_obj, key, value)
+        session_obj.updated_at = datetime.now(UTC)
+        self.session.add(session_obj)
+        await self.session.commit()
+        await self.session.refresh(session_obj)
+        return session_obj
+
+    async def add_message(self, session_id: str, role: str, content: str) -> SessionMessage:
+        msg = SessionMessage(session_id=session_id, role=role, content=content)
+        self.session.add(msg)
+        await self.session.commit()
+        await self.session.refresh(msg)
+        return msg
+
+    async def get_messages(self, session_id: str) -> list[SessionMessage]:
+        result = await self.session.execute(
+            select(SessionMessage)
+            .where(SessionMessage.session_id == session_id)
+            .order_by(SessionMessage.created_at)
+        )
+        return list(result.scalars().all())
 
 
 class RunRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create_run(self, story_text: str) -> Run:
-        run = Run(story_text=story_text)
+    async def create_run(
+        self,
+        *,
+        session_id: str,
+        story_title: str,
+        story_blocks_json: str,
+        style_guide_json: str,
+        illustration_count: int,
+    ) -> Run:
+        run = Run(
+            session_id=session_id,
+            story_title=story_title,
+            story_blocks_json=story_blocks_json,
+            style_guide_json=style_guide_json,
+            illustration_count=illustration_count,
+        )
         self.session.add(run)
         await self.session.commit()
         await self.session.refresh(run)

@@ -1,23 +1,24 @@
-"""API endpoints: POST/GET runs, SSE, cancel."""
+"""API endpoints: GET runs, SSE, cancel.
+
+Runs are no longer created directly by this router — they are created by the
+session-finalize endpoint in ``app.api.sessions`` once Agent 0b has produced
+the story and scenes.
+"""
 
 import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STORY_MAX_CHARS
 from app.db.models import Run, RunStatus
 from app.db.repositories import RunRepository
 from app.db.session import get_session_factory
 from app.orchestrator.events import EventBus
-from app.orchestrator.pipeline import run_pipeline
 from app.schemas.api import (
-    CreateRunRequest,
-    CreateRunResponse,
     IllustrationResponse,
     RunDetailResponse,
     RunResponse,
@@ -30,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
-# In-memory registry of active run buses and cancel flags
+# In-memory registry of active run buses and cancel flags. Shared with the
+# sessions router so that finalize() can register the bus/flag for the
+# spawned pipeline before this router serves SSE for that run id.
 _run_buses: dict[str, EventBus] = {}
 _cancel_flags: dict[str, asyncio.Event] = {}
 
@@ -64,14 +67,14 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 def _build_run_response(run: Run) -> RunResponse:
-    style_guide = None
-    if run.style_guide_json:
-        data = json.loads(run.style_guide_json)
-        style_guide = StyleGuide(**data)
+    style_guide = StyleGuide(**json.loads(run.style_guide_json))
+    story_blocks = json.loads(run.story_blocks_json)
     return RunResponse(
         id=run.id,
+        session_id=run.session_id,
         status=run.status,
-        story_text=run.story_text,
+        story_title=run.story_title,
+        story_blocks=story_blocks,
         style_guide=style_guide,
         illustration_count=run.illustration_count,
         completed_count=run.completed_count,
@@ -100,70 +103,14 @@ def _build_illustration_response(ill) -> IllustrationResponse:
     )
 
 
-@router.post("", status_code=201, response_model=CreateRunResponse)
-async def create_run(
-    body: CreateRunRequest,
-    background_tasks: BackgroundTasks,
-    session: AsyncSession = Depends(get_session),  # noqa: B008
-) -> CreateRunResponse:
-    if not body.story_text.strip():
-        raise HTTPException(status_code=400, detail="story_text must not be empty")
-    if len(body.story_text) > STORY_MAX_CHARS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"story_text exceeds {STORY_MAX_CHARS} characters",
-        )
-
-    repo = RunRepository(session)
-    run = await repo.create_run(body.story_text)
-
-    cancel_flag = asyncio.Event()
-    event_bus = EventBus()
-    # Set an initial empty snapshot so SSE can connect before pipeline starts
-    event_bus.set_snapshot(
-        {
-            "run": {
-                "id": run.id,
-                "status": run.status,
-                "story_text": run.story_text,
-                "style_guide": None,
-                "illustration_count": 0,
-                "completed_count": 0,
-                "failed_count": 0,
-                "created_at": run.created_at.isoformat(),
-                "updated_at": run.updated_at.isoformat(),
-                "error_code": None,
-                "error_message": None,
-            },
-            "illustrations": [],
-        }
-    )
-
-    _run_buses[run.id] = event_bus
-    _cancel_flags[run.id] = cancel_flag
-
-    factory = get_session_factory()
-
-    async def pipeline_task():
-        async with factory() as bg_session:
-            bg_repo = RunRepository(bg_session)
-            bg_run = await bg_repo.get_run(run.id)
-            await run_pipeline(
-                run=bg_run,
-                repo=bg_repo,
-                claude=_claude_client,
-                runpod=_runpod_client,
-                event_bus=event_bus,
-                workflow_template=_workflow_template,
-                output_dir=_output_dir,
-                cancel_flag=cancel_flag,
-                character_config=_character_config,
-                session_factory=factory,
-            )
-
-    background_tasks.add_task(pipeline_task)
-
-    return CreateRunResponse(run_id=run.id)
+def _build_snapshot(run: Run, illustrations: list) -> dict:
+    """Build an SSE snapshot from current DB state (matches RunDetailResponse shape)."""
+    return {
+        "run": _build_run_response(run).model_dump(mode="json"),
+        "illustrations": [
+            _build_illustration_response(ill).model_dump(mode="json") for ill in illustrations
+        ],
+    }
 
 
 @router.get("/{run_id}", response_model=RunDetailResponse)
@@ -184,11 +131,53 @@ async def get_run(
 
 
 @router.get("/{run_id}/events")
-async def run_events(run_id: str, request: Request) -> StreamingResponse:
-    event_bus = _run_buses.get(run_id)
-    if event_bus is None:
-        raise HTTPException(status_code=404, detail="Run not found or not active")
+async def run_events(
+    run_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> StreamingResponse:
+    # Load fresh state from DB — used both for the initial snapshot and to
+    # handle terminal runs whose bus is no longer active (e.g., after server
+    # restart).
+    repo = RunRepository(session)
+    run = await repo.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    illustrations = await repo.get_illustrations_for_run(run_id)
+    snapshot = _build_snapshot(run, illustrations)
 
+    event_bus = _run_buses.get(run_id)
+    terminal = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+
+    if event_bus is None:
+        # No active bus. If the run is terminal we can still serve a complete
+        # snapshot followed by the appropriate terminal event so the frontend
+        # closes the stream cleanly.
+        if run.status not in terminal:
+            raise HTTPException(status_code=404, detail="Run not found or not active")
+
+        async def generate_terminal():
+            yield f"event: snapshot\ndata: {json.dumps(snapshot)}\n\n"
+            if run.status == RunStatus.COMPLETED:
+                payload = {"completed": run.completed_count, "failed": run.failed_count}
+                event_type = "run_completed"
+            elif run.status == RunStatus.FAILED:
+                payload = {"error_code": run.error_code, "error_message": run.error_message}
+                event_type = "run_failed"
+            else:
+                payload = {}
+                event_type = "run_cancelled"
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+        return StreamingResponse(
+            generate_terminal(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Active run: refresh the snapshot so subscribers see current state, not
+    # the stale snapshot left over from earlier in the pipeline.
+    event_bus.set_snapshot(snapshot)
     queue = event_bus.subscribe()
 
     async def generate():

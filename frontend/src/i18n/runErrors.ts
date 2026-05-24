@@ -1,9 +1,8 @@
 const MESSAGES: Record<string, string> = {
-  NO_SUITABLE_SCENES:
-    "Zadaný text nie je vhodný ako zdroj ilustrácií. Mal by obsahovať aspoň jednu jasnú scénu " +
-    "s jednou postavou — chlapcom/mužom, dievčaťom/ženou alebo matkou — ktorá robí niečo konkrétne.",
-  STEP0_FAILED:
-    "Analýza textu zlyhala. Skúste prosím znova, prípadne upravte vstupný text.",
+  CHAT_FAILED:
+    "Konverzácia s asistentom zlyhala. Skúste obnoviť stránku a začať novú reláciu.",
+  STORY_BUILD_FAILED:
+    "Tvorba príbehu zlyhala. Skúste prosím začať novú reláciu a opísať tému trochu inak.",
   INTERNAL_ERROR:
     "Vyskytla sa neočakávaná chyba. Skontrolujte log servera pre detaily.",
 };

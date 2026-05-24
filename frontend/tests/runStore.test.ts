@@ -1,14 +1,29 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useRunStore } from "../src/stores/run";
-import type { Run, Illustration } from "../src/types";
+import type { Illustration, Run, StyleGuide } from "../src/types";
+
+function makeStyleGuide(overrides: Partial<StyleGuide> = {}): StyleGuide {
+  return {
+    overall_style_positive: "watercolor",
+    overall_style_negative: "photorealistic",
+    character_lora: "mha_character",
+    character_baseline_description: "A boy with green hair",
+    ...overrides,
+  };
+}
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   return {
     id: "run-1",
+    session_id: "sess-1",
     status: "RUNNING",
-    story_text: "Once upon a time...",
-    style_guide: null,
+    story_title: "Skúšobný príbeh",
+    story_blocks: [
+      { type: "paragraph", text: "Bol raz jeden chlapec." },
+      { type: "illustration", scene_index: 0 },
+    ],
+    style_guide: makeStyleGuide(),
     illustration_count: 2,
     completed_count: 0,
     failed_count: 0,
@@ -31,7 +46,6 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    error_message: null,
     ...overrides,
   };
 }
@@ -50,6 +64,24 @@ describe("runStore", () => {
 
     expect(store.run).toEqual(run);
     expect(store.illustrations).toHaveLength(2);
+  });
+
+  it("illustrationByScene maps scene_index to the matching illustration", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [
+          makeIllustration({ id: "ill-1", scene_index: 0 }),
+          makeIllustration({ id: "ill-2", scene_index: 2 }),
+        ],
+      },
+    });
+
+    expect(store.illustrationByScene.get(0)?.id).toBe("ill-1");
+    expect(store.illustrationByScene.get(2)?.id).toBe("ill-2");
+    expect(store.illustrationByScene.get(1)).toBeUndefined();
   });
 
   it("illustration_state event updates the right illustration by id", () => {
@@ -173,34 +205,24 @@ describe("runStore", () => {
 
     store.handleSseEvent({
       type: "run_failed",
-      data: { error_code: "NO_SUITABLE_SCENES", error_message: "No suitable scenes found." },
+      data: { error_code: "STORY_BUILD_FAILED", error_message: "Story build failed." },
     });
 
     expect(store.run?.status).toBe("FAILED");
-    expect(store.run?.error_code).toBe("NO_SUITABLE_SCENES");
-    expect(store.run?.error_message).toBe("No suitable scenes found.");
+    expect(store.run?.error_code).toBe("STORY_BUILD_FAILED");
+    expect(store.run?.error_message).toBe("Story build failed.");
   });
 
-  it("style_guide_ready updates run style_guide and illustration_count", () => {
+  it("reset() clears run and illustrations", () => {
     const store = useRunStore();
     store.handleSseEvent({
       type: "snapshot",
-      data: { run: makeRun({ illustration_count: 0 }), illustrations: [] },
+      data: { run: makeRun(), illustrations: [makeIllustration()] },
     });
 
-    const styleGuide = {
-      overall_style_positive: "watercolor",
-      overall_style_negative: "photorealistic",
-      character_lora: "",
-      character_baseline_description: "A princess",
-    };
+    store.reset();
 
-    store.handleSseEvent({
-      type: "style_guide_ready",
-      data: { style_guide: styleGuide, illustration_count: 3 },
-    });
-
-    expect(store.run?.illustration_count).toBe(3);
-    expect(store.run?.style_guide).toEqual(styleGuide);
+    expect(store.run).toBeNull();
+    expect(store.illustrations).toHaveLength(0);
   });
 });

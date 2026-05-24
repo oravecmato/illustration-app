@@ -1,19 +1,19 @@
 {
   "male": {
     "display_name": "Izuku Midoriya",
-    "lora_filename": "midoriya_izuku_v1.safetensors",
+    "lora_filename": "Izuku_Midoriya.safetensors",
     "trigger_tags": "midoriya izuku, green hair, green eyes, freckles, short hair",
     "outfit_baseline": "school uniform, ua uniform, white shirt, red tie"
   },
   "female": {
     "display_name": "Kyoka Jiro",
-    "lora_filename": "jirou_kyouka_v1.safetensors",
+    "lora_filename": "Mitsuki_Bakugo_and_females.safetensors",
     "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair, ear jacks",
     "outfit_baseline": "school uniform, ua uniform, black jacket"
   },
   "mother": {
     "display_name": "Inko Midoriya",
-    "lora_filename": "midoriya_inko_v1.safetensors",
+    "lora_filename": "Mum_Inko_Midoriya.safetensors",
     "trigger_tags": "midoriya inko, green hair, low ponytail, plump, mature female",
     "outfit_baseline": "casual clothes, apron, home clothes"
   }

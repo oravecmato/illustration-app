@@ -1,3 +1,56 @@
+// ── Chat & sessions ────────────────────────────────────────────────────────
+
+export type CharacterRole = "male" | "female" | "mother";
+
+export type ChatPhase = "gathering" | "awaiting_confirmation" | "confirmed";
+
+export type SessionState =
+  | "CHATTING"
+  | "AWAITING_CONFIRMATION"
+  | "FINALIZING"
+  | "FINALIZED"
+  | "FAILED";
+
+export type MessageRole = "user" | "assistant";
+
+export interface BriefCharacter {
+  role: CharacterRole;
+  name_in_story: string;
+  short_description: string;
+}
+
+export interface CollectedBrief {
+  characters: BriefCharacter[];
+  topic: string;
+  notes: string;
+}
+
+export interface SessionMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+}
+
+export interface Session {
+  id: string;
+  state: SessionState;
+  collected_brief: CollectedBrief | null;
+  run_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  messages: SessionMessage[];
+}
+
+export interface PostMessageResponse {
+  session: Session;
+  phase: ChatPhase;
+}
+
+// ── Runs ───────────────────────────────────────────────────────────────────
+
 export type RunStatus = "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 
 export type IllustrationState =
@@ -18,11 +71,17 @@ export interface StyleGuide {
   character_baseline_description: string;
 }
 
+export type StoryBlock =
+  | { type: "paragraph"; text: string }
+  | { type: "illustration"; scene_index: number };
+
 export interface Run {
   id: string;
+  session_id: string;
   status: RunStatus;
-  story_text: string;
-  style_guide: StyleGuide | null;
+  story_title: string;
+  story_blocks: StoryBlock[];
+  style_guide: StyleGuide;
   illustration_count: number;
   completed_count: number;
   failed_count: number;
@@ -36,24 +95,18 @@ export interface Illustration {
   id: string;
   scene_index: number;
   scene_excerpt: string;
-  character_role: string;
+  character_role: CharacterRole;
   current_concept: string;
   state: IllustrationState;
   concept_attempt: number;
   prompt_attempt: number;
   image_url: string | null;
-  error_message: string | null;
 }
 
 // SSE event payloads
 export interface SnapshotEvent {
   run: Run;
   illustrations: Illustration[];
-}
-
-export interface StyleGuideReadyEvent {
-  style_guide: StyleGuide;
-  illustration_count: number;
 }
 
 export interface IllustrationStateEvent {
@@ -88,7 +141,6 @@ export interface RunFailedEvent {
 
 export type SseEvent =
   | { type: "snapshot"; data: SnapshotEvent }
-  | { type: "style_guide_ready"; data: StyleGuideReadyEvent }
   | { type: "illustration_state"; data: IllustrationStateEvent }
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }

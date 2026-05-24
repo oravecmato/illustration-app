@@ -14,7 +14,6 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    error_message: null,
     ...overrides,
   };
 }
@@ -121,16 +120,13 @@ describe("IllustrationCard", () => {
     expect(img.attributes("src")).toBe("/static/runs/r/scene_0.png");
   });
 
-  it("renders error text on FAILED", () => {
+  it("renders generic Slovak failure text on FAILED", () => {
     const wrapper = mount(IllustrationCard, {
       props: {
-        illustration: makeIllustration({
-          state: "FAILED",
-          error_message: "All attempts exhausted",
-        }),
+        illustration: makeIllustration({ state: "FAILED" }),
       },
     });
-    expect(wrapper.text()).toContain("All attempts exhausted");
+    expect(wrapper.text()).toContain("Túto ilustráciu sa nepodarilo vytvoriť");
   });
 
   it("shows CANCELLED card as greyed out", () => {

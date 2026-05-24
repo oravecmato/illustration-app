@@ -21,9 +21,8 @@ STYLE_GUIDE = StyleGuide(
 )
 
 PROMPTS = GeneratePromptsResponse(
-    character_positive="brave knight",
-    character_negative="blurry",
-    environment="forest",
+    positive="brave knight, forest",
+    negative="blurry",
 )
 
 VERDICT_OK = EvaluateImageResponse(
@@ -121,9 +120,7 @@ async def run_branch(illustration, style_guide, claude, runpod, cancel_flag=None
     if cancel_flag is None:
         cancel_flag = asyncio.Event()
 
-    workflow_template = {
-        "node": {"inputs": {"text": "CHARACTER_POSITIVE_PROMPT", "lora": "CHARACTER_LORA"}}
-    }
+    workflow_template = {"node": {"inputs": {"text": "POSITIVE_PROMPT", "lora": "CHARACTER_LORA"}}}
 
     await _run_branch(
         illustration=illustration,
@@ -244,9 +241,7 @@ async def test_character_lora_from_character_config():
     repo.update_illustration = AsyncMock(side_effect=lambda i, **kwargs: _apply(i, **kwargs))
     event_bus = AsyncMock()
 
-    workflow_template = {
-        "node": {"inputs": {"lora": "CHARACTER_LORA", "pos": "CHARACTER_POSITIVE_PROMPT"}}
-    }
+    workflow_template = {"node": {"inputs": {"lora": "CHARACTER_LORA", "pos": "POSITIVE_PROMPT"}}}
 
     await _run_branch(
         illustration=ill,

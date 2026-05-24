@@ -3,39 +3,36 @@
 from app.services.workflow import replace_placeholders
 
 PLACEHOLDERS = {
-    "CHARACTER_POSITIVE_PROMPT": "brave knight",
-    "CHARACTER_NEGATIVE_PROMPT": "blurry, ugly",
-    "ENVIRONMENT_PROMPT": "enchanted forest",
+    "POSITIVE_PROMPT": "brave knight, enchanted forest",
+    "NEGATIVE_PROMPT": "blurry, ugly",
     "CHARACTER_LORA": "knight_v1",
     "STYLE_POSITIVE_PROMPT": "watercolor illustration",
     "STYLE_NEGATIVE_PROMPT": "photorealistic",
 }
 
 
-def test_replaces_all_six_placeholders_at_top_level():
+def test_replaces_all_five_placeholders_at_top_level():
     workflow = {
-        "node1": {"inputs": {"text": "CHARACTER_POSITIVE_PROMPT"}},
-        "node2": {"inputs": {"text": "CHARACTER_NEGATIVE_PROMPT"}},
+        "node1": {"inputs": {"text": "POSITIVE_PROMPT"}},
+        "node2": {"inputs": {"text": "NEGATIVE_PROMPT"}},
         "node3": {"inputs": {"lora": "CHARACTER_LORA"}},
         "node4": {"inputs": {"style": "STYLE_POSITIVE_PROMPT"}},
         "node5": {"inputs": {"neg_style": "STYLE_NEGATIVE_PROMPT"}},
-        "node6": {"inputs": {"env": "ENVIRONMENT_PROMPT"}},
     }
     result, missing = replace_placeholders(workflow, PLACEHOLDERS)
-    assert result["node1"]["inputs"]["text"] == "brave knight"
+    assert result["node1"]["inputs"]["text"] == "brave knight, enchanted forest"
     assert result["node2"]["inputs"]["text"] == "blurry, ugly"
     assert result["node3"]["inputs"]["lora"] == "knight_v1"
     assert result["node4"]["inputs"]["style"] == "watercolor illustration"
     assert result["node5"]["inputs"]["neg_style"] == "photorealistic"
-    assert result["node6"]["inputs"]["env"] == "enchanted forest"
     assert missing == []
 
 
 def test_replaces_placeholders_nested_arbitrarily_deep():
-    workflow = {"a": {"b": {"c": "CHARACTER_POSITIVE_PROMPT"}}}
-    single_replacement = {"CHARACTER_POSITIVE_PROMPT": "brave knight"}
+    workflow = {"a": {"b": {"c": "POSITIVE_PROMPT"}}}
+    single_replacement = {"POSITIVE_PROMPT": "brave knight, enchanted forest"}
     result, missing = replace_placeholders(workflow, single_replacement)
-    assert result["a"]["b"]["c"] == "brave knight"
+    assert result["a"]["b"]["c"] == "brave knight, enchanted forest"
     assert missing == []
 
 
@@ -51,14 +48,13 @@ def test_leaves_unrelated_strings_untouched():
 
 def test_reports_missing_placeholders():
     workflow = {
-        "node1": {"inputs": {"text": "CHARACTER_POSITIVE_PROMPT"}},
+        "node1": {"inputs": {"text": "POSITIVE_PROMPT"}},
     }
-    # Only CHARACTER_POSITIVE_PROMPT is present in workflow; others are missing
+    # Only POSITIVE_PROMPT is present in workflow; others are missing
     result, missing = replace_placeholders(workflow, PLACEHOLDERS)
-    assert result["node1"]["inputs"]["text"] == "brave knight"
+    assert result["node1"]["inputs"]["text"] == "brave knight, enchanted forest"
     assert set(missing) == {
-        "CHARACTER_NEGATIVE_PROMPT",
-        "ENVIRONMENT_PROMPT",
+        "NEGATIVE_PROMPT",
         "CHARACTER_LORA",
         "STYLE_POSITIVE_PROMPT",
         "STYLE_NEGATIVE_PROMPT",
@@ -66,16 +62,16 @@ def test_reports_missing_placeholders():
 
 
 def test_workflow_not_mutated():
-    original = {"node1": {"inputs": {"text": "CHARACTER_POSITIVE_PROMPT"}}}
+    original = {"node1": {"inputs": {"text": "POSITIVE_PROMPT"}}}
     replace_placeholders(original, PLACEHOLDERS)
     # original should not be mutated
-    assert original["node1"]["inputs"]["text"] == "CHARACTER_POSITIVE_PROMPT"
+    assert original["node1"]["inputs"]["text"] == "POSITIVE_PROMPT"
 
 
 def test_placeholder_in_list():
-    workflow = {"node1": {"inputs": {"texts": ["CHARACTER_POSITIVE_PROMPT", "static value"]}}}
+    workflow = {"node1": {"inputs": {"texts": ["POSITIVE_PROMPT", "static value"]}}}
     result, missing = replace_placeholders(workflow, PLACEHOLDERS)
-    assert result["node1"]["inputs"]["texts"][0] == "brave knight"
+    assert result["node1"]["inputs"]["texts"][0] == "brave knight, enchanted forest"
     assert result["node1"]["inputs"]["texts"][1] == "static value"
 
 
@@ -95,3 +91,20 @@ def test_character_lora_sourced_per_illustration_role():
         replacements = {**PLACEHOLDERS, "CHARACTER_LORA": character_config[role]["lora_filename"]}
         result, _ = replace_placeholders(workflow, replacements)
         assert result["lora_node"]["inputs"]["lora_name"] == expected_lora
+
+
+def test_combined_placeholder_in_single_node():
+    """A single text field may contain 'STYLE_POSITIVE_PROMPT, POSITIVE_PROMPT' — both replaced."""
+    workflow = {"node": {"inputs": {"text": "STYLE_POSITIVE_PROMPT, POSITIVE_PROMPT"}}}
+    # The substitution replaces only exact-match strings; combined literal is not replaced.
+    # This test confirms the substitution logic is exact-match (not substring).
+    result, missing = replace_placeholders(workflow, PLACEHOLDERS)
+    # The combined string is not an exact placeholder, so it stays unchanged.
+    assert result["node"]["inputs"]["text"] == "STYLE_POSITIVE_PROMPT, POSITIVE_PROMPT"
+    assert set(missing) == {
+        "POSITIVE_PROMPT",
+        "NEGATIVE_PROMPT",
+        "CHARACTER_LORA",
+        "STYLE_POSITIVE_PROMPT",
+        "STYLE_NEGATIVE_PROMPT",
+    }

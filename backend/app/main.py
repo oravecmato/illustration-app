@@ -10,14 +10,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api import runs as runs_api
+from app.api import sessions as sessions_api
 from app.config import Settings, get_settings
 from app.db.session import create_tables, init_db
 from app.services.character_config import CharacterConfigError, load_character_config
-from app.services.claude import ClaudeClient
+from app.services.claude import ClaudeClient, ClaudeError, load_agent_prompts
 from app.services.runpod import RunPodClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _resolve_relative_path(path: str) -> str:
+    """Resolve a path relative to the project's ``backend/`` root."""
+    if os.path.isabs(path):
+        return path
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", path))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,12 +47,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.error("Startup failed: %s", e)
             raise
 
-        # Load workflow template
-        workflow_path = settings.workflow_path
-        if not os.path.isabs(workflow_path):
-            workflow_path = os.path.join(os.path.dirname(__file__), "..", workflow_path)
-        workflow_path = os.path.normpath(workflow_path)
+        # Load agent system prompts from .md files — refuse to start if any
+        # are missing or empty.
+        agents_dir = _resolve_relative_path(settings.agents_dir)
+        try:
+            agent_prompts = load_agent_prompts(agents_dir)
+        except ClaudeError as e:
+            logger.error("Startup failed: %s", e)
+            raise
 
+        # Load workflow template
+        workflow_path = _resolve_relative_path(settings.workflow_path)
         if os.path.exists(workflow_path):
             with open(workflow_path) as f:
                 workflow_template = json.load(f)
@@ -52,7 +65,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning("Workflow file not found at %s, using empty template", workflow_path)
             workflow_template = {}
 
-        claude_client = ClaudeClient(api_key=settings.anthropic_api_key)
+        claude_client = ClaudeClient(
+            api_key=settings.anthropic_api_key, agent_prompts=agent_prompts
+        )
         runpod_client = RunPodClient(
             api_key=settings.runpod_api_key,
             endpoint_id=settings.runpod_endpoint_id,
@@ -82,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     os.makedirs(settings.output_dir, exist_ok=True)
     app.mount("/static", StaticFiles(directory=settings.output_dir), name="static")
 
+    app.include_router(sessions_api.router)
     app.include_router(runs_api.router)
 
     return app

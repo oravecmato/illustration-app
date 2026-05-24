@@ -5,135 +5,286 @@ from pydantic import ValidationError
 
 from app.constants import MAX_ILLUSTRATIONS
 from app.schemas.claude import (
-    AnalyzeStoryResponse,
+    BuildStoryResponse,
+    ChatResponse,
+    CollectedBrief,
     EvaluateImageResponse,
     GeneratePromptsResponse,
     RethinkConceptResponse,
     RevisePromptsResponse,
 )
 
-# ---- AnalyzeStoryResponse ----
+# ---- CollectedBrief ----
 
-VALID_ANALYZE_STORY = {
-    "style_guide": {
-        "overall_style_positive": "anime, mha style",
-        "overall_style_negative": "photorealistic, dark",
-        "character_lora": "",
-        "character_baseline_description": "Warm afternoon lighting",
-    },
-    "illustrations": [
+
+def _brief(roles: list[str]) -> dict:
+    return {
+        "characters": [
+            {"role": r, "name_in_story": r.title(), "short_description": f"a {r}"} for r in roles
+        ],
+        "topic": "A short story about something.",
+        "notes": "",
+    }
+
+
+def test_collected_brief_accepts_single_male():
+    CollectedBrief(**_brief(["male"]))
+
+
+def test_collected_brief_accepts_male_and_female():
+    CollectedBrief(**_brief(["male", "female"]))
+
+
+def test_collected_brief_accepts_full_cast():
+    CollectedBrief(**_brief(["male", "female", "mother"]))
+
+
+def test_collected_brief_rejects_mother_only():
+    with pytest.raises(ValidationError):
+        CollectedBrief(**_brief(["mother"]))
+
+
+def test_collected_brief_rejects_empty_cast():
+    with pytest.raises(ValidationError):
+        CollectedBrief(**_brief([]))
+
+
+def test_collected_brief_rejects_duplicate_role():
+    with pytest.raises(ValidationError):
+        CollectedBrief(**_brief(["male", "male"]))
+
+
+def test_collected_brief_rejects_too_many():
+    with pytest.raises(ValidationError):
+        CollectedBrief(
+            characters=[
+                {"role": "male", "name_in_story": "M", "short_description": "x"},
+                {"role": "female", "name_in_story": "F", "short_description": "x"},
+                {"role": "mother", "name_in_story": "Mo", "short_description": "x"},
+                {"role": "male", "name_in_story": "M2", "short_description": "x"},
+            ],
+            topic="t",
+            notes="",
+        )
+
+
+# ---- ChatResponse ----
+
+
+def test_chat_response_gathering_with_null_brief():
+    resp = ChatResponse(reply="Aha, povedz mi viac.", phase="gathering", collected_brief=None)
+    assert resp.phase == "gathering"
+
+
+def test_chat_response_gathering_rejects_brief():
+    with pytest.raises(ValidationError):
+        ChatResponse(
+            reply="x",
+            phase="gathering",
+            collected_brief=_brief(["male"]),  # type: ignore[arg-type]
+        )
+
+
+def test_chat_response_awaiting_confirmation_requires_brief():
+    with pytest.raises(ValidationError):
+        ChatResponse(reply="Súhlasíš?", phase="awaiting_confirmation", collected_brief=None)
+
+
+def test_chat_response_confirmed_requires_brief():
+    with pytest.raises(ValidationError):
+        ChatResponse(reply="Ide na to.", phase="confirmed", collected_brief=None)
+
+
+def test_chat_response_awaiting_confirmation_with_brief():
+    resp = ChatResponse(
+        reply="Súhlasíš?",
+        phase="awaiting_confirmation",
+        collected_brief=_brief(["male"]),  # type: ignore[arg-type]
+    )
+    assert resp.collected_brief is not None
+
+
+# ---- BuildStoryResponse ----
+
+VALID_STYLE_GUIDE = {
+    "overall_style_positive": "anime, mha style",
+    "overall_style_negative": "photorealistic",
+    "character_lora": "",
+    "character_baseline_description": "Warm light.",
+}
+
+
+def _build_story_payload(
+    *,
+    blocks: list[dict],
+    illustrations: list[dict],
+) -> dict:
+    return {
+        "story_title": "Krátky príbeh",
+        "story_blocks": blocks,
+        "style_guide": VALID_STYLE_GUIDE,
+        "illustrations": illustrations,
+    }
+
+
+def test_build_story_accepts_valid_minimal():
+    blocks = [
+        {"type": "paragraph", "text": "Začiatok. Stojí pri okne a pozerá sa von."},
+        {"type": "illustration", "scene_index": 0},
+        {"type": "paragraph", "text": "Koniec príbehu."},
+    ]
+    illustrations = [
         {
             "scene_index": 0,
-            "scene_excerpt": "Once upon a time...",
-            "concept": "A boy crying with tears on cheeks",
+            "scene_excerpt": "Stojí pri okne a pozerá sa von.",
+            "concept": "boy at window, contemplative",
+            "character_role": "male",
+        }
+    ]
+    resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+    assert len(resp.story_blocks) == 3
+    assert len(resp.illustrations) == 1
+
+
+def test_build_story_rejects_starting_with_illustration():
+    blocks = [
+        {"type": "illustration", "scene_index": 0},
+        {"type": "paragraph", "text": "Koniec."},
+    ]
+    illustrations = [
+        {
+            "scene_index": 0,
+            "scene_excerpt": "Koniec.",
+            "concept": "x",
+            "character_role": "male",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_ending_with_illustration():
+    blocks = [
+        {"type": "paragraph", "text": "Začiatok textu."},
+        {"type": "illustration", "scene_index": 0},
+    ]
+    illustrations = [
+        {
+            "scene_index": 0,
+            "scene_excerpt": "Začiatok textu.",
+            "concept": "x",
+            "character_role": "male",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_adjacent_illustrations():
+    blocks = [
+        {"type": "paragraph", "text": "P1 obsah."},
+        {"type": "illustration", "scene_index": 0},
+        {"type": "illustration", "scene_index": 1},
+        {"type": "paragraph", "text": "P2 obsah."},
+    ]
+    illustrations = [
+        {
+            "scene_index": 0,
+            "scene_excerpt": "P1 obsah.",
+            "concept": "x",
             "character_role": "male",
         },
         {
             "scene_index": 1,
-            "scene_excerpt": "She met a dragon.",
-            "concept": "A girl looking determined",
+            "scene_excerpt": "P2 obsah.",
+            "concept": "y",
             "character_role": "female",
         },
-    ],
-}
-
-
-def test_analyze_story_accepts_valid():
-    resp = AnalyzeStoryResponse(**VALID_ANALYZE_STORY)
-    assert len(resp.illustrations) == 2
-    assert resp.style_guide.character_lora == ""
-
-
-def test_analyze_story_rejects_missing_style_guide():
-    data = {**VALID_ANALYZE_STORY}
-    del data["style_guide"]
+    ]
     with pytest.raises(ValidationError):
-        AnalyzeStoryResponse(**data)
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
 
 
-def test_analyze_story_rejects_wrong_type():
-    data = {**VALID_ANALYZE_STORY, "illustrations": "not a list"}
-    with pytest.raises(ValidationError):
-        AnalyzeStoryResponse(**data)
-
-
-def test_analyze_story_truncates_to_max_illustrations():
-    many_illustrations = [
+def test_build_story_rejects_out_of_order_block_indices():
+    blocks = [
+        {"type": "paragraph", "text": "P1 obsah."},
+        {"type": "illustration", "scene_index": 1},
+        {"type": "paragraph", "text": "P2 obsah."},
+    ]
+    illustrations = [
         {
-            "scene_index": i,
-            "scene_excerpt": f"Scene {i}",
-            "concept": f"Concept {i}",
+            "scene_index": 1,
+            "scene_excerpt": "P1 obsah.",
+            "concept": "x",
             "character_role": "male",
         }
-        for i in range(MAX_ILLUSTRATIONS + 3)
     ]
-    data = {**VALID_ANALYZE_STORY, "illustrations": many_illustrations}
-    resp = AnalyzeStoryResponse(**data)
-    assert len(resp.illustrations) == MAX_ILLUSTRATIONS
-
-
-def test_analyze_story_empty_illustrations_is_valid():
-    """Empty illustrations array signals NO_SUITABLE_SCENES — must not be a schema error."""
-    data = {**VALID_ANALYZE_STORY, "illustrations": []}
-    resp = AnalyzeStoryResponse(**data)
-    assert resp.illustrations == []
-
-
-def test_analyze_story_character_role_valid_values():
-    for role in ("male", "female", "mother"):
-        data = {
-            **VALID_ANALYZE_STORY,
-            "illustrations": [
-                {
-                    "scene_index": 0,
-                    "scene_excerpt": "...",
-                    "concept": "Some concept",
-                    "character_role": role,
-                }
-            ],
-        }
-        resp = AnalyzeStoryResponse(**data)
-        assert resp.illustrations[0].character_role == role
-
-
-def test_analyze_story_character_role_invalid_value():
-    data = {
-        **VALID_ANALYZE_STORY,
-        "illustrations": [
-            {
-                "scene_index": 0,
-                "scene_excerpt": "...",
-                "concept": "Some concept",
-                "character_role": "villain",
-            }
-        ],
-    }
     with pytest.raises(ValidationError):
-        AnalyzeStoryResponse(**data)
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_excerpt_not_in_paragraph():
+    blocks = [
+        {"type": "paragraph", "text": "P1 obsah."},
+        {"type": "illustration", "scene_index": 0},
+        {"type": "paragraph", "text": "P2 obsah."},
+    ]
+    illustrations = [
+        {
+            "scene_index": 0,
+            "scene_excerpt": "Tento text v žiadnom odseku nie je.",
+            "concept": "x",
+            "character_role": "male",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_more_than_max_illustrations():
+    # Build (MAX + 2) illustration blocks. The illustrations array gets
+    # truncated to MAX by the field validator, which then mismatches the
+    # block list and raises. This verifies the cap is enforced end-to-end.
+    n = MAX_ILLUSTRATIONS + 2
+    blocks: list[dict] = []
+    for i in range(n):
+        blocks.append({"type": "paragraph", "text": f"Para {i}."})
+        blocks.append({"type": "illustration", "scene_index": i})
+    blocks.append({"type": "paragraph", "text": "End."})
+    illustrations = [
+        {
+            "scene_index": i,
+            "scene_excerpt": f"Para {i}.",
+            "concept": f"c{i}",
+            "character_role": "male",
+        }
+        for i in range(n)
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
 
 
 # ---- GeneratePromptsResponse ----
 
 VALID_GENERATE_PROMPTS = {
-    "character_positive": "brave knight, armor",
-    "character_negative": "blurry, deformed",
-    "environment": "enchanted forest, magical",
+    "positive": "brave knight, armor, enchanted forest, magical",
+    "negative": "blurry, deformed",
 }
 
 
 def test_generate_prompts_accepts_valid():
     resp = GeneratePromptsResponse(**VALID_GENERATE_PROMPTS)
-    assert resp.character_positive == "brave knight, armor"
+    assert resp.positive == "brave knight, armor, enchanted forest, magical"
 
 
 def test_generate_prompts_rejects_missing_field():
-    data = {"character_positive": "x", "character_negative": "y"}
+    data = {"positive": "x"}
     with pytest.raises(ValidationError):
         GeneratePromptsResponse(**data)
 
 
 def test_generate_prompts_rejects_wrong_type():
-    data = {**VALID_GENERATE_PROMPTS, "environment": 123}
+    data = {**VALID_GENERATE_PROMPTS, "negative": 123}
     with pytest.raises(ValidationError):
         GeneratePromptsResponse(**data)
 
@@ -196,12 +347,12 @@ def test_evaluate_image_rejects_missing_reasoning():
 
 def test_revise_prompts_accepts_valid():
     resp = RevisePromptsResponse(**VALID_GENERATE_PROMPTS)
-    assert resp.environment == "enchanted forest, magical"
+    assert resp.negative == "blurry, deformed"
 
 
 def test_revise_prompts_rejects_missing():
     with pytest.raises(ValidationError):
-        RevisePromptsResponse(character_positive="x")
+        RevisePromptsResponse(positive="x")
 
 
 # ---- RethinkConceptResponse ----

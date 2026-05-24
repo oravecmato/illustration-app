@@ -122,9 +122,8 @@ async def run_branch(
 
             # Build workflow with current prompts + style guide
             replacements = {
-                "CHARACTER_POSITIVE_PROMPT": prompts.character_positive,
-                "CHARACTER_NEGATIVE_PROMPT": prompts.character_negative,
-                "ENVIRONMENT_PROMPT": prompts.environment,
+                "POSITIVE_PROMPT": prompts.positive,
+                "NEGATIVE_PROMPT": prompts.negative,
                 "CHARACTER_LORA": char_lora,
                 "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
                 "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,

@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
-import type { Run, Illustration, SseEvent } from "@/types";
-import { postRun, getRun, cancelRun, openSseStream } from "@/services/api";
+import { computed, ref } from "vue";
+import type { Illustration, Run, SseEvent } from "@/types";
+import { cancelRun, getRun, openSseStream } from "@/services/api";
 
 export const useRunStore = defineStore("run", () => {
   const run = ref<Run | null>(null);
@@ -11,6 +11,14 @@ export const useRunStore = defineStore("run", () => {
 
   let eventSource: EventSource | null = null;
 
+  const illustrationByScene = computed<Map<number, Illustration>>(() => {
+    const map = new Map<number, Illustration>();
+    for (const ill of illustrations.value) {
+      map.set(ill.scene_index, ill);
+    }
+    return map;
+  });
+
   function handleSseEvent(event: SseEvent): void {
     switch (event.type) {
       case "snapshot": {
@@ -18,15 +26,8 @@ export const useRunStore = defineStore("run", () => {
         illustrations.value = [...event.data.illustrations];
         break;
       }
-      case "style_guide_ready": {
-        if (run.value) {
-          run.value.style_guide = event.data.style_guide;
-          run.value.illustration_count = event.data.illustration_count;
-        }
-        break;
-      }
       case "illustration_state": {
-        const ill = illustrations.value.find((i: Illustration) => i.id === event.data.illustration_id);
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {
           ill.state = event.data.state;
           ill.concept_attempt = event.data.concept_attempt;
@@ -35,7 +36,7 @@ export const useRunStore = defineStore("run", () => {
         break;
       }
       case "illustration_completed": {
-        const ill = illustrations.value.find((i: Illustration) => i.id === event.data.illustration_id);
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {
           ill.state = "COMPLETED";
           ill.image_url = event.data.image_url;
@@ -46,10 +47,9 @@ export const useRunStore = defineStore("run", () => {
         break;
       }
       case "illustration_failed": {
-        const ill = illustrations.value.find((i: Illustration) => i.id === event.data.illustration_id);
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {
           ill.state = "FAILED";
-          ill.error_message = event.data.error_message;
         }
         if (run.value) {
           run.value.failed_count++;
@@ -86,11 +86,6 @@ export const useRunStore = defineStore("run", () => {
     }
   }
 
-  async function startRun(storyText: string): Promise<string> {
-    const { run_id } = await postRun(storyText);
-    return run_id;
-  }
-
   async function loadRun(runId: string): Promise<void> {
     const data = await getRun(runId);
     run.value = data.run;
@@ -111,7 +106,7 @@ export const useRunStore = defineStore("run", () => {
         isConnecting.value = false;
         sseError.value = "Spojenie prerušené";
         console.error("SSE error", err);
-      }
+      },
     );
   }
 
@@ -128,16 +123,25 @@ export const useRunStore = defineStore("run", () => {
     }
   }
 
+  function reset(): void {
+    unsubscribe();
+    run.value = null;
+    illustrations.value = [];
+    isConnecting.value = false;
+    sseError.value = null;
+  }
+
   return {
     run,
     illustrations,
+    illustrationByScene,
     isConnecting,
     sseError,
     handleSseEvent,
-    startRun,
     loadRun,
     subscribe,
     unsubscribe,
     cancel,
+    reset,
   };
 });
