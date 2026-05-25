@@ -160,3 +160,11 @@ RevisePromptsResponse = GeneratePromptsResponse
 
 class RethinkConceptResponse(BaseModel):
     concept: str
+    paragraph_text: str
+    scene_excerpt: str
+
+    @model_validator(mode="after")
+    def _validate_excerpt_in_paragraph(self) -> "RethinkConceptResponse":
+        if self.scene_excerpt not in self.paragraph_text:
+            raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
+        return self

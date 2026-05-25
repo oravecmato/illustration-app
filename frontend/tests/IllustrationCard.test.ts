@@ -9,6 +9,7 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     id: "ill-1",
     scene_index: 0,
     scene_excerpt: "Once upon a time in a land far away...",
+    paragraph_index: 0,
     character_role: "male",
     current_concept: "A boy crying with tears on his cheeks",
     state: "PENDING",
@@ -137,33 +138,41 @@ describe("IllustrationCard", () => {
     expect(wrapper.classes()).toContain("cancelled");
   });
 
-  it("renders the current concept text", () => {
+  it("exposes the current concept via the ConceptPopover", () => {
     const wrapper = mount(IllustrationCard, {
       props: {
         illustration: makeIllustration({ current_concept: "A boy holding a kite" }),
       },
     });
-    const concept = wrapper.find("[data-testid='concept-text']");
-    expect(concept.exists()).toBe(true);
-    expect(concept.text()).toContain("A boy holding a kite");
+    const trigger = wrapper.find("[data-testid='concept-popover-trigger']");
+    expect(trigger.exists()).toBe(true);
+    const popover = wrapper.findComponent({ name: "ConceptPopover" });
+    expect(popover.exists()).toBe(true);
+    expect(popover.props("concept")).toBe("A boy holding a kite");
   });
 
-  it("reactively updates concept text when the same illustration object changes", async () => {
-    // Hold a reference to a reactive illustration object. The runStore
-    // mutates the same object's `current_concept` field on each
-    // `illustration_state` SSE event; the card must re-render without
-    // remounting (§ 9.1 Screen B).
+  it("reactively updates the concept passed to ConceptPopover", async () => {
+    // The runStore mutates the same object's `current_concept` field on
+    // each `illustration_state` SSE event; the card must re-render
+    // without remounting (§ 9.1 Screen B).
     const illustration = reactive(makeIllustration({ current_concept: "Initial concept" }));
     const wrapper = mount(IllustrationCard, {
       props: { illustration },
     });
-    expect(wrapper.find("[data-testid='concept-text']").text()).toContain("Initial concept");
+    const popover = wrapper.findComponent({ name: "ConceptPopover" });
+    expect(popover.props("concept")).toBe("Initial concept");
 
-    // Mutate the field in place (this mirrors what runStore does).
     illustration.current_concept = "Rethought concept";
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find("[data-testid='concept-text']").text()).toContain("Rethought concept");
-    expect(wrapper.find("[data-testid='concept-text']").text()).not.toContain("Initial concept");
+    expect(popover.props("concept")).toBe("Rethought concept");
+  });
+
+  it("renders an aspect-ratio skeleton placeholder while no image is ready", () => {
+    const wrapper = mount(IllustrationCard, {
+      props: { illustration: makeIllustration({ state: "RENDERING" }) },
+    });
+    const skeleton = wrapper.find(".skeleton-block.shape-rect");
+    expect(skeleton.exists()).toBe(true);
   });
 });

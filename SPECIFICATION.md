@@ -34,6 +34,19 @@ illustration progress cards stay visible below the story. Each illustration
 runs through its own per-image self-correction loop driven by Claude's
 visual evaluation.
 
+The story itself is not frozen at Agent 0b's output. When the per-image
+loop escalates to **Agent 4** (`rethink_concept`), Agent 4 is allowed —
+and in fact required — to also rewrite the surrounding paragraph so the
+new concept lands on a story beat the renderer can actually depict
+(§ 7.1 Call 4). Rewrites preserve the flow, linearity and logic of the
+story and are propagated to the live UI: the paragraph re-renders in
+place via the SSE `paragraph_updated` event (§ 8.4), having visibly
+displayed a skeleton loader while Agent 4 was thinking (§ 9.1 Screen B).
+The Pinia store on the client holds the **current** story content and is
+the single source of truth the UI binds to; the backend persists the
+same current content in `runs.story_blocks_json` so reconnects and
+snapshots also reflect the latest state (§ 5.3, § 8.3).
+
 The visual output style is anime/manga, rendered by an Illustrious-based
 SDXL ComfyUI workflow with character and style LoRAs. See § 7.3 for the
 full creative and prompting brief.
@@ -132,9 +145,12 @@ anime-illustrator/
     │   │   ├── ChatThread.vue
     │   │   ├── ChatMessage.vue
     │   │   ├── ChatComposer.vue
-    │   │   ├── StoryBlocks.vue
+    │   │   ├── StoryBlocks.vue         # renders the list of blocks
+    │   │   ├── StoryParagraph.vue      # one reactive paragraph block (§ 9.1)
     │   │   ├── InlineIllustration.vue
     │   │   ├── IllustrationCard.vue
+    │   │   ├── ConceptPopover.vue      # header info-icon + popover (§ 9.1)
+    │   │   ├── SkeletonBlock.vue       # generic skeleton loader (§ 9.1, § 9.3)
     │   │   ├── ProgressCounter.vue
     │   │   ├── RunErrorBanner.vue
     │   │   └── CancelButton.vue
@@ -317,7 +333,7 @@ from raw input text.
 | `updated_at`        | DATETIME     | UTC                                                         |
 | `status`            | TEXT (enum)  | `RUNNING` / `COMPLETED` / `FAILED` / `CANCELLED`            |
 | `story_title`       | TEXT         | The story's heading, produced by Agent 0b                   |
-| `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output)      |
+| `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output). **Mutable** — when Agent 4 rewrites a paragraph (§ 7.1 Call 4), the orchestrator overwrites the corresponding `paragraph` block's `text` field in this column before continuing the branch. The blocks structure (order, types, scene_index values) never changes after run creation; only individual paragraph `text` values do. |
 | `style_guide_json`  | TEXT         | JSON; populated at run creation (no longer null)            |
 | `illustration_count`| INTEGER      | Final count after Agent 0b (always exactly 5, per § 7.1)    |
 | `completed_count`   | INTEGER      | Successful illustrations                                    |
@@ -338,8 +354,9 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `id`                     | TEXT (UUID4) | Primary key                                                               |
 | `run_id`                 | TEXT FK      | → `runs.id`                                                               |
 | `scene_index`            | INTEGER      | 0..(illustration_count-1)                                                 |
-| `scene_excerpt`          | TEXT         | The passage of the generated story this scene depicts                     |
+| `scene_excerpt`          | TEXT         | The passage of the generated story this scene depicts. **Mutable** — Agent 4 (§ 7.1 Call 4) returns a new excerpt together with its rewritten paragraph; the orchestrator overwrites this column with the new excerpt before continuing the branch. The new excerpt is always a verbatim substring of the new paragraph text (re-validated server-side, same rule as Agent 0b). |
 | `character_role`         | TEXT (enum)  | `male` / `female` / `mother` — drives MHA character + LoRA selection      |
+| `paragraph_index`        | INTEGER      | 0-based index of the paragraph block (among the paragraph subset of `runs.story_blocks_json`) that this illustration is bound to — i.e. the paragraph block sitting immediately before the matching `illustration` block in document order. Persisted at run creation so the orchestrator and the frontend agree on which paragraph Agent 4 rewrites, independently of any later text changes. |
 | `initial_concept`        | TEXT         | The concept from Agent 0b; never mutated                                  |
 | `current_concept`        | TEXT         | Current concept (changes on concept restart)                              |
 | `state`                  | TEXT (enum)  | See § 6 state values                                                      |
@@ -378,7 +395,24 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 for concept_attempt in 1..MAX_CONCEPT_ATTEMPTS (3):       # initial + 2 restarts
     if concept_attempt > 1:
         state = RETHINKING_CONCEPT
-        current_concept = claude.rethink_concept(...)
+        # Agent 4 returns a new concept AND a rewritten paragraph + new
+        # excerpt (§ 7.1 Call 4). The orchestrator:
+        #   1. validates the new excerpt is a verbatim substring of the
+        #      new paragraph;
+        #   2. overwrites runs.story_blocks_json[paragraph_index].text;
+        #   3. overwrites illustrations.scene_excerpt;
+        #   4. emits SSE paragraph_updated{paragraph_index, text};
+        #   5. updates current_concept.
+        (current_concept, new_paragraph_text, new_scene_excerpt) =
+            claude.rethink_concept(
+                full_story_text=<latest joined paragraph blocks>,
+                current_paragraph_text=<latest paragraph at paragraph_index>,
+                scene_excerpt=<current excerpt>,
+                failed_concept=<previous current_concept>,
+                verdict=<last verdict>,
+                style_guide=...,
+                character_role=...,
+            )
     state = GENERATING_PROMPTS
     prompts = claude.generate_prompts(current_concept, style_guide)
     for prompt_attempt in 1..MAX_PROMPT_ATTEMPTS_PER_CONCEPT (3):
@@ -633,15 +667,86 @@ or
 
 #### Call 4 — `rethink_concept`
 
-**Input:** `current_concept`, last `verdict`, `scene_excerpt`, `style_guide`,
-`character_role`.
+Agent 4's job is broader than in the previous spec. It is no longer
+restricted to finding a different visual angle on the same paragraph; it
+is allowed (and required) to **rewrite the paragraph itself** so the new
+visual concept lands on a story beat the renderer can actually depict.
+The narrative arc, flow, and logic of the story must be preserved — the
+new paragraph is a functional substitute for the old one — but the
+particular *moment* the paragraph crystallizes can change as needed.
+
+**Input (to Claude):**
+
+- `current_concept` — the concept that just failed.
+- `verdict_reasoning`, `verdict_suggestion` — last evaluator verdict.
+- `failed_concept` — alias of `current_concept`, named explicitly so the
+  prompt can reference it as the thing to move away from.
+- `full_story_text` — the **current** full story prose, produced by
+  joining the `text` fields of every `paragraph` block in
+  `runs.story_blocks_json` in document order with single blank lines
+  between them. This reflects the latest state of the story including
+  any prior Agent 4 rewrites in other branches; the orchestrator reads
+  `runs.story_blocks_json` from the DB at the moment of the call.
+- `current_paragraph_text` — the **current** text of the paragraph this
+  illustration is bound to (the paragraph at
+  `illustrations.paragraph_index`).
+- `paragraph_index` — same value, passed for the agent's situational
+  awareness so it can speak about "the third paragraph" if useful.
+- `scene_excerpt` — the current excerpt within `current_paragraph_text`.
+- `style_guide`, `character_role`, `character_display` — unchanged from
+  before; used so the new concept and the new paragraph stay consistent
+  with the global visual continuity and the cast vocabulary.
 
 **Output schema:**
 ```json
 {
-  "concept": "string (a different concept for the SAME scene_excerpt)"
+  "concept": "string (a meaningfully different visual concept)",
+  "paragraph_text": "string (the rewritten Slovak paragraph that replaces current_paragraph_text)",
+  "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)"
 }
 ```
+
+Hard rules enforced by the prompt and re-checked server-side:
+
+1. **Functional equivalence of the paragraph.** `paragraph_text` must
+   replace `current_paragraph_text` in place inside `full_story_text`
+   without disrupting:
+   - the linearity and logic of the story arc,
+   - the smoothness of the transition from the **preceding** paragraph
+     into this one,
+   - the smoothness of the transition from this paragraph into the
+     **following** one.
+   Re-read the surrounding paragraphs and write a substitute that
+   slots in cleanly. Same Slovak voice and register as the rest of the
+   story (the persona-fragment shared with Agent 0b applies here too —
+   see § 7.4).
+2. **New concept addresses the failure.** The new `concept` must
+   deliberately avoid the failure mode described in `verdict_reasoning`
+   / `verdict_suggestion`. If the verdict said "two hands too close to
+   the mug caused fused fingers", the new concept must not put a hand
+   near a mug; ideally it changes the action entirely.
+3. **Excerpt validity.** `scene_excerpt` MUST be a verbatim substring
+   of the returned `paragraph_text` (whitespace-tolerant). The server
+   re-checks this and re-prompts on failure (same validator path used
+   by Agent 0b).
+4. **All Agent 0b story-design principles still apply (§ 7.3.9).** In
+   particular: single-character moment, concrete depictability
+   (named expression / gesture / action), no regional prompting / no
+   inpainting, no legible small objects or text in frame. The cast
+   constraint (§ 7.3.2) is preserved — the character_role does not
+   change. The system prompt of `rethink_concept.md` embeds the same
+   directives as `build_story.md` so the agent obeys them in identical
+   form (§ 7.4).
+5. **Out-of-band side effects.** Agent 4 must not change anything else
+   — it does not return a different `character_role`, does not invent
+   new characters, does not propose changing the story title, and does
+   not propose changes to other paragraphs. Its scope is exactly: one
+   paragraph, one concept, one excerpt.
+
+If the validated response violates any rule above, the server treats
+that as a Claude failure and re-prompts up to `CLAUDE_JSON_RETRY` (= 2)
+times. After that the branch ends as if Agent 4 returned nothing useful
+— concept_attempt exhaustion behavior (§ 6 loop semantics) takes over.
 
 ### 7.2 RunPod ComfyUI Serverless
 
@@ -939,6 +1044,14 @@ that violate these rules).
    again (the chat phase is over by the time Agent 0b runs). It must not
    produce a story that breaks the constraints to satisfy a wish.
 
+These seven principles apply unchanged to **Agent 4** when it rewrites a
+paragraph at concept-restart time (§ 7.1 Call 4). Agent 4 receives the
+full current story so it can keep the substitute paragraph consistent
+with the arc, the cast, and the neighbouring scenes. The single
+additional constraint it has — and that Agent 0b does not — is that the
+shape of the story (number of paragraphs, number of illustrations,
+their ordering) is fixed at run creation and must not be altered.
+
 ### 7.4 Agent prompt files
 
 Each Claude agent's system prompt lives in its own Markdown file under
@@ -988,7 +1101,16 @@ end-to-end and contain at minimum:
 Agents 0a and 0b share a short persona-fragment ("the assistant's voice")
 that is embedded into each file's text (copy-pasted, not imported) so
 that the user experiences a consistent voice across the chat and the
-generated story's narration.
+generated story's narration. **Agent 4 (`rethink_concept.md`) embeds the
+same persona-fragment and the full Story-design principles block
+verbatim from `build_story.md`** (copy-pasted into the file, not
+imported at runtime) — because Agent 4 is now also a story-writer when
+it substitutes a paragraph (§ 7.1 Call 4). Editing the principles
+therefore means editing both files; the agent prompt loader exercises
+the same files at startup, so the discipline is purely an authoring
+convention. A short comment block at the top of each principles section
+in `rethink_concept.md` names `build_story.md` as the source-of-truth
+sibling so future editors keep them in sync.
 
 ---
 
@@ -1165,6 +1287,7 @@ Response 200:
       "id": "uuid",
       "scene_index": 0,
       "scene_excerpt": "string",
+      "paragraph_index": 0,
       "character_role": "male|female|mother",
       "current_concept": "string",
       "state": "PENDING|...|COMPLETED|FAILED|CANCELLED",
@@ -1177,6 +1300,18 @@ Response 200:
 ```
 
 `image_url` is `null` until completed, then `/static/runs/<run_id>/scene_N.png`.
+
+`run.story_blocks` and `illustration.scene_excerpt` always reflect the
+**current** content — i.e. the latest state after any Agent 4 paragraph
+rewrites have been persisted (§ 5.3, § 5.4). Snapshot consumers
+therefore never need to reconcile their local view by reapplying
+historical `paragraph_updated` events; the snapshot is already up to
+date.
+
+`paragraph_index` is included so the frontend can locate the paragraph
+block this illustration is bound to without walking the blocks array.
+It is stable for the lifetime of the run — Agent 4 rewrites the
+paragraph's `text`, never its position.
 
 ### 8.4 `GET /api/runs/{run_id}/events`  (SSE)
 
@@ -1199,7 +1334,8 @@ SSE event types (`event:` field) and JSON payloads:
 | Event                       | Payload                                                                 |
 |-----------------------------|-------------------------------------------------------------------------|
 | `snapshot`                  | `{ "run": {...}, "illustrations": [...] }`                              |
-| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept" }` |
+| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept", "scene_excerpt" }` |
+| `paragraph_updated`         | `{ "paragraph_index", "text" }`                                         |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
 | `run_completed`             | `{ "completed": N, "failed": M }`                                       |
@@ -1220,6 +1356,35 @@ out-of-band reconciliation. In practice the field only meaningfully
 replaces the original concept with a new one; the frontend updates the
 matching `IllustrationCard` text in place when it observes a new value
 (see § 9.2.2).
+
+`illustration_state.scene_excerpt` is included for the same reason —
+Agent 4 can rewrite the paragraph and therefore the excerpt
+(§ 7.1 Call 4). It is emitted on every state transition; subscribers
+write it into the matching illustration object in place. Like
+`current_concept`, the field only meaningfully *changes* across a
+`RETHINKING_CONCEPT` cycle.
+
+`paragraph_updated` is a new event emitted exactly once per successful
+Agent 4 invocation, **after** the database has been updated with the
+new paragraph text and before the corresponding `illustration_state`
+event that flips the branch out of `RETHINKING_CONCEPT`. Its `text`
+field carries the new full paragraph text; `paragraph_index` matches
+`illustrations.paragraph_index` for the illustration that triggered the
+rewrite. Subscribers replace `story_blocks[paragraph_block_at_index].text`
+on the live `run` object in place — because Vue reactivity is
+field-level, this re-renders the matching `StoryParagraph` component
+without disturbing siblings. The order of paragraph blocks (and of all
+blocks generally) is fixed and never broadcast (§ 5.3).
+
+Per-Agent-4 ordering guarantee (one branch, one rethink cycle):
+
+1. `illustration_state` — `state="RETHINKING_CONCEPT"`, fields still
+   carry the *old* `current_concept` and `scene_excerpt` (the rethink
+   hasn't happened yet on the server when this event is emitted).
+2. `paragraph_updated` — the rewritten paragraph text, after server
+   persistence.
+3. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
+   the *new* `current_concept` and `scene_excerpt`.
 
 The stream closes after `run_completed`, `run_failed`, or `run_cancelled`.
 
@@ -1394,7 +1559,13 @@ illustrations, or the final state of a completed run.
    ("Naozaj zrušiť?" + Áno / Nie).
 6. **Story** (`StoryBlocks`): the heading `run.story_title` rendered as
    `<h1>`, followed by the ordered `run.story_blocks`:
-   - `paragraph` blocks render as `<p>` elements containing the prose.
+   - `paragraph` blocks render as a `StoryParagraph` component — one
+     instance per paragraph block — keyed by the paragraph's index in
+     the paragraph subset of `story_blocks`. Each `StoryParagraph`
+     receives that index plus a reactive reference to the block's
+     `text` field. It renders the prose in a `<p>` element and is the
+     **only** component allowed to read or render paragraph text. See
+     "Reactive paragraphs and skeletons" below.
    - `illustration` blocks render as `InlineIllustration` components
      keyed by `scene_index`. Initial state shows a centered loader
      (spinner + caption "Kreslím ilustráciu k tejto pasáži..."). When
@@ -1405,33 +1576,104 @@ illustrations, or the final state of a completed run.
      vytvoriť." On `CANCELLED`, shows a greyed-out placeholder.
 7. **Illustration cards grid** (`IllustrationCard` × N): below the end
    of the story, the same per-illustration progress cards as in the
-   previous spec. They show detailed state, attempt counters, scene
-   excerpts, errors, and (on completion) a thumbnail. They behave
-   exactly as before — they are the diagnostic / debug view that
-   complements the literary in-story rendering above.
+   previous spec, with the layout updates described below. They behave
+   as the diagnostic / debug view that complements the literary
+   in-story rendering above.
 
-**Each `IllustrationCard` shows:**
+**Reactive paragraphs and skeletons**
 
-- Scene number "Ilustrácia K".
+`StoryParagraph` is a thin reactive wrapper around one paragraph block.
+The component binds to two pieces of store state:
+
+1. The block's `text` (read via the runStore — see § 9.2.2). Because
+   Vue's reactivity is field-level, mutating
+   `run.story_blocks[i].text` on the existing reactive object causes
+   any mounted `StoryParagraph` bound to that field to re-render the
+   new text **in place**, without remount.
+2. A boolean `isRegenerating`, derived from the store getter
+   `runStore.isParagraphRegenerating(paragraphIndex)` (§ 9.2.2). It is
+   `true` whenever **any** illustration whose `paragraph_index` equals
+   this paragraph's index is in state `RETHINKING_CONCEPT`. (More than
+   one illustration may, in principle, point at the same paragraph;
+   the getter returns `true` if at least one matches.)
+
+While `isRegenerating` is `true`, `StoryParagraph` hides the prose and
+renders a **skeleton loader** (`SkeletonBlock`) in its place. The
+skeleton occupies the paragraph's natural vertical space (a few
+multi-line lines of pulsing placeholder), so the surrounding layout
+does not jump. When the SSE `paragraph_updated` event arrives, the
+store writes the new `text` to the block; immediately after, the
+following `illustration_state` event flips the branch out of
+`RETHINKING_CONCEPT`, which flips `isRegenerating` to `false`, which
+swaps the skeleton out for the freshly-updated prose — visually the
+user sees the skeleton resolve into new paragraph text.
+
+The initial story build by Agent 0b is **not** wrapped by this skeleton
+state. At Agent 0b time the run does not exist yet; the user is still
+on the chat screen. By the time the user reaches `/runs/:run_id` the
+story blocks are already populated. Skeletons only ever appear on a
+paragraph during a later Agent 4 rewrite cycle.
+
+**Skeletons inside `IllustrationCard` (replacing concept-as-text)**
+
+The card no longer displays the concept inline. Where the previous spec
+showed a `concept` text block, the card now shows either:
+
+- the **final image** (when `state === "COMPLETED"`), or
+- a **skeleton placeholder** in the same slot, mirroring the
+  illustration's aspect ratio.
+
+The skeleton's aspect ratio matches the actual generated image's aspect
+ratio (1:1 for the MVP workflow — see § 7.2 and the workflow's
+`empty_latent_image` dimensions). It is rendered via the shared
+`SkeletonBlock` component sized through CSS `aspect-ratio: 1 / 1`
+(falling back to a padding-bottom trick in older browsers if needed).
+While `state` is non-terminal, the skeleton pulses to convey activity.
+On `FAILED` it is replaced by the sad-face placeholder; on `CANCELLED`
+the card greys out as before. The skeleton must reserve the same space
+the final image would, so the cards grid does not reflow when images
+finish landing.
+
+**Concept popover in the card header**
+
+The current concept text moves into a popover. The card header gains a
+small info-icon (e.g. a question-mark or info glyph) at the right end
+of the header row, after the state label. On hover (desktop) or
+focus / tap (touch / keyboard) the icon reveals a popover containing:
+
+- A small label, e.g. "Aktuálny koncept".
+- The reactive `illustration.current_concept` text.
+- Below it, a subtler line "Pasáž príbehu:" followed by
+  `illustration.scene_excerpt` truncated to ~200 chars.
+
+The popover content stays reactive: when SSE `illustration_state`
+events update `current_concept` or `scene_excerpt`, an open popover
+re-renders in place. The popover component is provided by
+`floating-vue` (§ 9.5). Accessibility: the icon is a focusable
+`<button type="button">` with an `aria-label` (e.g. "Zobraziť koncept"),
+the popover is keyboard-dismissible (Esc), and it is also openable on
+keyboard focus, not only on hover.
+
+**Each `IllustrationCard` shows (revised list):**
+
+- Scene number "Ilustrácia K" (left of header).
 - The current state with its Slovak label (see § 6 table).
 - A small spinner / pulse animation while the state is non-terminal.
 - The current attempt counters if relevant: "pokus K/3" during
   `RENDERING`, attempt info also during `REVISING_PROMPTS` /
   `RETHINKING_CONCEPT`.
-- An excerpt-preview tooltip or expandable section showing
-  `scene_excerpt` (truncated to ~200 chars in the card body).
-- The **currently active concept text** for the scene, bound to
-  `illustration.current_concept` from the store. This field is
-  reactive: whenever an `illustration_state` SSE event arrives with a
-  changed `current_concept` (which happens when Agent 4 rethinks the
-  concept and the branch re-enters the prompt-generation loop), the
-  card re-renders the new text in place — no remount, no scroll jump,
-  no loss of expanded/collapsed UI state. A subtle fade or background
-  flash MAY be used to draw the eye to the change, but the update
-  itself MUST be purely reactive (no manual subscribe / re-fetch).
-- On `COMPLETED`: a thumbnail of the image (click to open original).
+- The **info-icon popover** (right of header) carrying the current
+  concept text and the scene excerpt (replaces the old in-body concept
+  text and excerpt-preview tooltip).
+- The **image slot** in the card body — skeleton (aspect 1:1) until
+  `COMPLETED`, then the actual thumbnail (click to open original).
 - On `FAILED`: a short error message (no retry button in MVP).
 - On `CANCELLED`: greyed-out card with label "Zrušené".
+
+Reactivity guarantees carried over from the previous spec still hold:
+when `current_concept` changes mid-flight (Agent 4 cycle), the
+popover's bound text updates in place, no remount, no scroll jump, no
+loss of expanded / collapsed UI state.
 
 **Behavior:**
 
@@ -1530,31 +1772,124 @@ Actions:
 - `unsubscribe()` → closes EventSource.
 - `cancel()` → POST cancel.
 
-Internal mutations triggered by SSE events update the right illustration
-in place by `illustration_id`. The store exposes a derived getter
-`illustrationByScene(sceneIndex)` so the `StoryBlocks` component can
-look up the live state of each inline illustration placeholder without
-duplicating state.
+Derived getters:
+- `illustrationByScene(sceneIndex)` — live illustration object for a
+  given scene_index. Used by `StoryBlocks` and `InlineIllustration` to
+  look up the current state of each inline placeholder without
+  duplicating state.
+- `isParagraphRegenerating(paragraphIndex): boolean` — `true` iff at
+  least one illustration whose `paragraph_index === paragraphIndex` is
+  currently in state `"RETHINKING_CONCEPT"`. Drives the skeleton state
+  on `StoryParagraph` (§ 9.1 Screen B).
+- `paragraphAt(paragraphIndex): ParagraphBlock | undefined` — returns
+  the paragraph block at the given index in the paragraph subset of
+  `run.story_blocks`. Used by `StoryParagraph` to read its `text`
+  reactively. Implementation note: the getter resolves the position in
+  the mixed `story_blocks` array (paragraphs interleaved with
+  illustrations) by counting paragraph blocks in document order.
 
-Specifically, the `illustration_state` handler MUST copy the event's
-`current_concept` into the corresponding `illustration` row whenever it
-is present in the payload (it is non-null on every state transition,
-per § 8.4). Because Vue's reactivity is field-level, simply assigning
-`illustration.current_concept = event.current_concept` on the existing
-reactive object is sufficient to refresh any component bound to that
-field — most notably `IllustrationCard` (§ 9.1, Screen B). No
-component-level subscription, watch, or manual re-render is needed.
+SSE handlers:
+
+- `snapshot` → replaces `run` and `illustrations` wholesale (this is
+  authoritative; § 8.4).
+- `illustration_state` → finds the illustration by `illustration_id`
+  and mutates the existing reactive object **in place**:
+  - `state`, `concept_attempt`, `prompt_attempt` always.
+  - `current_concept` — always copied from the payload (non-null on
+    every transition, per § 8.4).
+  - `scene_excerpt` — always copied from the payload. The excerpt can
+    change across an Agent 4 cycle (§ 7.1 Call 4); the assignment is
+    field-level so any component bound to it (most notably the concept
+    popover in `IllustrationCard`) re-renders without remount.
+- `paragraph_updated` → locate the paragraph block at
+  `event.paragraph_index` in the paragraph subset of
+  `run.story_blocks` and assign `block.text = event.text` on that
+  existing reactive object. Because the assignment is field-level, the
+  `StoryParagraph` bound to that block re-renders in place. The store
+  MUST NOT replace the whole `story_blocks` array or swap the block
+  object — both would force every `StoryParagraph` to remount and
+  break the skeleton-to-text crossfade. A reference-identity assertion
+  in the tests verifies this (§ 11.3).
+- `illustration_completed`, `illustration_failed`, `run_completed`,
+  `run_failed`, `run_cancelled`, `heartbeat` — as previously specified.
+
+The `paragraph_updated` and `illustration_state` events arrive in the
+order specified in § 8.4: the paragraph text is replaced *before* the
+illustration's state flips out of `RETHINKING_CONCEPT`, so the
+`isParagraphRegenerating(paragraphIndex)` getter is still `true` at
+the moment the text changes. Visually the skeleton is then dismissed
+by the very next event (the `illustration_state` carrying the new
+state). This means the user never sees the skeleton ahead of an empty
+or stale paragraph; the swap is single-frame.
 
 ### 9.3 Styling
 
 - Scoped SCSS per component.
 - A small `assets/styles/_tokens.scss` for shared variables (colors,
-  spacing, radii) and one global `_reset.scss`.
+  spacing, radii, font stacks) and one global `_reset.scss`.
 - Minimalistic visual style: light background, generous whitespace,
-  one accent color. No UI kit.
+  one accent color. No UI kit (the only third-party visual component
+  is the popover from `floating-vue` — § 9.5).
 - Chat bubbles use the accent color for the user side and a neutral
   surface for the assistant side; the welcome message visually matches
   other assistant messages.
+
+#### 9.3.1 Typography
+
+The app's typography is modelled on the Literature & Latte / Scrivener
+website (https://www.literatureandlatte.com/scrivener/overview) — a
+classical, literary, serif-dominant look that suits the app's purpose
+(reading a short illustrated story). Fonts are fetched **for free** from
+Google Fonts at runtime.
+
+- **Headings (`<h1>`, `<h2>`, story title, section headers):** `Unna`
+  from Google Fonts — the same display serif used by the Scrivener
+  site for `.fp-blog-heading` (`font-family: Unna, Georgia, serif;`).
+  Weights loaded: 400, 700.
+- **Body text (story paragraphs, chat bubbles, card labels, general
+  UI):** `Lora` from Google Fonts — a contemporary classical serif
+  that pairs cleanly with Unna and is comfortable at small sizes.
+  Weights loaded: 400, 600 (and 400-italic if needed for emphasis).
+- **Monospace** (used only for debug snippets if any): system
+  monospace stack. Not part of the literary aesthetic.
+
+Loading mechanics:
+
+- `index.html` includes a single `<link rel="stylesheet">` to the
+  Google Fonts CSS endpoint that requests both families with the
+  weights above (a single request with both `?family=Unna:wght@400;700`
+  and `&family=Lora:wght@400;600` parameters).
+- The two `preconnect` `<link>` tags recommended by Google
+  (`https://fonts.googleapis.com` and `https://fonts.gstatic.com`)
+  are included immediately before the stylesheet link so font
+  fetching starts in parallel with the rest of the boot.
+- `_tokens.scss` declares two SCSS variables — `$font-heading`,
+  `$font-body` — each ending with appropriate generic fallbacks
+  (`Georgia, "Times New Roman", serif`) so that any FOUT during font
+  download already lands on a sensible serif.
+- The global `body` selector sets `font-family: $font-body`;
+  `h1, h2, h3, h4, .story-title` select `$font-heading`.
+- No webfont self-hosting in MVP — the Google Fonts CDN is
+  authoritative. (If, after MVP, the operator decides to self-host
+  for offline use, the spec needs an explicit revision.)
+
+Fallback policy: if both fonts are unreachable (no network, ad-blockers,
+etc.), the page must still render readably with the serif fallback
+stack. This is a pure-CSS concern and requires no JS handling.
+
+#### 9.3.2 Skeleton aesthetics
+
+Skeletons are rendered by `SkeletonBlock`. The component takes a
+`shape` prop (`"line" | "block"` — lines for paragraph skeletons,
+blocks for image skeletons) and an optional `lines` prop (default `3`
+for the `"line"` shape) plus an optional `aspectRatio` for the
+`"block"` shape (default `"1 / 1"` for the IllustrationCard image
+slot, matching the workflow's 1:1 output).
+
+Visuals: a subtle linear-gradient sweep animation (background-position
+keyframe over ~1.6 s) over a neutral surface color from `_tokens.scss`.
+The animation respects `@media (prefers-reduced-motion: reduce)` and
+falls back to a static muted block in that case.
 
 ### 9.4 Error code → Slovak UX message mapping
 
@@ -1576,6 +1911,38 @@ Two mapping modules, both unit-tested.
 
 Unknown codes in either map fall back to the `INTERNAL_ERROR` message.
 `null` / `undefined` produces an empty string (the banner stays hidden).
+
+### 9.5 Popover component (`floating-vue`)
+
+The single third-party Vue component dependency is **`floating-vue`** —
+a lean popover / tooltip library built on `@floating-ui/dom`. It is
+added to `frontend/package.json` as a regular dependency. No other UI
+kit (PrimeVue, Vuetify, Headless UI, etc.) is introduced.
+
+Why `floating-vue`:
+
+- Headless / styleable: the popover container is a plain element the
+  app styles with scoped SCSS, so it inherits the app's tokens and
+  typography (§ 9.3.1) cleanly.
+- Lean: it ships only the popover / tooltip primitives we need; no
+  global theme, no reset, no opinionated components.
+- Accessible by default: handles focus management, ARIA attributes,
+  Esc to dismiss, and respects `prefers-reduced-motion`.
+
+Setup:
+
+- Imported in `src/main.ts` with `app.use(FloatingVue, { ... })`.
+- The library's CSS is imported once globally (`floating-vue/dist/style.css`).
+- A small wrapper component `ConceptPopover.vue` encapsulates the
+  app-specific styling and the icon button — every consumer
+  (currently only `IllustrationCard`) imports the wrapper, not
+  `floating-vue` directly, so future swaps are local.
+
+Usage rule: `floating-vue` is reserved for popover / tooltip surfaces
+where the trigger element is icon-sized. It is **not** used to build
+modals, dropdown menus, autocomplete lists, or anything else in this
+spec. Adding any new use of the library requires extending this
+section.
 
 ---
 
@@ -1648,9 +2015,38 @@ to chase 100 % line coverage.
     - `scene_excerpt` substring validator: passes when each excerpt
       appears verbatim in the joined paragraph text (whitespace-
       tolerant), rejects otherwise.
-- **Branch state machine** (`orchestrator/branch.py`): unchanged from
-  previous spec (happy path, prompt revision, concept restart, all
-  attempts exhausted, cancellation, correct character_config usage).
+- **Claude IO schema — Call 4 (`rethink_concept`):**
+  - Accepts a valid response `{ concept, paragraph_text, scene_excerpt }`.
+  - Rejects responses missing any of the three required fields.
+  - Server-side validator rejects responses where `scene_excerpt` is
+    not a verbatim substring of `paragraph_text` (whitespace-tolerant),
+    matching the Agent 0b excerpt rule (§ 7.1 Call 0b rule #3).
+- **Branch state machine** (`orchestrator/branch.py`):
+  - Existing scenarios (happy path, prompt revision, concept restart,
+    all attempts exhausted, cancellation, correct character_config
+    usage) continue to pass.
+  - **Agent 4 paragraph rewrite (new):** given a branch that fails its
+    first concept and triggers Agent 4, the mocked Agent 4 response
+    `{ concept, paragraph_text, scene_excerpt }` is applied:
+      - `runs.story_blocks_json` is updated so the paragraph at the
+        branch's `illustrations.paragraph_index` has the new `text`,
+        and no other block changes.
+      - `illustrations.scene_excerpt` is updated to the new excerpt;
+        `illustrations.current_concept` is updated to the new concept;
+        `illustrations.initial_concept` is **not** touched.
+      - An SSE `paragraph_updated{paragraph_index, text}` event is
+        emitted before the post-rethink `illustration_state` event,
+        per the ordering in § 8.4.
+      - A subsequent Agent 4 call on the same branch receives the
+        **already-rewritten** paragraph as `current_paragraph_text`
+        and the full latest story as `full_story_text` (verified by
+        intercepting the outgoing Claude request via respx and
+        inspecting the user-turn JSON payload).
+  - **Agent 4 invalid response → retry → fail:** mock Agent 4 to
+    return responses that violate the excerpt-substring rule
+    `CLAUDE_JSON_RETRY + 1` times in a row; the branch exhausts the
+    concept attempt and continues per § 6 loop semantics (no DB
+    mutation occurs from invalid responses).
 - **Pipeline / run creation** (`orchestrator/pipeline.py`):
   - Runs created with N=3 illustrations spawn 3 branches.
   - Runs created with N=5 succeed end-to-end (mocked clients).
@@ -1744,6 +2140,23 @@ as described in § 5.0.
   after the first branch transitions to `RENDERING`, verify final
   status `CANCELLED` and that branches transitioned to `CANCELLED`
   rather than continuing.
+- **Agent 4 paragraph rewrite end-to-end:** run the pipeline with
+  Agent 2 mocked to return `problem="concept"` on the first attempt
+  for one branch, and Agent 4 mocked to return a valid
+  `{concept, paragraph_text, scene_excerpt}` triple. Assert:
+  - The SSE stream contains a `paragraph_updated` event with the
+    matching `paragraph_index` and the new `text`, sandwiched in the
+    order specified in § 8.4 (between the `RETHINKING_CONCEPT`
+    `illustration_state` event and the following
+    `GENERATING_PROMPTS` `illustration_state` event).
+  - A subsequent `GET /api/runs/{run_id}` returns a `story_blocks`
+    payload where the paragraph at the relevant index carries the
+    new text (persistence verified).
+  - `illustrations[k].scene_excerpt` returned by the snapshot is the
+    new excerpt and is a verbatim substring of the new paragraph
+    text.
+  - `illustrations[k].initial_concept` is unchanged from Agent 0b's
+    original concept (immutable, per § 5.4).
 
 ### 11.3 Frontend unit (`frontend/tests/`)
 
@@ -1797,19 +2210,46 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
   - Reconciliation preserves array order (assertion: the index of the
     user message in `messages` is identical before and after the
     server response lands).
-- **IllustrationCard reactive concept text** (new test in the existing
-  card spec):
+- **IllustrationCard reactive concept text + popover** (revised):
+  - The card no longer renders `current_concept` as an inline body
+    text element. The concept text is reachable only via the
+    `ConceptPopover` trigger in the card header.
+  - Activating the popover trigger (programmatic focus or simulated
+    hover via the `floating-vue` test utilities, or a direct
+    `wrapper.get('.concept-popover-trigger').trigger('focus')`)
+    reveals an element containing the current `current_concept` text
+    and the current `scene_excerpt`.
   - Given an `IllustrationCard` mounted with an illustration whose
     `current_concept` is `"A"`, when the parent store updates the
-    same reactive object's `current_concept` to `"B"`, the rendered
-    DOM updates to show `"B"` without re-mounting the component.
-  - The card does NOT re-render or reset its expanded/collapsed UI
-    state when only `current_concept` changes (assert via a
-    `data-testid` or a counter prop that internal component state
-    survives the prop update).
+    same reactive object's `current_concept` to `"B"`, the popover
+    content updates to show `"B"` **without re-mounting** the card or
+    closing the popover (assert via component-instance identity
+    survival).
+  - The card's image slot renders a `SkeletonBlock` with the expected
+    aspect-ratio class while `state` is non-terminal, replaces it
+    with the `<img>` on `COMPLETED`, and the skeleton DOES NOT cause
+    grid reflow when the image lands (assert the slot keeps the same
+    bounding box height across the transition by checking computed
+    `aspect-ratio` or padding-bottom).
+- **StoryParagraph** (new test file):
+  - Mounts a `StoryParagraph` bound to a paragraph block at index `i`.
+  - Initially renders the block's `text` in a `<p>`.
+  - When `runStore.isParagraphRegenerating(i)` becomes `true`, the
+    component swaps the `<p>` for a `SkeletonBlock` (assert via
+    `data-testid="paragraph-skeleton"` presence). The prose `<p>` is
+    no longer in the DOM during this state.
+  - When the block's `text` is mutated on the same reactive object
+    (simulating `paragraph_updated`) and then `isParagraphRegenerating`
+    flips back to `false`, the `<p>` reappears with the **new** text,
+    and `StoryParagraph` has NOT been remounted (assert via stable
+    component instance / element reference).
+  - Initial mount (run page first load, no rethink in flight) renders
+    the prose, never the skeleton — Agent 0b's output is not
+    skeleton-gated (§ 9.1).
 - **StoryBlocks / InlineIllustration:**
-  - Renders `paragraph` blocks as `<p>` and `illustration` blocks as
-    `<InlineIllustration>` keyed by `scene_index`.
+  - Renders `paragraph` blocks as `<StoryParagraph>` (one per
+    paragraph block, keyed by paragraph index) and `illustration`
+    blocks as `<InlineIllustration>` keyed by `scene_index`.
   - `InlineIllustration` shows a loader when the matching illustration
     state is non-terminal, the image when `COMPLETED`, a sad-face
     placeholder when `FAILED`, and a grey placeholder when `CANCELLED`.
@@ -1823,6 +2263,21 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     new value onto the existing illustration object (asserted by
     holding a reference to the object before the event and observing
     the field change post-event without object identity changing).
+  - `illustration_state` with a changed `scene_excerpt` writes the
+    new value onto the existing illustration object (same reference-
+    survival assertion as `current_concept`).
+  - `paragraph_updated` mutates `run.story_blocks[<paragraph block at
+    event.paragraph_index>].text` on the **existing** block object
+    (reference-identity assertion: the block object retrieved before
+    the event is the same JS object after the event, only its `text`
+    has changed). The mutation does NOT replace the `story_blocks`
+    array.
+  - `isParagraphRegenerating(i)` returns `true` when any illustration
+    whose `paragraph_index === i` is in state `RETHINKING_CONCEPT`,
+    and `false` otherwise. Tested by seeding illustrations in mixed
+    states and asserting the getter for every paragraph index.
+  - `paragraphAt(i)` returns the i-th paragraph block in document
+    order (skipping illustration blocks).
   - `illustration_completed` sets `image_url`.
   - `run_cancelled` sets run status correctly and unsubscribes.
   - `run_failed` sets `error_code` and `error_message`, transitions
@@ -1932,10 +2387,23 @@ The MVP is considered complete when:
    illustrations showing loaders, while the illustration cards below
    the story show live progress via SSE. Loaders are replaced by the
    final images as each one completes. When the orchestrator loops
-   through `RETHINKING_CONCEPT` for a given illustration, the concept
-   text displayed in that illustration's card visibly updates in
-   place — without the card being remounted and without other cards
-   being disturbed.
+   through `RETHINKING_CONCEPT` for a given illustration:
+   - The illustration's bound paragraph swaps to a **skeleton loader**
+     (via `StoryParagraph` + `SkeletonBlock`) for the duration of
+     Agent 4's work, then reveals the **rewritten paragraph text** in
+     place when the `paragraph_updated` SSE event arrives. The change
+     is purely reactive — no remount of `StoryParagraph`, no scroll
+     jump, no disturbance of any other paragraph.
+   - The matching `IllustrationCard` keeps an aspect-ratio skeleton in
+     its image slot (rather than displaying concept text) until the
+     image actually arrives. Hovering / focusing the info-icon in the
+     card header reveals the (now-updated) concept text and the
+     (now-updated) scene excerpt via the `floating-vue` popover; the
+     popover content is reactive.
+   - The card's internal UI state (expanded info, popover open state)
+     survives the concept change without being reset.
+   - Other illustrations and other cards are not disturbed by another
+     branch's rethink cycle.
 5. Cancelling an in-flight run brings it to `CANCELLED` within a few
    seconds, and the UI reflects this in both the inline placeholders
    and the cards.
@@ -1951,3 +2419,19 @@ The MVP is considered complete when:
 9. Editing any agent prompt `.md` file and restarting the backend
    visibly changes that agent's behavior on the next call (verified by
    manual smoke test, not automated).
+10. **Typography.** On a freshly loaded page (any screen), `Unna`
+    (headings) and `Lora` (body) are fetched from Google Fonts and
+    applied. With network DevTools open, exactly two font CSS
+    families are requested from `fonts.googleapis.com`. If both
+    fonts are blocked or fail to load, the page still renders
+    readably with the serif fallback stack defined in `_tokens.scss`
+    (manual smoke test).
+11. **Agent 4 paragraph rewrite, end-to-end.** With the orchestrator
+    configured to force a first-pass image evaluation failure with
+    `problem="concept"`, the run reaches the `RETHINKING_CONCEPT`
+    state for the affected illustration; an SSE
+    `paragraph_updated{paragraph_index, text}` event is observable
+    on the wire; the affected paragraph's prose visibly changes on
+    `/runs/:id` without page reload; a subsequent `GET /api/runs/:id`
+    snapshot returns `story_blocks` carrying the rewritten paragraph
+    text (i.e. the change is persisted, not merely visual).

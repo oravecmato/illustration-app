@@ -269,23 +269,43 @@ class ClaudeClient:
         self,
         current_concept: str,
         verdict: EvaluateImageResponse,
-        scene_excerpt: str,
-        style_guide: StyleGuide,  # noqa: ARG002 - kept for call-site symmetry
+        current_scene_excerpt: str,
+        story_title: str,
+        story_blocks: list[dict],
+        current_paragraph_index: int,
         character_role: str,
     ) -> RethinkConceptResponse:
         char_display = CHARACTER_ROLE_MAP[character_role]
+        # Render the full story for the agent: paragraph texts inline,
+        # illustration blocks as numbered markers so the agent can see where
+        # in the arc each illustration sits.
+        rendered_blocks: list[str] = []
+        for idx, block in enumerate(story_blocks):
+            if block["type"] == "paragraph":
+                tag = " (this paragraph)" if idx == current_paragraph_index else ""
+                rendered_blocks.append(f"[BLOCK {idx} PARAGRAPH{tag}]\n{block['text']}")
+            else:
+                rendered_blocks.append(f"[BLOCK {idx} ILLUSTRATION {block['scene_index']}]")
+        full_story = "\n\n".join(rendered_blocks)
+        current_paragraph_text = story_blocks[current_paragraph_index]["text"]
+
         user_text = (
             f"character_display: {char_display}\n"
             f"character_role: {character_role}\n\n"
-            f"scene_excerpt: {scene_excerpt}\n"
+            f"story_title: {story_title}\n\n"
+            f"full_story:\n{full_story}\n\n"
+            f"current_paragraph_index: {current_paragraph_index}\n"
+            f"current_paragraph_text: {current_paragraph_text}\n"
+            f"current_scene_excerpt: {current_scene_excerpt}\n"
             f"failed_concept: {current_concept}\n"
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
-            'Respond with JSON: {"concept": "..."}'
+            "Respond with the JSON object specified in your instructions."
         )
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=RethinkConceptResponse,
             system=self._prompts["rethink_concept"],
+            max_tokens=2048,
         )
         return result  # type: ignore[return-value]

@@ -40,6 +40,7 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     id: "ill-1",
     scene_index: 0,
     scene_excerpt: "Once upon a time...",
+    paragraph_index: 0,
     character_role: "male",
     current_concept: "A boy crying",
     state: "PENDING",
@@ -106,6 +107,7 @@ describe("runStore", () => {
         concept_attempt: 1,
         prompt_attempt: 1,
         current_concept: "A boy crying",
+        scene_excerpt: "Once upon a time...",
       },
     });
 
@@ -140,6 +142,7 @@ describe("runStore", () => {
         concept_attempt: 2,
         prompt_attempt: 1,
         current_concept: "Rethought",
+        scene_excerpt: "Once upon a time...",
       },
     });
 
@@ -212,6 +215,7 @@ describe("runStore", () => {
           concept_attempt: 1,
           prompt_attempt: 1,
           current_concept: "any",
+          scene_excerpt: "any",
         },
       });
     }).not.toThrow();
@@ -245,6 +249,110 @@ describe("runStore", () => {
     expect(store.run?.status).toBe("FAILED");
     expect(store.run?.error_code).toBe("STORY_BUILD_FAILED");
     expect(store.run?.error_message).toBe("Story build failed.");
+  });
+
+  it("illustration_state event mutates scene_excerpt in place", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [
+          makeIllustration({ id: "ill-1", scene_excerpt: "Original excerpt" }),
+        ],
+      },
+    });
+
+    const originalRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    store.handleSseEvent({
+      type: "illustration_state",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        state: "GENERATING_PROMPTS",
+        concept_attempt: 2,
+        prompt_attempt: 1,
+        current_concept: "New concept",
+        scene_excerpt: "Rewritten excerpt",
+      },
+    });
+
+    const afterRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(afterRef).toBe(originalRef);
+    expect(afterRef?.scene_excerpt).toBe("Rewritten excerpt");
+  });
+
+  it("paragraph_updated event rewrites the matching paragraph block in place", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun({
+          story_blocks: [
+            { type: "paragraph", text: "Pôvodný odsek." },
+            { type: "illustration", scene_index: 0 },
+            { type: "paragraph", text: "Druhý odsek." },
+          ],
+        }),
+        illustrations: [],
+      },
+    });
+
+    store.handleSseEvent({
+      type: "paragraph_updated",
+      data: { paragraph_index: 0, text: "Prepísaný odsek." },
+    });
+
+    expect(store.run?.story_blocks[0]).toEqual({
+      type: "paragraph",
+      text: "Prepísaný odsek.",
+    });
+    // Other blocks unchanged
+    expect(store.run?.story_blocks[2]).toEqual({
+      type: "paragraph",
+      text: "Druhý odsek.",
+    });
+  });
+
+  it("paragraphAt and isParagraphRegenerating expose paragraph state for the view", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun({
+          story_blocks: [
+            { type: "paragraph", text: "Prvý odsek." },
+            { type: "illustration", scene_index: 0 },
+          ],
+        }),
+        illustrations: [
+          makeIllustration({
+            id: "ill-1",
+            scene_index: 0,
+            paragraph_index: 0,
+            state: "RENDERING",
+          }),
+        ],
+      },
+    });
+
+    expect(store.paragraphAt(0)).toBe("Prvý odsek.");
+    expect(store.isParagraphRegenerating(0)).toBe(false);
+
+    store.handleSseEvent({
+      type: "illustration_state",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        state: "RETHINKING_CONCEPT",
+        concept_attempt: 2,
+        prompt_attempt: 1,
+        current_concept: "New concept",
+        scene_excerpt: "Once upon a time...",
+      },
+    });
+
+    expect(store.isParagraphRegenerating(0)).toBe(true);
   });
 
   it("reset() clears run and illustrations", () => {

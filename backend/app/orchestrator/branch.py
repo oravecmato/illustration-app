@@ -28,10 +28,15 @@ async def run_branch(
     event_bus: EventBus,
     cancel_flag: asyncio.Event,
     character_config: dict | None = None,
+    story_title: str = "",
+    story_blocks: list[dict] | None = None,
+    story_lock: asyncio.Lock | None = None,
 ) -> None:
     """Run the state machine for a single illustration branch."""
     char_config = character_config or {}
     character_role = illustration.character_role
+    blocks = story_blocks if story_blocks is not None else []
+    lock = story_lock or asyncio.Lock()
 
     async def transition(state: IllustrationState, **extra) -> None:
         await repo.update_illustration(illustration, state=state, **extra)
@@ -43,10 +48,12 @@ async def run_branch(
                 "state": state,
                 "concept_attempt": illustration.concept_attempt,
                 "prompt_attempt": illustration.prompt_attempt,
-                # Surface the currently-active concept so the frontend
-                # can reactively re-render the IllustrationCard's
-                # concept text when Agent 4 rethinks it (§ 8.4, § 9.1).
+                # Surface the currently-active concept + excerpt so the
+                # frontend can reactively re-render the IllustrationCard's
+                # concept and excerpt text when Agent 4 rethinks them
+                # (§ 8.4, § 9.1, § 9.5).
                 "current_concept": illustration.current_concept,
+                "scene_excerpt": illustration.scene_excerpt,
             },
         )
 
@@ -70,11 +77,12 @@ async def run_branch(
                 rethink_result = await claude.rethink_concept(
                     current_concept=illustration.current_concept,
                     verdict=_load_last_verdict(illustration),
-                    scene_excerpt=illustration.scene_excerpt,
-                    style_guide=style_guide,
+                    current_scene_excerpt=illustration.scene_excerpt,
+                    story_title=story_title,
+                    story_blocks=blocks,
+                    current_paragraph_index=illustration.paragraph_index,
                     character_role=character_role,
                 )
-                await repo.update_illustration(illustration, current_concept=rethink_result.concept)
             except Exception as e:
                 logger.error("rethink_concept failed: %s", e)
                 await transition(
@@ -82,6 +90,38 @@ async def run_branch(
                     error_message=f"Concept rethink failed: {e}",
                 )
                 return
+
+            # Apply rewrite: mutate the shared in-memory story_blocks,
+            # persist the new story_blocks_json on the run, update the
+            # illustration's excerpt + concept, then publish
+            # paragraph_updated BEFORE the next illustration_state event
+            # so the frontend renders the new paragraph before clearing
+            # its regenerating-skeleton (§ 9.5).
+            paragraph_index = illustration.paragraph_index
+            async with lock:
+                if 0 <= paragraph_index < len(blocks):
+                    blocks[paragraph_index] = {
+                        "type": "paragraph",
+                        "text": rethink_result.paragraph_text,
+                    }
+                run_obj = await repo.get_run(illustration.run_id)
+                if run_obj is not None:
+                    await repo.update_run(
+                        run_obj,
+                        story_blocks_json=json.dumps(blocks, ensure_ascii=False),
+                    )
+            await repo.update_illustration(
+                illustration,
+                current_concept=rethink_result.concept,
+                scene_excerpt=rethink_result.scene_excerpt,
+            )
+            await event_bus.publish(
+                "paragraph_updated",
+                {
+                    "paragraph_index": paragraph_index,
+                    "text": rethink_result.paragraph_text,
+                },
+            )
 
         # Generate prompts for current concept
         if cancel_flag.is_set():

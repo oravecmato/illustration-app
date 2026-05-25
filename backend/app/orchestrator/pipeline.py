@@ -42,6 +42,13 @@ async def run_pipeline(
     try:
         style_guide = StyleGuide(**json.loads(run.style_guide_json))
         illustrations = await repo.get_illustrations_for_run(run.id)
+        # Shared story context: branches read and write paragraph texts
+        # during Agent 4 (rethink_concept) cycles. The lock serializes
+        # concurrent read-modify-write of run.story_blocks_json.
+        story_blocks: list[dict] = (
+            json.loads(run.story_blocks_json) if run.story_blocks_json else []
+        )
+        story_lock = asyncio.Lock()
 
         if not illustrations:
             # build_story validator guarantees at least 1, but be defensive.
@@ -89,6 +96,9 @@ async def run_pipeline(
                             event_bus=event_bus,
                             cancel_flag=cancel_flag,
                             character_config=char_config,
+                            story_title=run.story_title,
+                            story_blocks=story_blocks,
+                            story_lock=story_lock,
                         )
                         # Sync state back to the in-memory illustration for counting
                         ill.state = branch_ill.state
@@ -104,6 +114,9 @@ async def run_pipeline(
                         event_bus=event_bus,
                         cancel_flag=cancel_flag,
                         character_config=char_config,
+                        story_title=run.story_title,
+                        story_blocks=story_blocks,
+                        story_lock=story_lock,
                     )
 
         await asyncio.gather(*[run_with_semaphore(ill) for ill in illustrations])
@@ -169,6 +182,7 @@ def _update_snapshot(event_bus: EventBus, run: Run, illustrations) -> None:
                     "id": ill.id,
                     "scene_index": ill.scene_index,
                     "scene_excerpt": ill.scene_excerpt,
+                    "paragraph_index": ill.paragraph_index,
                     "character_role": ill.character_role,
                     "current_concept": ill.current_concept,
                     "state": ill.state,

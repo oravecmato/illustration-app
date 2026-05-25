@@ -110,6 +110,7 @@ class Illustration(Base):
     run_id: Mapped[str] = mapped_column(String, ForeignKey("runs.id"), nullable=False)
     scene_index: Mapped[int] = mapped_column(Integer)
     scene_excerpt: Mapped[str] = mapped_column(Text)
+    paragraph_index: Mapped[int] = mapped_column(Integer)
     character_role: Mapped[str] = mapped_column(String)
     initial_concept: Mapped[str] = mapped_column(Text)
     current_concept: Mapped[str] = mapped_column(Text)

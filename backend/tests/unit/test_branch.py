@@ -46,7 +46,11 @@ VERDICT_FAIL_CONCEPT = EvaluateImageResponse(
     suggestion="Change concept",
 )
 
-RETHOUGHT_CONCEPT = RethinkConceptResponse(concept="New concept for the scene")
+RETHOUGHT_CONCEPT = RethinkConceptResponse(
+    concept="New concept for the scene",
+    paragraph_text="Stál pri okne a hľadel von. Pršalo a on plakal.",
+    scene_excerpt="Pršalo a on plakal.",
+)
 
 IMAGE_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
@@ -79,6 +83,7 @@ def make_illustration(run_id="run-1", scene_index=0, character_role="male"):
     ill.run_id = run_id
     ill.scene_index = scene_index
     ill.scene_excerpt = "Once upon a time..."
+    ill.paragraph_index = 0
     ill.character_role = character_role
     ill.initial_concept = "A boy crying in the rain"
     ill.current_concept = "A boy crying in the rain"
@@ -133,6 +138,11 @@ async def run_branch(illustration, style_guide, claude, runpod, cancel_flag=None
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         character_config=CHARACTER_CONFIG,
+        story_title="A short story",
+        story_blocks=[
+            {"type": "paragraph", "text": "Stál pri okne a hľadel von."},
+            {"type": "illustration", "scene_index": 0},
+        ],
     )
     return illustration
 

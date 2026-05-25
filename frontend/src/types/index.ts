@@ -102,6 +102,7 @@ export interface Illustration {
   id: string;
   scene_index: number;
   scene_excerpt: string;
+  paragraph_index: number;
   character_role: CharacterRole;
   current_concept: string;
   state: IllustrationState;
@@ -123,6 +124,12 @@ export interface IllustrationStateEvent {
   concept_attempt: number;
   prompt_attempt: number;
   current_concept: string;
+  scene_excerpt: string;
+}
+
+export interface ParagraphUpdatedEvent {
+  paragraph_index: number;
+  text: string;
 }
 
 export interface IllustrationCompletedEvent {
@@ -152,6 +159,7 @@ export type SseEvent =
   | { type: "illustration_state"; data: IllustrationStateEvent }
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
+  | { type: "paragraph_updated"; data: ParagraphUpdatedEvent }
   | { type: "run_completed"; data: RunCompletedEvent }
   | { type: "run_failed"; data: RunFailedEvent }
   | { type: "run_cancelled"; data: Record<string, never> }

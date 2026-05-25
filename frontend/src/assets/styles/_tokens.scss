@@ -15,3 +15,11 @@ $spacing-sm: 8px;
 $spacing-md: 16px;
 $spacing-lg: 24px;
 $spacing-xl: 48px;
+
+// Typography: classical serif pairing inspired by Scrivener — Unna for
+// titles/headings, Lora for body prose. Both are Google Fonts, loaded via
+// the <link> in index.html.
+$font-heading: "Unna", "Iowan Old Style", "Palatino Linotype", Palatino,
+  Georgia, serif;
+$font-body: "Lora", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+  serif;

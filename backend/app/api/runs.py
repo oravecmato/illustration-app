@@ -94,6 +94,7 @@ def _build_illustration_response(ill) -> IllustrationResponse:
         id=ill.id,
         scene_index=ill.scene_index,
         scene_excerpt=ill.scene_excerpt,
+        paragraph_index=ill.paragraph_index,
         character_role=ill.character_role,
         current_concept=ill.current_concept,
         state=ill.state,

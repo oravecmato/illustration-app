@@ -329,8 +329,13 @@ def test_revise_prompts_rejects_missing():
 
 
 def test_rethink_concept_accepts_valid():
-    resp = RethinkConceptResponse(concept="A completely new approach to the scene")
+    resp = RethinkConceptResponse(
+        concept="A completely new approach to the scene",
+        paragraph_text="Stál pri okne a hľadel von. Pršalo a on plakal.",
+        scene_excerpt="Pršalo a on plakal.",
+    )
     assert "new approach" in resp.concept
+    assert resp.scene_excerpt in resp.paragraph_text
 
 
 def test_rethink_concept_rejects_missing_concept():
@@ -340,4 +345,17 @@ def test_rethink_concept_rejects_missing_concept():
 
 def test_rethink_concept_rejects_wrong_type():
     with pytest.raises(ValidationError):
-        RethinkConceptResponse(concept=123)
+        RethinkConceptResponse(
+            concept=123,
+            paragraph_text="x",
+            scene_excerpt="x",
+        )
+
+
+def test_rethink_concept_rejects_excerpt_not_in_paragraph():
+    with pytest.raises(ValidationError):
+        RethinkConceptResponse(
+            concept="A new concept",
+            paragraph_text="Pršalo a on plakal.",
+            scene_excerpt="Slniečko svietilo.",
+        )

@@ -81,6 +81,7 @@ export function openSseStream(
     "illustration_state",
     "illustration_completed",
     "illustration_failed",
+    "paragraph_updated",
     "run_completed",
     "run_failed",
     "run_cancelled",

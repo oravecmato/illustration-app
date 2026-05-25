@@ -184,6 +184,18 @@ class SessionService:
         # Persist run + illustrations.
         import json as _json
 
+        # Walk story_blocks once to map each illustration scene_index to the
+        # index (within story_blocks) of the paragraph block immediately
+        # preceding it. The frontend uses paragraph_index to locate the
+        # paragraph that Agent 4 rewrites during RETHINKING_CONCEPT cycles.
+        paragraph_index_by_scene: dict[int, int] = {}
+        last_paragraph_index = -1
+        for block_index, block in enumerate(story.story_blocks):
+            if block.type == "paragraph":
+                last_paragraph_index = block_index
+            else:  # illustration
+                paragraph_index_by_scene[block.scene_index] = last_paragraph_index
+
         run = await run_repo.create_run(
             session_id=session_id,
             story_title=story.story_title,
@@ -200,6 +212,7 @@ class SessionService:
                 run_id=run.id,
                 scene_index=ill.scene_index,
                 scene_excerpt=ill.scene_excerpt,
+                paragraph_index=paragraph_index_by_scene[ill.scene_index],
                 concept=ill.concept,
                 character_role=ill.character_role,
             )
@@ -208,6 +221,7 @@ class SessionService:
                     "id": row.id,
                     "scene_index": row.scene_index,
                     "scene_excerpt": row.scene_excerpt,
+                    "paragraph_index": row.paragraph_index,
                     "character_role": row.character_role,
                     "current_concept": row.current_concept,
                     "state": row.state,

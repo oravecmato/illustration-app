@@ -1,9 +1,10 @@
 <template>
   <article class="story">
     <template v-for="(block, idx) in blocks" :key="idx">
-      <p v-if="block.type === 'paragraph'" class="paragraph">
-        {{ block.text }}
-      </p>
+      <StoryParagraph
+        v-if="block.type === 'paragraph'"
+        :paragraph-index="idx"
+      />
       <div v-else class="story-illustration">
         <IllustrationCard
           v-if="illustrationByScene.get(block.scene_index)"
@@ -19,6 +20,7 @@
 
 <script setup lang="ts">
 import IllustrationCard from "@/components/IllustrationCard.vue";
+import StoryParagraph from "@/components/StoryParagraph.vue";
 import type { Illustration, StoryBlock } from "@/types";
 
 defineProps<{
@@ -31,18 +33,11 @@ defineProps<{
 .story {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}
-
-.paragraph {
-  margin: 0;
-  font-size: 1.05rem;
-  line-height: 1.7;
-  color: #1a1a1a;
+  gap: 4px;
 }
 
 .story-illustration {
-  margin: 8px auto;
+  margin: 12px auto;
   width: 100%;
   max-width: 560px;
 }

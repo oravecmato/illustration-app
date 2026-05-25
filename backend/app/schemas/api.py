@@ -63,6 +63,7 @@ class IllustrationResponse(BaseModel):
     id: str
     scene_index: int
     scene_excerpt: str
+    paragraph_index: int
     character_role: str
     current_concept: str
     state: str

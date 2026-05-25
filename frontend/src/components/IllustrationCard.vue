@@ -11,6 +11,11 @@
       <span class="scene-number">Ilustrácia {{ illustration.scene_index + 1 }}</span>
       <span class="state-label">{{ stateLabel }}</span>
       <span v-if="isNonTerminal" class="spinner" aria-label="Načítava sa" />
+      <span class="header-spacer" />
+      <ConceptPopover
+        v-if="illustration.current_concept"
+        :concept="illustration.current_concept"
+      />
     </div>
 
     <div v-if="showAttemptCounter" class="attempt-counter">
@@ -21,28 +26,27 @@
       {{ truncatedExcerpt }}
     </div>
 
-    <div
-      v-if="illustration.current_concept"
-      class="concept-text"
-      data-testid="concept-text"
-    >
-      <span class="concept-label">Koncept:</span>
-      {{ illustration.current_concept }}
-    </div>
-
-    <template v-if="illustration.state === 'COMPLETED' && illustration.image_url">
-      <a :href="illustration.image_url" target="_blank" rel="noopener">
+    <div class="image-slot">
+      <a
+        v-if="illustration.state === 'COMPLETED' && illustration.image_url"
+        :href="illustration.image_url"
+        target="_blank"
+        rel="noopener"
+      >
         <img
           :src="illustration.image_url"
           :alt="`Ilustrácia ${illustration.scene_index + 1}`"
           class="illustration-image"
         />
       </a>
-    </template>
-
-    <div v-if="illustration.state === 'FAILED'" class="error-message">
-      <span class="sad-face">:(</span>
-      Túto ilustráciu sa nepodarilo vytvoriť.
+      <div
+        v-else-if="illustration.state === 'FAILED'"
+        class="image-failed"
+      >
+        <span class="sad-face">:(</span>
+        Túto ilustráciu sa nepodarilo vytvoriť.
+      </div>
+      <SkeletonBlock v-else shape="rect" aspect-ratio="1 / 1" />
     </div>
   </div>
 </template>
@@ -50,6 +54,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Illustration, IllustrationState } from "@/types";
+import ConceptPopover from "./ConceptPopover.vue";
+import SkeletonBlock from "./SkeletonBlock.vue";
 
 const props = defineProps<{ illustration: Illustration }>();
 
@@ -123,6 +129,7 @@ const truncatedExcerpt = computed(() => {
 }
 
 .scene-number {
+  font-family: var(--font-heading);
   font-weight: 600;
   color: #333;
 }
@@ -130,6 +137,10 @@ const truncatedExcerpt = computed(() => {
 .state-label {
   font-size: 0.85em;
   color: #666;
+}
+
+.header-spacer {
+  flex: 1 1 auto;
 }
 
 .spinner {
@@ -160,37 +171,44 @@ const truncatedExcerpt = computed(() => {
   font-style: italic;
   margin-bottom: 12px;
   line-height: 1.4;
+  font-family: var(--font-body);
 }
 
-.concept-text {
-  font-size: 0.85em;
-  color: #444;
-  margin-bottom: 12px;
-  line-height: 1.4;
-  padding: 8px 10px;
-  background: #f5f5f5;
-  border-radius: 4px;
-  transition: background-color 0.4s ease;
-}
-
-.concept-label {
-  font-weight: 600;
-  margin-right: 4px;
-  color: #2c2c2c;
+.image-slot {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
 }
 
 .illustration-image {
   width: 100%;
-  max-height: 400px;
-  object-fit: contain;
+  height: 100%;
+  object-fit: cover;
   border-radius: 4px;
   display: block;
 }
 
-.error-message {
+.image-slot a {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.image-failed {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
   color: #c62828;
-  font-size: 0.85em;
-  margin-top: 8px;
+  font-size: 0.9em;
+  background: #faf2f2;
+  border: 1px dashed #e7b6b6;
+  border-radius: 4px;
+  padding: 12px;
 }
 
 .sad-face {

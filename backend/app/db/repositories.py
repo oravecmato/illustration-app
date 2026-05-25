@@ -89,6 +89,7 @@ class RunRepository:
         run_id: str,
         scene_index: int,
         scene_excerpt: str,
+        paragraph_index: int,
         concept: str,
         character_role: str,
     ) -> Illustration:
@@ -96,6 +97,7 @@ class RunRepository:
             run_id=run_id,
             scene_index=scene_index,
             scene_excerpt=scene_excerpt,
+            paragraph_index=paragraph_index,
             character_role=character_role,
             initial_concept=concept,
             current_concept=concept,

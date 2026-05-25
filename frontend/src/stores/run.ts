@@ -19,6 +19,30 @@ export const useRunStore = defineStore("run", () => {
     return map;
   });
 
+  // Map paragraph_index → owning illustration (the illustration whose
+  // current/next concept rewrites this paragraph). Each paragraph_index
+  // is owned by at most one illustration because Agent 0b forbids two
+  // adjacent illustration blocks.
+  const illustrationByParagraph = computed<Map<number, Illustration>>(() => {
+    const map = new Map<number, Illustration>();
+    for (const ill of illustrations.value) {
+      map.set(ill.paragraph_index, ill);
+    }
+    return map;
+  });
+
+  function paragraphAt(paragraphIndex: number): string {
+    const blocks = run.value?.story_blocks;
+    if (!blocks) return "";
+    const block = blocks[paragraphIndex];
+    return block && block.type === "paragraph" ? block.text : "";
+  }
+
+  function isParagraphRegenerating(paragraphIndex: number): boolean {
+    const ill = illustrationByParagraph.value.get(paragraphIndex);
+    return ill?.state === "RETHINKING_CONCEPT";
+  }
+
   function handleSseEvent(event: SseEvent): void {
     switch (event.type) {
       case "snapshot": {
@@ -32,11 +56,25 @@ export const useRunStore = defineStore("run", () => {
           ill.state = event.data.state;
           ill.concept_attempt = event.data.concept_attempt;
           ill.prompt_attempt = event.data.prompt_attempt;
-          // current_concept changes when Agent 4 rethinks the scene;
-          // assigning it to the existing reactive object causes the
-          // IllustrationCard's bound `{{ illustration.current_concept }}`
-          // to re-render in place without remounting. (§ 9.2.2)
+          // current_concept and scene_excerpt change when Agent 4
+          // rethinks the scene; assigning to the existing reactive
+          // object lets the IllustrationCard re-render in place without
+          // remounting. (§ 9.2.2)
           ill.current_concept = event.data.current_concept;
+          ill.scene_excerpt = event.data.scene_excerpt;
+        }
+        break;
+      }
+      case "paragraph_updated": {
+        // Agent 4 rewrote the paragraph that frames this illustration.
+        // Mutate the existing block in place so the StoryParagraph
+        // component re-renders its text while keeping its mounted state
+        // (§ 9.5, § 8.4).
+        if (run.value) {
+          const block = run.value.story_blocks[event.data.paragraph_index];
+          if (block && block.type === "paragraph") {
+            block.text = event.data.text;
+          }
         }
         break;
       }
@@ -140,6 +178,9 @@ export const useRunStore = defineStore("run", () => {
     run,
     illustrations,
     illustrationByScene,
+    illustrationByParagraph,
+    paragraphAt,
+    isParagraphRegenerating,
     isConnecting,
     sseError,
     handleSseEvent,
