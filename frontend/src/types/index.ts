@@ -30,6 +30,13 @@ export interface SessionMessage {
   role: MessageRole;
   content: string;
   created_at: string;
+  // Client-only fields for optimistic rendering (§ 9.2.1):
+  // - `pending` is true while the POST is in flight and the row hasn't
+  //   been reconciled with the server's persisted version yet.
+  // - `client_id` is a temporary client-generated id used to locate the
+  //   optimistic row when reconciling.
+  pending?: boolean;
+  client_id?: string;
 }
 
 export interface Session {
@@ -115,6 +122,7 @@ export interface IllustrationStateEvent {
   state: IllustrationState;
   concept_attempt: number;
   prompt_attempt: number;
+  current_concept: string;
 }
 
 export interface IllustrationCompletedEvent {

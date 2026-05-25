@@ -12,10 +12,10 @@
       :phase="store.phase"
       :is-sending="store.isSending"
       :is-finalizing="store.isFinalizing"
-      :can-finalize="store.canFinalize"
       :error-message="store.errorMessage"
+      :restore-draft="store.lastFailedDraft"
       @send="handleSend"
-      @finalize="handleFinalize"
+      @restored="store.clearFailedDraft"
     />
   </div>
 </template>
@@ -37,18 +37,16 @@ onMounted(async () => {
 
 async function handleSend(content: string) {
   try {
-    await store.sendMessage(content);
+    // sendMessage returns a run_id when the assistant replies with
+    // phase === "confirmed" (auto-finalize). Navigate the moment that
+    // happens — there is no manual "Spustiť ilustrácie" button.
+    const runId = await store.sendMessage(content);
+    if (runId) {
+      await router.push(`/runs/${runId}`);
+    }
   } catch {
-    // Error already surfaced via store.errorMessage.
-  }
-}
-
-async function handleFinalize() {
-  try {
-    const runId = await store.finalize();
-    await router.push(`/runs/${runId}`);
-  } catch {
-    // Error already surfaced via store.errorMessage.
+    // Error already surfaced via store.errorMessage; lastFailedDraft
+    // restores the user's text in the composer.
   }
 }
 </script>

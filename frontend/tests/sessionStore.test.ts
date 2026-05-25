@@ -74,7 +74,7 @@ describe("sessionStore", () => {
     expect(store.errorMessage).toBeNull();
   });
 
-  it("sendMessage() updates session and phase", async () => {
+  it("sendMessage() updates session and phase on awaiting_confirmation", async () => {
     createSessionMock.mockResolvedValue(makeSession());
     const updated = makeSession({
       state: "AWAITING_CONFIRMATION",
@@ -89,33 +89,123 @@ describe("sessionStore", () => {
 
     const store = useSessionStore();
     await store.start();
-    await store.sendMessage("chcem príbeh");
+    const runId = await store.sendMessage("chcem príbeh");
 
     expect(postSessionMessageMock).toHaveBeenCalledWith("sess-1", "chcem príbeh");
     expect(store.session?.state).toBe("AWAITING_CONFIRMATION");
     expect(store.messages).toHaveLength(3);
     expect(store.phase).toBe("awaiting_confirmation");
-    expect(store.canFinalize).toBe(true);
+    expect(runId).toBeNull();
+    expect(finalizeSessionMock).not.toHaveBeenCalled();
   });
 
-  it("canFinalize is false while still gathering", async () => {
-    createSessionMock.mockResolvedValue(makeSession());
+  it("sendMessage() auto-finalizes when phase becomes confirmed", async () => {
+    createSessionMock.mockResolvedValue(
+      makeSession({ state: "AWAITING_CONFIRMATION", collected_brief: makeBrief() }),
+    );
+    const confirmed = makeSession({
+      state: "AWAITING_CONFIRMATION",
+      collected_brief: makeBrief(),
+      messages: [
+        { id: "m-1", role: "assistant", content: "Ahoj!", created_at: "t0" },
+        { id: "m-2", role: "user", content: "áno", created_at: "t1" },
+        {
+          id: "m-3",
+          role: "assistant",
+          content: "Skvelé, ide na to. Pripravujem príbeh a ilustrácie…",
+          created_at: "t2",
+        },
+      ],
+    });
+    postSessionMessageMock.mockResolvedValue({ session: confirmed, phase: "confirmed" });
+    finalizeSessionMock.mockResolvedValue({ run_id: "run-99" });
+
     const store = useSessionStore();
     await store.start();
+    const runId = await store.sendMessage("áno");
 
-    expect(store.canFinalize).toBe(false);
+    expect(runId).toBe("run-99");
+    expect(finalizeSessionMock).toHaveBeenCalledWith("sess-1");
+    expect(store.isFinalizing).toBe(false);
+    expect(store.phase).toBe("confirmed");
   });
 
-  it("sendMessage() sets errorMessage and re-throws on failure", async () => {
+  it("sendMessage() shows optimistic row immediately, before POST resolves", async () => {
+    createSessionMock.mockResolvedValue(makeSession());
+
+    let resolvePost!: (value: { session: Session; phase: "awaiting_confirmation" }) => void;
+    postSessionMessageMock.mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolvePost = res as never;
+        }),
+    );
+
+    const store = useSessionStore();
+    await store.start();
+    expect(store.messages).toHaveLength(1);
+
+    // Don't await yet — we want to inspect the optimistic state mid-flight.
+    const pending = store.sendMessage("hello");
+
+    // Optimistic row is present, pending=true, and at the end of the list.
+    expect(store.messages).toHaveLength(2);
+    const optimistic = store.messages[1];
+    expect(optimistic.role).toBe("user");
+    expect(optimistic.content).toBe("hello");
+    expect(optimistic.pending).toBe(true);
+    expect(optimistic.client_id).toBeDefined();
+    expect(store.isSending).toBe(true);
+
+    // Resolve the POST and let reconciliation finish.
+    const resolved = makeSession({
+      state: "AWAITING_CONFIRMATION",
+      messages: [
+        { id: "m-1", role: "assistant", content: "Ahoj!", created_at: "t0" },
+        { id: "m-2", role: "user", content: "hello", created_at: "t1" },
+        { id: "m-3", role: "assistant", content: "Súhrn…", created_at: "t2" },
+      ],
+    });
+    resolvePost({ session: resolved, phase: "awaiting_confirmation" });
+    await pending;
+
+    // Optimistic row replaced in place; index of the user message is
+    // unchanged (still position 1).
+    expect(store.messages).toHaveLength(3);
+    expect(store.messages[1].id).toBe("m-2");
+    expect(store.messages[1].pending).toBeFalsy();
+    expect(store.messages[1].content).toBe("hello");
+  });
+
+  it("sendMessage() rolls back optimistic row and restores draft on failure", async () => {
     createSessionMock.mockResolvedValue(makeSession());
     postSessionMessageMock.mockRejectedValue(new Error("network down"));
 
     const store = useSessionStore();
     await store.start();
+    expect(store.messages).toHaveLength(1);
 
     await expect(store.sendMessage("hi")).rejects.toThrow("network down");
+
+    // Optimistic row removed; only the original welcome remains.
+    expect(store.messages).toHaveLength(1);
     expect(store.errorMessage).toBe("network down");
+    expect(store.lastFailedDraft).toBe("hi");
     expect(store.isSending).toBe(false);
+    expect(store.session?.state).toBe("CHATTING");
+  });
+
+  it("clearFailedDraft() clears the restored draft", async () => {
+    createSessionMock.mockResolvedValue(makeSession());
+    postSessionMessageMock.mockRejectedValue(new Error("oops"));
+
+    const store = useSessionStore();
+    await store.start();
+    await expect(store.sendMessage("hi")).rejects.toThrow();
+    expect(store.lastFailedDraft).toBe("hi");
+
+    store.clearFailedDraft();
+    expect(store.lastFailedDraft).toBeNull();
   });
 
   it("finalize() returns run_id from the API", async () => {
@@ -165,5 +255,6 @@ describe("sessionStore", () => {
     expect(store.messages).toHaveLength(0);
     expect(store.phase).toBe("gathering");
     expect(store.errorMessage).toBeNull();
+    expect(store.lastFailedDraft).toBeNull();
   });
 });

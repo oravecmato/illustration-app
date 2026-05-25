@@ -43,6 +43,10 @@ async def run_branch(
                 "state": state,
                 "concept_attempt": illustration.concept_attempt,
                 "prompt_attempt": illustration.prompt_attempt,
+                # Surface the currently-active concept so the frontend
+                # can reactively re-render the IllustrationCard's
+                # concept text when Agent 4 rethinks it (§ 8.4, § 9.1).
+                "current_concept": illustration.current_concept,
             },
         )
 

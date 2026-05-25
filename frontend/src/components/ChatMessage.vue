@@ -1,6 +1,6 @@
 <template>
   <div class="chat-message" :class="`role-${role}`">
-    <div class="bubble">{{ content }}</div>
+    <div class="bubble" :class="{ 'is-pending': pending }">{{ content }}</div>
   </div>
 </template>
 
@@ -10,6 +10,7 @@ import type { MessageRole } from "@/types";
 defineProps<{
   role: MessageRole;
   content: string;
+  pending?: boolean;
 }>();
 </script>
 
@@ -47,5 +48,9 @@ defineProps<{
   color: #1a1a1a;
   border: 1px solid #e0e0e0;
   border-bottom-left-radius: 4px;
+}
+
+.bubble.is-pending {
+  opacity: 0.6;
 }
 </style>

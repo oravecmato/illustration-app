@@ -6,6 +6,7 @@
         :key="m.id"
         :role="m.role"
         :content="m.content"
+        :pending="m.pending"
       />
       <div v-if="isSending" class="typing-indicator" aria-live="polite">
         Asistent píše…
@@ -29,16 +30,6 @@
           {{ draft.length }} / {{ MAX_LEN }}
         </span>
         <div class="composer-actions">
-          <button
-            v-if="canFinalize"
-            type="button"
-            class="finalize-btn"
-            :disabled="isFinalizing"
-            @click="$emit('finalize')"
-          >
-            <span v-if="isFinalizing" class="btn-spinner" />
-            Spustiť ilustrácie
-          </button>
           <button type="submit" class="send-btn" :disabled="!canSend">
             <span v-if="isSending" class="btn-spinner" />
             Odoslať
@@ -59,23 +50,30 @@ const props = defineProps<{
   phase: ChatPhase;
   isSending: boolean;
   isFinalizing: boolean;
-  canFinalize: boolean;
   errorMessage: string | null;
+  // Set by the parent (HomeView) when sendMessage rejects, so the
+  // composer can restore the user's text and let them retry/edit.
+  restoreDraft?: string | null;
 }>();
 
 const emit = defineEmits<{
   (e: "send", content: string): void;
-  (e: "finalize"): void;
+  (e: "restored"): void;
 }>();
 
 const MAX_LEN = 4000;
 const draft = ref("");
 const scrollEl = ref<HTMLElement | null>(null);
 
-const inputDisabled = computed(() => props.isSending || props.isFinalizing);
+// While `isFinalizing` is true the input becomes read-only — but during
+// the user's normal send the input is cleared optimistically and the
+// only progress indicator is the typing indicator below, so the field
+// itself remains enabled (allowing them to start composing the next
+// message immediately).
+const inputDisabled = computed(() => props.isFinalizing);
 
 const canSend = computed(
-  () => draft.value.trim().length > 0 && draft.value.length <= MAX_LEN && !inputDisabled.value,
+  () => draft.value.trim().length > 0 && draft.value.length <= MAX_LEN && !props.isFinalizing,
 );
 
 const placeholder = computed(() => {
@@ -95,11 +93,24 @@ watch(
   },
 );
 
+watch(
+  () => props.restoreDraft,
+  (val) => {
+    if (val && !draft.value) {
+      draft.value = val;
+      emit("restored");
+    }
+  },
+);
+
 function onSubmit() {
   if (!canSend.value) return;
   const content = draft.value.trim();
-  emit("send", content);
+  // Clear the input immediately — the optimistic bubble appears in
+  // the thread so the user has visible feedback without keeping the
+  // text in the composer.
   draft.value = "";
+  emit("send", content);
 }
 </script>
 
@@ -191,8 +202,7 @@ function onSubmit() {
   gap: 8px;
 }
 
-.send-btn,
-.finalize-btn {
+.send-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -201,28 +211,11 @@ function onSubmit() {
   border-radius: 6px;
   font-size: 0.95rem;
   cursor: pointer;
-}
-
-.send-btn {
   background: #2c2c2c;
   color: #fff;
 
   &:hover:not(:disabled) {
     background: #444;
-  }
-
-  &:disabled {
-    background: #aaa;
-    cursor: not-allowed;
-  }
-}
-
-.finalize-btn {
-  background: #2e7d32;
-  color: #fff;
-
-  &:hover:not(:disabled) {
-    background: #1b5e20;
   }
 
   &:disabled {

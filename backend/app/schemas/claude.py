@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, model_validator
 
 from app.constants import MAX_ILLUSTRATIONS
 
@@ -87,13 +87,16 @@ class BuildStoryResponse(BaseModel):
     style_guide: StyleGuide
     illustrations: list[IllustrationConcept]
 
-    @field_validator("illustrations")
-    @classmethod
-    def _truncate_illustrations(cls, v: list[IllustrationConcept]) -> list[IllustrationConcept]:
-        return v[:MAX_ILLUSTRATIONS]
-
     @model_validator(mode="after")
     def _validate_structure(self) -> "BuildStoryResponse":
+        # Exact-count rule (§ 7.1 Call 0b rule #4): Agent 0b must return
+        # exactly MAX_ILLUSTRATIONS illustrations — no fewer, no more.
+        if len(self.illustrations) != MAX_ILLUSTRATIONS:
+            raise ValueError(
+                f"illustrations must contain exactly {MAX_ILLUSTRATIONS} entries, "
+                f"got {len(self.illustrations)}"
+            )
+
         blocks = self.story_blocks
         if len(blocks) < 2:
             raise ValueError("story_blocks must contain at least 2 entries")
@@ -114,7 +117,7 @@ class BuildStoryResponse(BaseModel):
                 "illustration block scene_index values must be 0,1,2,... in document order"
             )
 
-        # Truncated illustrations and block indices must match 1-to-1
+        # Illustrations and block indices must match 1-to-1
         illus_indices = [i.scene_index for i in self.illustrations]
         if sorted(illus_indices) != sorted(block_indices):
             raise ValueError(
@@ -122,10 +125,6 @@ class BuildStoryResponse(BaseModel):
             )
         if len(set(illus_indices)) != len(illus_indices):
             raise ValueError("illustration scene_index values must be unique")
-        if not (1 <= len(self.illustrations) <= MAX_ILLUSTRATIONS):
-            raise ValueError(
-                f"illustrations must contain between 1 and {MAX_ILLUSTRATIONS} entries"
-            )
 
         # Each scene_excerpt must be a verbatim substring of *some* paragraph block.
         paragraphs = [b.text for b in blocks if isinstance(b, ParagraphBlock)]

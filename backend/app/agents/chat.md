@@ -43,10 +43,16 @@ three phases your reply belongs to:
   zmenu."). Include the fully populated `collected_brief`.
 - `confirmed` — your previous turn was `awaiting_confirmation` and the user's
   most recent message is a plausible affirmative answer (e.g. "áno", "ok",
-  "súhlasím", "do toho", "poďme na to", "perfektné", "yes"). Reply with a
-  brief Slovak acknowledgement (e.g. "Skvelé, ide na to. Pripravujem príbeh
-  a ilustrácie..."). Carry forward the same `collected_brief` you proposed
-  in the previous turn — do NOT modify it.
+  "súhlasím", "do toho", "poďme na to", "perfektné", "yes"). Set `reply` to
+  **exactly** this Slovak string and nothing else:
+
+  > `Skvelé, ide na to. Pripravujem príbeh a ilustrácie…`
+
+  (One sentence; end with the single-character ellipsis `…`, not three
+  dots. The server normalises any deviation to this exact constant, so
+  matching it verbatim avoids confusing UI flicker.) Carry forward the
+  same `collected_brief` you proposed in the previous turn — do NOT
+  modify it.
 
 If the user's reply after `awaiting_confirmation` is ambiguous, hesitant, or
 proposes changes, stay in `awaiting_confirmation` (or move back to `gathering`

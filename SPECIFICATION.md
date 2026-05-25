@@ -319,7 +319,7 @@ from raw input text.
 | `story_title`       | TEXT         | The story's heading, produced by Agent 0b                   |
 | `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output)      |
 | `style_guide_json`  | TEXT         | JSON; populated at run creation (no longer null)            |
-| `illustration_count`| INTEGER      | Final count after Agent 0b (≤ 5)                            |
+| `illustration_count`| INTEGER      | Final count after Agent 0b (always exactly 5, per § 7.1)    |
 | `completed_count`   | INTEGER      | Successful illustrations                                    |
 | `failed_count`      | INTEGER      | Definitively failed illustrations                           |
 | `error_code`        | TEXT NULL    | Machine-readable failure tag; see § 8.6                     |
@@ -462,10 +462,21 @@ Rules:
   followed by an explicit ask for the user's approval. `collected_brief` is
   fully populated.
 - `phase="confirmed"` — the assistant recognized the user's most recent
-  message as approval of the previously proposed summary. `reply` contains
-  a brief Slovak acknowledgment (e.g. "Skvelé, ide na to. Pripravujem
-  príbeh a ilustrácie..."). `collected_brief` is the brief that the user
-  approved (carried forward from the previous turn).
+  message as approval of the previously proposed summary. `collected_brief`
+  is the brief that the user approved (carried forward from the previous
+  turn).
+
+  **`reply` is a fixed, deterministic Slovak string** (constant
+  `CONFIRMED_ACK_SK` in `backend/app/constants.py`, value:
+  `"Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"`). The system
+  prompt instructs Agent 0a to use exactly this string on confirmation
+  turns, and the server normalizes any close-but-not-identical reply
+  back to this constant before persisting / returning, so the frontend
+  can safely identify a confirmation turn purely by `phase` without
+  having to interpret free-form prose. This is what the frontend keys
+  off to auto-start the pipeline (§ 9.1 Screen A): `phase` is a
+  categorical machine marker; `reply` is only displayed verbatim in
+  the chat thread.
 
 Hard rules enforced by the prompt (and re-checked server-side):
 
@@ -545,8 +556,13 @@ Hard rules enforced by the prompt and re-checked server-side:
 3. **scene_excerpt is a verbatim substring** of the concatenation of all
    `paragraph` blocks' text. The backend verifies this with a substring
    check (whitespace-tolerant) and re-prompts on failure.
-4. **Cap.** `illustrations.length` is between 1 and `MAX_ILLUSTRATIONS`
-   (5). Lengths > 5 are rejected; the agent must self-cap.
+4. **Exact count.** `illustrations.length` MUST equal
+   `MAX_ILLUSTRATIONS` (5). Any other length — including 1, 2, 3, 4, or
+   6+ — is rejected server-side and triggers `CLAUDE_JSON_RETRY`
+   re-prompts; if the agent still cannot return exactly 5 after retries,
+   finalize ends with `STORY_BUILD_FAILED`. The agent's system prompt
+   states this rule explicitly so it plans the story arc around 5
+   illustration beats from the start.
 5. **Cast.** Every `character_role` used in `illustrations` must
    correspond to a character present in the approved brief. If the brief
    has no `mother`, no illustration may have `character_role="mother"`.
@@ -1183,7 +1199,7 @@ SSE event types (`event:` field) and JSON payloads:
 | Event                       | Payload                                                                 |
 |-----------------------------|-------------------------------------------------------------------------|
 | `snapshot`                  | `{ "run": {...}, "illustrations": [...] }`                              |
-| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt" }` |
+| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept" }` |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
 | `run_completed`             | `{ "completed": N, "failed": M }`                                       |
@@ -1195,6 +1211,15 @@ The previous `style_guide_ready` event is removed: the style guide is
 known at the moment the run is created (Agent 0b ran before
 `POST /api/sessions/{id}/finalize` returned), so it is always present in
 the initial `snapshot` and never needs a follow-up event.
+
+`illustration_state.current_concept` carries the **currently active**
+concept text for the illustration. It is emitted on every state
+transition (not only on concept changes) so subscribers don't need
+out-of-band reconciliation. In practice the field only meaningfully
+*changes* when the branch loops through `RETHINKING_CONCEPT` and Agent 4
+replaces the original concept with a new one; the frontend updates the
+matching `IllustrationCard` text in place when it observes a new value
+(see § 9.2.2).
 
 The stream closes after `run_completed`, `run_failed`, or `run_cancelled`.
 
@@ -1295,6 +1320,11 @@ input control is the chat composer at the bottom of the chat thread.
    underneath the composer: "Ak súhlasíš so zhrnutím, odpovedz napríklad
    'áno' alebo 'do toho'." There is no separate confirm button — the
    user types their answer like any other reply.
+
+   **No "Spustiť ilustrácie" / "Generate illustrations" button exists
+   anywhere in the UI.** The pipeline must start automatically when
+   Agent 0a returns `phase="confirmed"` (see Behavior below). The
+   `ChatComposer` exposes only the "Odoslať" send control.
 6. **Error banner** (`SessionErrorBanner`): visible when
    `session.state === "FAILED"`. Displays a Slovak message mapped from
    `session.error_code` via `src/i18n/sessionErrors.ts` (see § 9.4),
@@ -1307,10 +1337,38 @@ input control is the chat composer at the bottom of the chat thread.
   call yet). The session row is only created when the user submits the
   first message — that triggers `POST /api/sessions`.
 - On every subsequent submit, `POST /api/sessions/{id}/messages`.
+- **Optimistic message rendering.** As soon as the user hits Enter (or
+  "Odoslať"), the sessionStore appends the user's message to `messages`
+  *before* awaiting the POST response, so the bubble appears
+  immediately. The optimistic row carries a temporary client-side id
+  (e.g. `temp-<uuid>`) and a `pending: true` flag. While `pending`, the
+  bubble may render with a subtle visual cue (e.g. reduced opacity or
+  a small clock glyph) but otherwise looks like any other user
+  message. The "Asistent píše…" indicator is shown immediately after
+  the optimistic row, *not* in place of it.
+  - **On success:** the server returns both the persisted user message
+    and the assistant reply. The store replaces the optimistic row
+    in-place using the server's `id` / `order_index` (preserving array
+    position) and appends the assistant message. The `pending` flag is
+    cleared.
+  - **On failure:** the store rolls back by removing the optimistic
+    row, restores the composer's draft content (so the user can edit
+    and retry without retyping), and surfaces the error via the
+    existing error banner / inline status. `session.state` is *not*
+    automatically transitioned to `FAILED` for transient errors
+    (network blip, 5xx) — only persisted server-side `FAILED` states
+    drive the banner.
+  - The same pattern applies to the very first message
+    (`sendFirstMessage`): the optimistic user bubble appears before
+    `POST /api/sessions` resolves; on success the local `session` is
+    populated and the optimistic row is reconciled with the persisted
+    one.
 - After receiving an assistant reply with `phase="confirmed"`:
   - Show the reply in the chat.
   - Immediately call `POST /api/sessions/{id}/finalize` (no extra UI
-    action required).
+    action required). The trigger is the `phase` field on the reply —
+    never the prose content — so localisation and minor wording drift
+    cannot break the handoff.
   - Show the "Pripravujem príbeh a ilustrácie..." status while the call
     is in flight.
   - On 201 with `{ run_id }`, navigate to `/runs/:run_id`.
@@ -1362,6 +1420,15 @@ illustrations, or the final state of a completed run.
   `RETHINKING_CONCEPT`.
 - An excerpt-preview tooltip or expandable section showing
   `scene_excerpt` (truncated to ~200 chars in the card body).
+- The **currently active concept text** for the scene, bound to
+  `illustration.current_concept` from the store. This field is
+  reactive: whenever an `illustration_state` SSE event arrives with a
+  changed `current_concept` (which happens when Agent 4 rethinks the
+  concept and the branch re-enters the prompt-generation loop), the
+  card re-renders the new text in place — no remount, no scroll jump,
+  no loss of expanded/collapsed UI state. A subtle fade or background
+  flash MAY be used to draw the eye to the change, but the update
+  itself MUST be purely reactive (no manual subscribe / re-fetch).
 - On `COMPLETED`: a thumbnail of the image (click to open original).
 - On `FAILED`: a short error message (no retry button in MVP).
 - On `CANCELLED`: greyed-out card with label "Zrušené".
@@ -1415,13 +1482,39 @@ The same Slovak text is also inserted as the first `session_messages`
 row when the backend creates the session, so reloading the page after
 the first user message preserves the welcome verbatim.
 
-Actions:
-- `sendFirstMessage(content)` → `POST /api/sessions`, sets `session` and
-  `messages`.
-- `sendMessage(content)` → `POST /api/sessions/{id}/messages`, appends
-  the two new messages.
+State (additions for optimistic rendering):
+- Each `ChatMessage` in `messages` carries an optional `pending: boolean`
+  flag and an optional `clientId: string` (only set on optimistic rows
+  before the server response reconciles them).
+
+Actions (all message-sending actions implement the optimistic pattern):
+- `sendFirstMessage(content)`:
+  1. Push an optimistic user `ChatMessage` (`role="user"`, `content`,
+     `clientId=temp-<uuid>`, `pending=true`) onto `messages`.
+  2. `POST /api/sessions` with `{ content }`.
+  3. On success: set `session` from the response and replace the
+     optimistic row with the persisted user message (matched by
+     `clientId` → server `order_index=0`), then append the assistant
+     reply.
+  4. On failure: remove the optimistic row by `clientId`, set
+     `error`, expose the original `content` so the composer can
+     restore the user's draft.
+- `sendMessage(content)`:
+  1. Push the optimistic user row exactly as above.
+  2. `POST /api/sessions/{id}/messages`.
+  3. On success: reconcile the optimistic row in-place, append the
+     assistant reply.
+  4. On failure: rollback (remove optimistic row, restore draft, set
+     `error`).
 - `finalize()` → `POST /api/sessions/{id}/finalize`, returns `run_id`.
+  Triggered automatically when the latest assistant reply has
+  `phase="confirmed"`.
 - `reset()` → clears all state to start a fresh session.
+
+The optimistic reconciliation MUST preserve the array index of the user
+row — replace in place, never `push` then sort. This guarantees the
+visual position of the user's bubble does not jitter when the server
+response lands.
 
 #### 9.2.2 `runStore` (Pinia)
 
@@ -1442,6 +1535,15 @@ in place by `illustration_id`. The store exposes a derived getter
 `illustrationByScene(sceneIndex)` so the `StoryBlocks` component can
 look up the live state of each inline illustration placeholder without
 duplicating state.
+
+Specifically, the `illustration_state` handler MUST copy the event's
+`current_concept` into the corresponding `illustration` row whenever it
+is present in the payload (it is non-null on every state transition,
+per § 8.4). Because Vue's reactivity is field-level, simply assigning
+`illustration.current_concept = event.current_concept` on the existing
+reactive object is sufficient to refresh any component bound to that
+field — most notably `IllustrationCard` (§ 9.1, Screen B). No
+component-level subscription, watch, or manual re-render is needed.
 
 ### 9.3 Styling
 
@@ -1483,7 +1585,7 @@ Defined in `backend/app/constants.py`:
 
 | Name                              | Value | Meaning                                                           |
 |-----------------------------------|-------|-------------------------------------------------------------------|
-| `MAX_ILLUSTRATIONS`               | 5     | Hard cap on illustrations per run (Agent 0b must self-cap)        |
+| `MAX_ILLUSTRATIONS`               | 5     | Exact illustrations per run — Agent 0b MUST return exactly this many (§ 7.1 Call 0b rule #4) |
 | `MAX_PROMPT_ATTEMPTS_PER_CONCEPT` | 3     | Total image-generation attempts per concept (initial + 2 revisions)|
 | `MAX_CONCEPT_ATTEMPTS`            | 3     | Total concepts tried per illustration (initial + 2 rethinks)      |
 | `COMFYUI_POLL_TIMEOUT_S`          | 600   | Max wait per ComfyUI job                                          |
@@ -1494,6 +1596,7 @@ Defined in `backend/app/constants.py`:
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
 | `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 6 calls                 |
 | `WELCOME_MESSAGE_SK`              | (multiline string, see § 9.2.1) | Server copy of the welcome text inserted as first session message |
+| `CONFIRMED_ACK_SK`                | `"Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"` | Canonical Slovak `reply` returned by Agent 0a on `phase="confirmed"`; server normalizes any other prose to this value (see § 7.1) |
 
 The `STORY_MAX_CHARS` constant from the previous spec is removed (raw
 story text is no longer a public input).
@@ -1535,8 +1638,8 @@ to chase 100 % line coverage.
       rules (more than one of any role, two `mother` entries, a
       `mother` with no main character, an unknown role string).
   - **Call 0b (build_story) schema and validators:**
-    - `illustrations` length must be ≥ 1 and ≤ `MAX_ILLUSTRATIONS`;
-      values outside the range are rejected.
+    - `illustrations` length must equal `MAX_ILLUSTRATIONS` exactly;
+      every other length (0, 1–4, 6+) is rejected.
     - `character_role` must be one of `male` / `female` / `mother`.
     - Block ordering rules: rejects when first or last block is an
       `illustration`; rejects two adjacent `illustration` blocks;
@@ -1671,10 +1774,39 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     state with the response payload.
   - After receiving an assistant reply with `phase="confirmed"`, the
     store automatically invokes `finalize()` and resolves with the
-    `run_id`.
+    `run_id`. The trigger is the `phase` field — the test mocks the
+    reply with arbitrary `reply` prose and still expects auto-finalize.
   - On `phase="confirmed"` server response that errors during
     finalize, the store surfaces the error and transitions to a
     failed state without losing the chat transcript.
+  - **Optimistic rendering — send happy path:** calling
+    `sendMessage("hello")` synchronously appends a user `ChatMessage`
+    with `pending=true` and a `clientId` *before* the mocked
+    POST resolves; after resolution, the optimistic row is replaced
+    in-place (same array index, `pending` cleared, server `id`
+    populated) and the assistant reply is appended after it.
+  - **Optimistic rendering — send failure rollback:** when the mocked
+    POST rejects, the optimistic row is removed by `clientId`, the
+    `error` field is set, and the original `content` is exposed (e.g.
+    via a `lastFailedDraft` field or returned from the action) so the
+    composer can restore it. `session.state` remains `CHATTING`.
+  - **Optimistic rendering — first message:** the same pattern applies
+    to `sendFirstMessage`; the optimistic user bubble is visible
+    before `POST /api/sessions` resolves, and is reconciled on
+    success.
+  - Reconciliation preserves array order (assertion: the index of the
+    user message in `messages` is identical before and after the
+    server response lands).
+- **IllustrationCard reactive concept text** (new test in the existing
+  card spec):
+  - Given an `IllustrationCard` mounted with an illustration whose
+    `current_concept` is `"A"`, when the parent store updates the
+    same reactive object's `current_concept` to `"B"`, the rendered
+    DOM updates to show `"B"` without re-mounting the component.
+  - The card does NOT re-render or reset its expanded/collapsed UI
+    state when only `current_concept` changes (assert via a
+    `data-testid` or a counter prop that internal component state
+    survives the prop update).
 - **StoryBlocks / InlineIllustration:**
   - Renders `paragraph` blocks as `<p>` and `illustration` blocks as
     `<InlineIllustration>` keyed by `scene_index`.
@@ -1687,6 +1819,10 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
 - **runStore:**
   - `snapshot` event replaces full state.
   - `illustration_state` updates the right illustration by id.
+  - `illustration_state` with a changed `current_concept` writes the
+    new value onto the existing illustration object (asserted by
+    holding a reference to the object before the event and observing
+    the field change post-event without object identity changing).
   - `illustration_completed` sets `image_url`.
   - `run_cancelled` sets run status correctly and unsubscribes.
   - `run_failed` sets `error_code` and `error_message`, transitions
@@ -1782,12 +1918,24 @@ The MVP is considered complete when:
    assistant, see the assistant push back when their proposed cast
    violates the character constraint, eventually get a summary and a
    request for confirmation, reply "áno", and be navigated to
-   `/runs/:id` once the story is built.
+   `/runs/:id` once the story is built. **No "Spustiť ilustrácie" /
+   "Generate illustrations" (or equivalent) button exists in the UI
+   at any point;** the navigation to `/runs/:id` is triggered solely
+   by Agent 0a returning `phase="confirmed"`.
+   Every user message — including the very first one and the "áno"
+   confirmation — appears in the chat thread **immediately** on send,
+   before the assistant's reply arrives (verified by manual smoke
+   test: with the network throttled, the user bubble is visible while
+   the "Asistent píše…" indicator is still active).
 4. On `/runs/:id`, the user sees the generated story heading and
    paragraphs immediately, with inline placeholders for the
    illustrations showing loaders, while the illustration cards below
    the story show live progress via SSE. Loaders are replaced by the
-   final images as each one completes.
+   final images as each one completes. When the orchestrator loops
+   through `RETHINKING_CONCEPT` for a given illustration, the concept
+   text displayed in that illustration's card visibly updates in
+   place — without the card being remounted and without other cards
+   being disturbed.
 5. Cancelling an in-flight run brings it to `CANCELLED` within a few
    seconds, and the UI reflects this in both the inline placeholders
    and the cards.

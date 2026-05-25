@@ -105,6 +105,7 @@ describe("runStore", () => {
         state: "RENDERING",
         concept_attempt: 1,
         prompt_attempt: 1,
+        current_concept: "A boy crying",
       },
     });
 
@@ -113,6 +114,38 @@ describe("runStore", () => {
     // Other illustration unchanged
     const ill2 = store.illustrations.find((i: Illustration) => i.id === "ill-2");
     expect(ill2?.state).toBe("PENDING");
+  });
+
+  it("illustration_state event updates current_concept on the same object", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", current_concept: "Original" })],
+      },
+    });
+
+    // Hold the reference to the existing reactive object so we can
+    // verify the field changes without object identity changing.
+    const originalRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(originalRef?.current_concept).toBe("Original");
+
+    store.handleSseEvent({
+      type: "illustration_state",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        state: "RETHINKING_CONCEPT",
+        concept_attempt: 2,
+        prompt_attempt: 1,
+        current_concept: "Rethought",
+      },
+    });
+
+    const afterRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(afterRef).toBe(originalRef); // same object identity
+    expect(afterRef?.current_concept).toBe("Rethought");
   });
 
   it("illustration_completed event sets image_url", () => {
@@ -178,6 +211,7 @@ describe("runStore", () => {
           state: "RENDERING",
           concept_attempt: 1,
           prompt_attempt: 1,
+          current_concept: "any",
         },
       });
     }).not.toThrow();

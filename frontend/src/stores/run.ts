@@ -32,6 +32,11 @@ export const useRunStore = defineStore("run", () => {
           ill.state = event.data.state;
           ill.concept_attempt = event.data.concept_attempt;
           ill.prompt_attempt = event.data.prompt_attempt;
+          // current_concept changes when Agent 4 rethinks the scene;
+          // assigning it to the existing reactive object causes the
+          // IllustrationCard's bound `{{ illustration.current_concept }}`
+          // to re-render in place without remounting. (§ 9.2.2)
+          ill.current_concept = event.data.current_concept;
         }
         break;
       }

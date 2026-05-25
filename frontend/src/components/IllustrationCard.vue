@@ -21,6 +21,15 @@
       {{ truncatedExcerpt }}
     </div>
 
+    <div
+      v-if="illustration.current_concept"
+      class="concept-text"
+      data-testid="concept-text"
+    >
+      <span class="concept-label">Koncept:</span>
+      {{ illustration.current_concept }}
+    </div>
+
     <template v-if="illustration.state === 'COMPLETED' && illustration.image_url">
       <a :href="illustration.image_url" target="_blank" rel="noopener">
         <img
@@ -151,6 +160,23 @@ const truncatedExcerpt = computed(() => {
   font-style: italic;
   margin-bottom: 12px;
   line-height: 1.4;
+}
+
+.concept-text {
+  font-size: 0.85em;
+  color: #444;
+  margin-bottom: 12px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  transition: background-color 0.4s ease;
+}
+
+.concept-label {
+  font-weight: 600;
+  margin-right: 4px;
+  color: #2c2c2c;
 }
 
 .illustration-image {

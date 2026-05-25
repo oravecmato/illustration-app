@@ -17,6 +17,7 @@ from httpx import AsyncClient
 
 from app.api import runs as runs_api
 from app.config import Settings
+from app.constants import CONFIRMED_ACK_SK
 from app.db.migrations import upgrade_to_head_async
 from app.db.session import init_db
 from app.main import create_app
@@ -46,9 +47,15 @@ BRIEF = {
 STORY_BLOCKS = [
     {"type": "paragraph", "text": "Stála pri okne a hlboko sa nadýchla."},
     {"type": "illustration", "scene_index": 0},
-    {"type": "paragraph", "text": "Potom otvorila dvere a vyšla na pódium."},
+    {"type": "paragraph", "text": "Sadla si a zviazala si vlasy do drdolu."},
     {"type": "illustration", "scene_index": 1},
+    {"type": "paragraph", "text": "Pred zrkadlom si upravila kostým a usmiala sa."},
+    {"type": "illustration", "scene_index": 2},
+    {"type": "paragraph", "text": "Potom otvorila dvere a vyšla na pódium."},
+    {"type": "illustration", "scene_index": 3},
     {"type": "paragraph", "text": "Tlieskanie ju objalo ako vlna."},
+    {"type": "illustration", "scene_index": 4},
+    {"type": "paragraph", "text": "Cestou domov ešte stále počula ten potlesk."},
 ]
 
 BUILD_STORY_RESULT = {
@@ -69,8 +76,26 @@ BUILD_STORY_RESULT = {
         },
         {
             "scene_index": 1,
+            "scene_excerpt": "Sadla si a zviazala si vlasy do drdolu.",
+            "concept": "young woman tying her hair into a bun, focused",
+            "character_role": "female",
+        },
+        {
+            "scene_index": 2,
+            "scene_excerpt": "Pred zrkadlom si upravila kostým a usmiala sa.",
+            "concept": "young woman adjusting her costume in front of a mirror, gentle smile",
+            "character_role": "female",
+        },
+        {
+            "scene_index": 3,
             "scene_excerpt": "Potom otvorila dvere a vyšla na pódium.",
             "concept": "young woman pushing open a door, determined expression",
+            "character_role": "female",
+        },
+        {
+            "scene_index": 4,
+            "scene_excerpt": "Tlieskanie ju objalo ako vlna.",
+            "concept": "young woman on stage taking a bow, eyes shining",
             "character_role": "female",
         },
     ],
@@ -294,10 +319,18 @@ async def test_end_to_end_happy_path(app_client):
     assert body["session"]["state"] == "AWAITING_CONFIRMATION"
     assert body["session"]["collected_brief"] is not None
 
-    # 3. User confirms → phase = confirmed
+    # 3. User confirms → phase = confirmed; server must normalise the
+    #    assistant reply to the canonical CONFIRMED_ACK_SK constant
+    #    regardless of what the agent returned in `reply`. The last
+    #    message in the session transcript is the assistant's confirmed
+    #    acknowledgement.
     resp = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "áno"})
     assert resp.status_code == 200
-    assert resp.json()["phase"] == "confirmed"
+    body = resp.json()
+    assert body["phase"] == "confirmed"
+    last_msg = body["session"]["messages"][-1]
+    assert last_msg["role"] == "assistant"
+    assert last_msg["content"] == CONFIRMED_ACK_SK
 
     # 4. Finalize
     resp = await client.post(f"/api/sessions/{session_id}/finalize")
@@ -307,9 +340,9 @@ async def test_end_to_end_happy_path(app_client):
     # 5. Pipeline runs to completion
     data = await _wait_terminal(client, run_id)
     assert data["run"]["status"] == "COMPLETED", data
-    assert data["run"]["completed_count"] == 2
+    assert data["run"]["completed_count"] == 5
     assert data["run"]["story_title"] == "Prvý krok na pódium"
-    assert len(data["illustrations"]) == 2
+    assert len(data["illustrations"]) == 5
 
 
 @pytest.mark.asyncio

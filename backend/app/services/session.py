@@ -7,7 +7,7 @@ data into the ``sessions`` and ``runs`` tables.
 import logging
 from dataclasses import dataclass
 
-from app.constants import SESSION_MAX_MESSAGES, SESSION_MESSAGE_MAX_CHARS
+from app.constants import CONFIRMED_ACK_SK, SESSION_MAX_MESSAGES, SESSION_MESSAGE_MAX_CHARS
 from app.db.models import MessageRole, Session, SessionState
 from app.db.repositories import RunRepository, SessionRepository
 from app.schemas.claude import (
@@ -113,6 +113,12 @@ class SessionService:
                 error_message=str(e),
             )
             raise SessionError("CHAT_FAILED", str(e)) from e
+
+        # Normalise the confirmation acknowledgement so the frontend can
+        # match it deterministically and so localisation / model drift in
+        # the agent's prose cannot break the chat→pipeline handoff.
+        if reply.phase == "confirmed":
+            reply = reply.model_copy(update={"reply": CONFIRMED_ACK_SK})
 
         await self.repo.add_message(session_id, MessageRole.ASSISTANT, reply.reply)
 

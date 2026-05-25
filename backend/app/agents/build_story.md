@@ -19,8 +19,8 @@ A single JSON object containing:
 2. `story_blocks` — an ordered list of typed blocks that, when read in order,
    form the complete Slovak story interleaved with illustration placeholders.
 3. `style_guide` — global visual continuity for every illustration.
-4. `illustrations` — 1 to 5 single-character scenes, each tied to exactly one
-   illustration block via `scene_index`.
+4. `illustrations` — **exactly 5** single-character scenes (no fewer, no more),
+   each tied to exactly one illustration block via `scene_index`.
 
 ## Story-design principles (MANDATORY — read carefully)
 
@@ -53,7 +53,7 @@ overlays, or anything the prompt cannot literally name.
    on specific small objects being legible (text on paper, faces in a photo,
    exact jewelry). Keep visual emphasis on the character's body language.
 
-5. **Naturally varying environments.** Across the (up to 5) illustrations,
+5. **Naturally varying environments.** Across the 5 illustrations,
    move the character through different believable settings within the
    story's world — different rooms, indoor/outdoor, different lighting times
    — so the gallery feels like a real story arc and not a photo session in
@@ -64,11 +64,23 @@ overlays, or anything the prompt cannot literally name.
    character, distribute the illustrations across them; do not give every
    scene to the same character unless the topic clearly demands it.
 
+7. **Time-of-the-day consistency** Every item inside the `illustrations` array
+   must contain an explicit note concerning the time of the day in the scene
+   to ensure the chronological time consistency across illustrations is kept.
+   A single word, e.g. morning, evening, night is sufficient. This note must be
+   deduced from the context of the given text blocks or from the preceding text
+   blocks if a current one does not contain any neither explicitly no implicitly.
+
 ## Story length and pacing
 
-- Between 1 and 5 illustration blocks total (hard cap: 5).
-- Between 3 and ~8 paragraph blocks total. Paragraphs are 1–4 short Slovak
-  sentences each. Keep the whole story readable in under a minute.
+- **Exactly 5 illustration blocks total — no fewer, no more.** This is a
+  hard rule: outputs with 0, 1, 2, 3, 4, or 6+ illustration blocks will be
+  rejected by the server. Plan the story arc around 5 visual beats from the
+  start.
+- Between 6 and ~10 paragraph blocks total (so the 5 illustrations always
+  have surrounding paragraph context on both sides). Paragraphs are 1–4
+  short Slovak sentences each. Keep the whole story readable in under a
+  minute.
 - Always START with a paragraph block (establish the setting and tone) and
   END with a paragraph block (give the story emotional closure). Do not open
   or close on an illustration.

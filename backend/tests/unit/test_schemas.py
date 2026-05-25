@@ -127,139 +127,109 @@ def _build_story_payload(
     }
 
 
-def test_build_story_accepts_valid_minimal():
-    blocks = [
-        {"type": "paragraph", "text": "Začiatok. Stojí pri okne a pozerá sa von."},
-        {"type": "illustration", "scene_index": 0},
-        {"type": "paragraph", "text": "Koniec príbehu."},
-    ]
-    illustrations = [
-        {
-            "scene_index": 0,
-            "scene_excerpt": "Stojí pri okne a pozerá sa von.",
-            "concept": "boy at window, contemplative",
-            "character_role": "male",
-        }
-    ]
+def _valid_blocks_and_illustrations(
+    count: int = MAX_ILLUSTRATIONS,
+) -> tuple[list[dict], list[dict]]:
+    """Build a well-formed (blocks, illustrations) pair with `count` scenes.
+
+    Layout: P I P I P I P I P I P — paragraphs and illustrations alternate
+    with paragraph bookends. Each scene_excerpt is verbatim in its
+    preceding paragraph.
+    """
+    blocks: list[dict] = [{"type": "paragraph", "text": "Začiatok príbehu."}]
+    illustrations: list[dict] = []
+    for i in range(count):
+        para_text = f"Odsek {i}. Stojí pri okne {i} a pozerá sa von."
+        excerpt = f"Stojí pri okne {i} a pozerá sa von."
+        blocks.append({"type": "paragraph", "text": para_text}) if i > 0 else None
+        blocks.append({"type": "illustration", "scene_index": i})
+        illustrations.append(
+            {
+                "scene_index": i,
+                "scene_excerpt": excerpt,
+                "concept": f"character at window {i}, contemplative",
+                "character_role": "male",
+            }
+        )
+        # ensure first illustration's excerpt is in opening paragraph
+        if i == 0:
+            blocks[0] = {"type": "paragraph", "text": "Začiatok. " + excerpt}
+    blocks.append({"type": "paragraph", "text": "Koniec príbehu."})
+    return blocks, illustrations
+
+
+def test_build_story_accepts_valid_full_count():
+    blocks, illustrations = _valid_blocks_and_illustrations()
     resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-    assert len(resp.story_blocks) == 3
-    assert len(resp.illustrations) == 1
+    assert len(resp.illustrations) == MAX_ILLUSTRATIONS
 
 
-def test_build_story_rejects_starting_with_illustration():
-    blocks = [
-        {"type": "illustration", "scene_index": 0},
-        {"type": "paragraph", "text": "Koniec."},
-    ]
-    illustrations = [
-        {
-            "scene_index": 0,
-            "scene_excerpt": "Koniec.",
-            "concept": "x",
-            "character_role": "male",
-        }
-    ]
+def test_build_story_rejects_fewer_than_max():
+    # Any count below MAX_ILLUSTRATIONS must be rejected.
+    blocks, illustrations = _valid_blocks_and_illustrations(count=MAX_ILLUSTRATIONS - 1)
     with pytest.raises(ValidationError):
         BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
 
 
-def test_build_story_rejects_ending_with_illustration():
-    blocks = [
-        {"type": "paragraph", "text": "Začiatok textu."},
-        {"type": "illustration", "scene_index": 0},
-    ]
-    illustrations = [
-        {
-            "scene_index": 0,
-            "scene_excerpt": "Začiatok textu.",
-            "concept": "x",
-            "character_role": "male",
-        }
-    ]
-    with pytest.raises(ValidationError):
-        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-
-
-def test_build_story_rejects_adjacent_illustrations():
-    blocks = [
-        {"type": "paragraph", "text": "P1 obsah."},
-        {"type": "illustration", "scene_index": 0},
-        {"type": "illustration", "scene_index": 1},
-        {"type": "paragraph", "text": "P2 obsah."},
-    ]
-    illustrations = [
-        {
-            "scene_index": 0,
-            "scene_excerpt": "P1 obsah.",
-            "concept": "x",
-            "character_role": "male",
-        },
-        {
-            "scene_index": 1,
-            "scene_excerpt": "P2 obsah.",
-            "concept": "y",
-            "character_role": "female",
-        },
-    ]
-    with pytest.raises(ValidationError):
-        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-
-
-def test_build_story_rejects_out_of_order_block_indices():
-    blocks = [
-        {"type": "paragraph", "text": "P1 obsah."},
-        {"type": "illustration", "scene_index": 1},
-        {"type": "paragraph", "text": "P2 obsah."},
-    ]
-    illustrations = [
-        {
-            "scene_index": 1,
-            "scene_excerpt": "P1 obsah.",
-            "concept": "x",
-            "character_role": "male",
-        }
-    ]
-    with pytest.raises(ValidationError):
-        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-
-
-def test_build_story_rejects_excerpt_not_in_paragraph():
-    blocks = [
-        {"type": "paragraph", "text": "P1 obsah."},
-        {"type": "illustration", "scene_index": 0},
-        {"type": "paragraph", "text": "P2 obsah."},
-    ]
-    illustrations = [
-        {
-            "scene_index": 0,
-            "scene_excerpt": "Tento text v žiadnom odseku nie je.",
-            "concept": "x",
-            "character_role": "male",
-        }
-    ]
+def test_build_story_rejects_single_illustration():
+    blocks, illustrations = _valid_blocks_and_illustrations(count=1)
     with pytest.raises(ValidationError):
         BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
 
 
 def test_build_story_rejects_more_than_max_illustrations():
-    # Build (MAX + 2) illustration blocks. The illustrations array gets
-    # truncated to MAX by the field validator, which then mismatches the
-    # block list and raises. This verifies the cap is enforced end-to-end.
-    n = MAX_ILLUSTRATIONS + 2
-    blocks: list[dict] = []
-    for i in range(n):
-        blocks.append({"type": "paragraph", "text": f"Para {i}."})
-        blocks.append({"type": "illustration", "scene_index": i})
-    blocks.append({"type": "paragraph", "text": "End."})
-    illustrations = [
-        {
-            "scene_index": i,
-            "scene_excerpt": f"Para {i}.",
-            "concept": f"c{i}",
-            "character_role": "male",
-        }
-        for i in range(n)
-    ]
+    blocks, illustrations = _valid_blocks_and_illustrations(count=MAX_ILLUSTRATIONS + 1)
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_starting_with_illustration():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    blocks = blocks[1:]  # drop opening paragraph
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_ending_with_illustration():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    blocks = blocks[:-1]  # drop closing paragraph
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_adjacent_illustrations():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    # Find the first paragraph-between-two-illustrations and remove it.
+    for i, b in enumerate(blocks):
+        if (
+            b["type"] == "paragraph"
+            and i > 0
+            and i < len(blocks) - 1
+            and blocks[i - 1]["type"] == "illustration"
+            and blocks[i + 1]["type"] == "illustration"
+        ):
+            del blocks[i]
+            break
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_out_of_order_block_indices():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    # Swap scene_index of the first two illustration blocks → no longer 0,1,...
+    illus_block_positions = [i for i, b in enumerate(blocks) if b["type"] == "illustration"]
+    a, b = illus_block_positions[0], illus_block_positions[1]
+    blocks[a]["scene_index"], blocks[b]["scene_index"] = (
+        blocks[b]["scene_index"],
+        blocks[a]["scene_index"],
+    )
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_excerpt_not_in_paragraph():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    illustrations[0]["scene_excerpt"] = "Tento text v žiadnom odseku určite nie je."
     with pytest.raises(ValidationError):
         BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
 
