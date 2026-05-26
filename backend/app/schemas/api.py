@@ -18,6 +18,9 @@ class SessionMessageResponse(BaseModel):
 class SessionResponse(BaseModel):
     id: str
     state: str
+    source_language: str | None
+    detected_language: str | None
+    topic_short: str | None
     collected_brief: CollectedBrief | None
     run_id: str | None
     error_code: str | None
@@ -34,10 +37,12 @@ class PostMessageRequest(BaseModel):
 class PostMessageResponse(BaseModel):
     session: SessionResponse
     phase: Literal["gathering", "awaiting_confirmation", "confirmed"]
+    language: str | None = None
+    detected_language: str | None = None
 
 
 class FinalizeResponse(BaseModel):
-    run_id: str
+    topic_short: str
 
 
 # ── Runs ─────────────────────────────────────────────────────────────────────
@@ -47,7 +52,13 @@ class RunResponse(BaseModel):
     id: str
     session_id: str
     status: str
+    source_language: str
+    language: str
+    topic_short: str
     story_title: str
+    story_title_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
+    story_topic_description: str
+    story_topic_description_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
     story_blocks: list[dict[str, Any]]
     style_guide: StyleGuide
     illustration_count: int
@@ -64,8 +75,10 @@ class IllustrationResponse(BaseModel):
     scene_index: int
     scene_excerpt: str
     paragraph_index: int
-    character_role: str
+    character_role: str | None
+    current_workflow: str | None
     current_concept: str
+    current_concept_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
     state: str
     concept_attempt: int
     prompt_attempt: int
@@ -76,3 +89,29 @@ class IllustrationResponse(BaseModel):
 class RunDetailResponse(BaseModel):
     run: RunResponse
     illustrations: list[IllustrationResponse]
+
+
+# ── Translations ─────────────────────────────────────────────────────────────
+
+
+class TranslationItemRequest(BaseModel):
+    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    paragraph_index: int | None = None
+    scene_index: int | None = None
+
+
+class TranslationItemResponse(BaseModel):
+    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    paragraph_index: int | None = None
+    scene_index: int | None = None
+    text: str
+    source_hash: str
+
+
+class TranslateRequest(BaseModel):
+    language: Literal["sk", "cs", "en"]
+    items: list[TranslationItemRequest]
+
+
+class TranslateResponse(BaseModel):
+    items: list[TranslationItemResponse]

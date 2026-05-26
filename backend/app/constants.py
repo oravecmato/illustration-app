@@ -7,11 +7,18 @@ MAX_CONCURRENT_BRANCHES = 5
 CLAUDE_JSON_RETRY = 2
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
-# Canonical Slovak acknowledgement Agent 0a returns on phase="confirmed".
-# Server normalises any other prose to this value so the frontend can
-# render a deterministic message and tests can assert against a constant.
-# (§ 7.1 Call 0a, § 10 Constants.)
-CONFIRMED_ACK_SK = "Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"
+# Supported UI and story languages (§ 9.6, § 10)
+SUPPORTED_LANGUAGES = ("sk", "cs", "en")
+
+# Canonical confirmation acknowledgements per language, returned by Agent 0a
+# on phase="confirmed". Server normalises any other prose to this value so
+# the frontend can render a deterministic message and tests can assert against
+# a constant. (§ 7.1 Call 0a, § 10 Constants.)
+CONFIRMED_ACK: dict[str, str] = {
+    "sk": "Skvelé, ide na to. Pripravujem príbeh a ilustrácie…",
+    "cs": "Skvělé, jdu na to. Připravuji příběh a ilustrace…",
+    "en": "Great, on it. Building your story and illustrations…",
+}
 
 # Session-level limits (§ 7.2)
 SESSION_MESSAGE_MAX_CHARS = 4000

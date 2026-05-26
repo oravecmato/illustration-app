@@ -1,0 +1,67 @@
+export default {
+  chat: {
+    welcome:
+      'Hi! I'll help you create a short illustrated anime story. Tell me what it should be about and which #characters# should appear in it.',
+    assistant_typing: 'Assistant is typing…',
+    send: 'Send',
+    message_placeholder: 'Type a message…',
+    char_limit: 'characters',
+  },
+  story: {
+    illustration_n: 'Illustration {n}',
+    building: 'Building the story on the topic: {topic}…',
+    try_again: 'Try again',
+  },
+  illustration: {
+    state: {
+      PENDING: 'Pending',
+      GENERATING_PROMPTS: 'Generating prompts',
+      RENDERING: 'Rendering image',
+      EVALUATING: 'Evaluating',
+      REVISING_PROMPTS: 'Revising prompts',
+      RETHINKING_CONCEPT: 'Rethinking concept',
+      COMPLETED: 'Completed',
+      FAILED: 'Failed',
+      CANCELLED: 'Cancelled',
+    },
+    currentConcept: 'Concept',
+    companion_subtitle: 'Also in the scene: {description}',
+    attempt: 'attempt {current}/{max}',
+  },
+  run: {
+    status: {
+      RUNNING: 'Running',
+      COMPLETED: 'Completed',
+      FAILED: 'Failed',
+      CANCELLED: 'Cancelled',
+    },
+    progress: 'Completed: {completed} of {total}',
+    cancel: 'Cancel',
+  },
+  nav: {
+    change_language: 'Change language',
+  },
+  language: {
+    sk: 'Slovenčina',
+    cs: 'Čeština',
+    en: 'English',
+  },
+  errors: {
+    session: {
+      chat_failed: 'The assistant cannot respond at the moment. Please try again in a moment.',
+      story_build_failed:
+        'Something went wrong while building the story. Please start over and slightly adjust your brief.',
+      translate_failed: 'Translation could not be completed. Please try again.',
+      internal_error: 'An unexpected error occurred. Check the server log for details.',
+    },
+    run: {
+      internal_error:
+        'An unexpected error occurred while generating illustrations. Check the server log for details.',
+      translate_failed: 'Translation of illustrations could not be completed.',
+    },
+  },
+  toast: {
+    language_switched: 'Language changed to {language}',
+    translate_failed: 'Could not load translation',
+  },
+}

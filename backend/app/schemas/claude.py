@@ -65,7 +65,8 @@ class IllustrationConcept(BaseModel):
     scene_index: int
     scene_excerpt: str
     concept: str
-    character_role: Literal["male", "female", "mother"]
+    concept_localized: str | None = None  # Used by Agent 0b; null for Agents 1/3/4
+    character_role: Literal["male", "female", "mother"] | None = None
     companion: Companion | None = None
 
 
@@ -115,7 +116,9 @@ class CollectedBrief(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     phase: Literal["gathering", "awaiting_confirmation", "confirmed"]
-    collected_brief: CollectedBrief | None
+    language: Literal["sk", "cs", "en", "other"] | None = None
+    topic_short: str | None = None
+    collected_brief: CollectedBrief | None = None
 
     @model_validator(mode="after")
     def _validate_brief_presence(self) -> "ChatResponse":
@@ -125,6 +128,8 @@ class ChatResponse(BaseModel):
             raise ValueError(
                 "collected_brief is required when phase is 'awaiting_confirmation' or 'confirmed'"
             )
+        if self.phase == "confirmed" and not self.topic_short:
+            raise ValueError("topic_short is required when phase is 'confirmed'")
         return self
 
 
@@ -146,6 +151,7 @@ StoryBlock = ParagraphBlock | IllustrationBlock
 
 class BuildStoryResponse(BaseModel):
     story_title: str
+    story_topic_description: str
     story_blocks: list[ParagraphBlock | IllustrationBlock]
     style_guide: StyleGuide
     illustrations: list[IllustrationConcept]
@@ -206,6 +212,7 @@ class BuildStoryResponse(BaseModel):
 
 
 class GeneratePromptsResponse(BaseModel):
+    workflow: Literal["single-lora", "no-lora"]
     positive: str
     negative: str
 
@@ -222,7 +229,10 @@ RevisePromptsResponse = GeneratePromptsResponse
 
 
 class RethinkConceptResponse(BaseModel):
+    workflow: Literal["single-lora", "no-lora"]
     concept: str
+    concept_localized: str
+    character_role: Literal["male", "female", "mother"] | None
     paragraph_text: str
     scene_excerpt: str
     companion: Companion | None = None
@@ -232,3 +242,17 @@ class RethinkConceptResponse(BaseModel):
         if self.scene_excerpt not in self.paragraph_text:
             raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
         return self
+
+
+# ── Agent 5: translate ───────────────────────────────────────────────────────
+
+
+class TranslationItem(BaseModel):
+    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    paragraph_index: int | None = None
+    scene_index: int | None = None
+    translated_text: str
+
+
+class TranslateResponse(BaseModel):
+    translations: list[TranslationItem]

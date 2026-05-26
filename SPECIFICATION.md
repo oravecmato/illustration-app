@@ -34,6 +34,32 @@ illustration progress cards stay visible below the story. Each illustration
 runs through its own per-image self-correction loop driven by Claude's
 visual evaluation.
 
+Between the user's confirmation and Agent 0b actually delivering, the chat
+is replaced by a **story-skeleton view** — a one-line "Generating the story
+on …" header (using a short topic phrase that Agent 0a produced in the
+active UI language on the confirmed turn, see § 7.1 Call 0a) and five
+paragraph-shaped skeleton blocks. This view replaces the previous in-chat
+"Pripravujem príbeh a ilustrácie…" status strip so the user has a clear
+visual signal that authorship is in progress rather than the chat hanging
+(§ 9.1 Screen A).
+
+The app is **multilingual** with first-class support for **Slovak (`sk`)**,
+**Czech (`cs`)**, and **English (`en`)**. The user's interface language is
+selected automatically from the browser on first load, can be overridden
+by an always-present URL path prefix (`/sk/`, `/cs/`, `/en/`), and can be
+changed at any time from a language switcher in the top-right of the
+centered app container (§ 9.6). Agent 0a detects the language the user is
+chatting in and the app auto-switches to it (with a toast notification) the
+first time the detection lands on a different language than the one
+currently displayed. The agreed story (title, short topic phrase, prose
+paragraphs) is authored by Agent 0b in the active language; image concepts
+and ComfyUI prompts are always authored in English first (single source of
+truth) and accompanied by a same-call translation into the active language
+purely for the UI. Subsequent language switches on `/runs/:id` lazily
+translate just-in-time via a dedicated **translation agent (Agent 5)** and
+cache the result both in Pinia and in the database so the same translation
+is never produced twice. See § 5.5, § 7.1 Call 5, § 8.9, § 9.6.
+
 The story itself is not frozen at Agent 0b's output. When the per-image
 loop escalates to **Agent 4** (`rethink_concept`), Agent 4 is allowed —
 and in fact required — to also rewrite the surrounding paragraph so the
@@ -47,9 +73,17 @@ the single source of truth the UI binds to; the backend persists the
 same current content in `runs.story_blocks_json` so reconnects and
 snapshots also reflect the latest state (§ 5.3, § 8.3).
 
-The visual output style is anime/manga, rendered by an Illustrious-based
-SDXL ComfyUI workflow with character and style LoRAs. See § 7.3 for the
-full creative and prompting brief.
+The visual output style is anime/manga, rendered by Illustrious-based
+SDXL ComfyUI workflows with character and style LoRAs. The app ships
+**two** workflows — `single-lora.json` (used when the scene depicts
+exactly one human character, optionally accompanied by one non-human
+companion) and `no-lora.json` (used when the scene depicts no human
+character — i.e. a non-human companion alone, or, rarely, a pure
+environment beat with no characters). Agents 1 and 3 decide which
+workflow each illustration uses; Agent 0b is responsible for designing
+the story so that the resulting mix of workflows is well-motivated
+(§ 7.2.1 and § 7.3.11). See § 7.3 for the full creative and prompting
+brief.
 
 ---
 
@@ -68,12 +102,27 @@ full creative and prompting brief.
 | Tests (FE)  | Vitest, @vue/test-utils                                       |
 | Lint (BE)   | Ruff (lint + format)                                          |
 | Lint (FE)   | ESLint (`@typescript-eslint` + `eslint-plugin-vue`) + `vue-tsc` |
+| i18n (FE)   | `vue-i18n` (v9 / Composition API mode) + `vue-router` `/:lang/` path prefix |
+| Toasts (FE) | `vue-sonner` (lean, headless-friendly toast library)          |
 
 No specific package versions are pinned in this spec; use current stable
 releases at the time of implementation.
 
 All code, identifiers, and code comments are in **English**. UI text
-displayed to the end user is in **Slovak**.
+displayed to the end user is **multilingual** — Slovak (`sk`), Czech
+(`cs`), and English (`en`) are first-class languages and all
+non-AI-generated UI strings exist as keyed messages in
+`frontend/src/i18n/locales/{sk,cs,en}.ts`. The chosen language is
+reflected in the URL via an always-present `/:lang/` path prefix
+(§ 9.6). AI-generated story content (title, topic, paragraphs, image
+concepts) is authored in the active language at run-creation time and
+translated lazily into other languages on demand (§ 5.5, § 7.1 Call 5).
+
+Throughout this document, **`{lang}`** denotes any one of `sk` / `cs` /
+`en`. The set of supported languages is fixed at MVP; adding a new
+language is a non-trivial change that touches the locale files, the
+`SUPPORTED_LANGUAGES` constant, and the prompt-side language list for
+Agent 0a and Agent 5.
 
 ---
 
@@ -100,7 +149,8 @@ anime-illustrator/
 │   │   │   ├── generate_prompts.md # Agent 1
 │   │   │   ├── evaluate_image.md   # Agent 2
 │   │   │   ├── revise_prompts.md   # Agent 3
-│   │   │   └── rethink_concept.md  # Agent 4
+│   │   │   ├── rethink_concept.md  # Agent 4
+│   │   │   └── translate.md        # Agent 5 — on-demand translations
 │   │   ├── db/
 │   │   │   ├── models.py           # SQLAlchemy ORM models
 │   │   │   ├── session.py          # async engine + session factory
@@ -119,8 +169,9 @@ anime-illustrator/
 │   │   │   ├── sessions.py         # Chat session endpoints + finalize
 │   │   │   ├── runs.py             # GET run snapshot + SSE + cancel
 │   │   │   └── static.py           # Image file serving (optional)
-│   │   └── workflows/
-│   │       └── default.json        # The single ComfyUI workflow (API format)
+│   │   └── workflows/              # ComfyUI workflow files (API format, § 7.2)
+│   │       ├── single-lora.json    # 1 human (+ optional companion); LoRA wired in
+│   │       └── no-lora.json        # 0 humans (companion-only or environment-only)
 │   ├── output/                     # Generated images (gitignored)
 │   ├── data/                       # SQLite file (gitignored)
 │   └── tests/
@@ -132,33 +183,42 @@ anime-illustrator/
     ├── tsconfig.json
     ├── index.html
     ├── src/
-    │   ├── main.ts
-    │   ├── App.vue
-    │   ├── router/                 # 2 routes: Home, Run
+    │   ├── main.ts                 # Vue + Pinia + vue-i18n + router + toaster
+    │   ├── App.vue                 # Mounts <RouterView/> + language switcher + <Toaster/>
+    │   ├── router/
+    │   │   └── index.ts            # /:lang/ prefix, redirect "/" → "/{detected}/"
     │   ├── stores/
-    │   │   ├── session.ts          # Chat session store
-    │   │   └── run.ts              # Pinia store for the run page
+    │   │   ├── session.ts          # Chat session store (i18n-aware welcome)
+    │   │   ├── run.ts              # Pinia store for the run page (+ translation cache)
+    │   │   └── locale.ts           # Active language + language-switch logic (§ 9.6)
     │   ├── views/
-    │   │   ├── HomeView.vue        # Chat interface (no textarea)
+    │   │   ├── HomeView.vue        # Chat / story-skeleton / run-link container
     │   │   └── RunView.vue         # Story + inline placeholders + cards
     │   ├── components/
     │   │   ├── ChatThread.vue
     │   │   ├── ChatMessage.vue
     │   │   ├── ChatComposer.vue
+    │   │   ├── StoryBuildingSkeleton.vue # § 9.1 Screen A: "Generating the story on …" + 5 skeletons
     │   │   ├── StoryBlocks.vue         # renders the list of blocks
     │   │   ├── StoryParagraph.vue      # one reactive paragraph block (§ 9.1)
     │   │   ├── InlineIllustration.vue
     │   │   ├── IllustrationCard.vue
     │   │   ├── ConceptPopover.vue      # header info-icon + popover (§ 9.1)
     │   │   ├── SkeletonBlock.vue       # generic skeleton loader (§ 9.1, § 9.3)
+    │   │   ├── LanguageSwitcher.vue    # § 9.6 top-right flag + name picker
     │   │   ├── ProgressCounter.vue
     │   │   ├── RunErrorBanner.vue
     │   │   └── CancelButton.vue
     │   ├── services/
     │   │   └── api.ts              # fetch wrappers + SSE EventSource
     │   ├── i18n/
-    │   │   ├── runErrors.ts
-    │   │   └── sessionErrors.ts
+    │   │   ├── index.ts            # vue-i18n setup, detection, route guard helpers (§ 9.6)
+    │   │   ├── locales/
+    │   │   │   ├── sk.ts
+    │   │   │   ├── cs.ts
+    │   │   │   └── en.ts
+    │   │   ├── runErrors.ts        # error_code → i18n key map
+    │   │   └── sessionErrors.ts    # error_code → i18n key map
     │   ├── types/                  # Shared TS types (mirror backend schemas)
     │   └── assets/styles/
     └── tests/
@@ -176,7 +236,7 @@ RUNPOD_API_KEY=...
 RUNPOD_ENDPOINT_ID=...
 DATABASE_URL=sqlite+aiosqlite:///./data/app.db
 OUTPUT_DIR=./output
-WORKFLOW_PATH=./app/workflows/default.json
+WORKFLOWS_DIR=./app/workflows
 AGENTS_DIR=./app/agents
 ALLOWED_ORIGIN=http://localhost:5173
 ```
@@ -187,7 +247,8 @@ a clear error message). Provide `.env.example` with placeholder values.
 ### Frontend
 
 A `.env` for the frontend with `VITE_API_BASE=http://localhost:8000` is
-sufficient. No secrets ever live in the frontend.
+sufficient. No secrets ever live in the frontend. The set of UI languages
+is hard-coded in the frontend (`sk`, `cs`, `en`) — not env-configurable.
 
 The Vite dev server proxies `/static` to the backend (see `vite.config.ts`)
 so that root-relative `image_url` paths returned by the API (e.g.
@@ -198,10 +259,12 @@ during development.
 
 ## 5. Data Model
 
-Four tables (`sessions`, `session_messages`, `runs`, `illustrations`),
-managed by **Alembic** migrations. See § 5.0 for the migration
-workflow; the schema definitions below are the source of truth and the
-initial baseline migration must match them exactly.
+Seven tables (`sessions`, `session_messages`, `runs`, `illustrations`,
+`story_translations`, `story_block_translations`,
+`illustration_concept_translations`), managed by **Alembic** migrations.
+See § 5.0 for the migration workflow; the schema definitions below are
+the source of truth and the initial baseline migration must match them
+exactly. The three `*_translations` tables are described in § 5.5.
 
 ### 5.0 Migrations (Alembic)
 
@@ -296,6 +359,8 @@ shaping a story.
 | `updated_at`          | DATETIME     | UTC                                                  |
 | `state`               | TEXT (enum)  | `CHATTING` / `AWAITING_CONFIRMATION` / `BUILDING_STORY` / `COMPLETED` / `FAILED` |
 | `collected_brief_json`| TEXT NULL    | JSON: the brief captured by Agent 0a; set on confirmation. Shape includes the optional `companions` pool (§ 7.1 Call 0a) but the column itself remains plain TEXT JSON — no schema change. |
+| `source_language`     | TEXT NULL    | One of `sk` / `cs` / `en`. Set on the assistant turn whose Agent 0a output first emits a non-`other` `language` field, and again on `phase="confirmed"` (locks the language Agent 0b will author in). Stays `NULL` while still gathering and never seen a concrete language. |
+| `topic_short`         | TEXT NULL    | Short ≤8-word topic phrase emitted by Agent 0a on the `phase="confirmed"` turn (in `source_language`). Surfaced to the frontend immediately so the story-skeleton view can render "Generating the story on …" before Agent 0b returns (§ 7.1 Call 0a, § 8.2, § 9.1 Screen A). |
 | `run_id`              | TEXT FK NULL | → `runs.id`; set when Agent 0b finishes and the run is created |
 | `error_code`          | TEXT NULL    | `STORY_BUILD_FAILED`, `CHAT_FAILED`, `INTERNAL_ERROR` (see § 8.6) |
 | `error_message`       | TEXT NULL    | Human-readable technical detail (English)            |
@@ -332,8 +397,11 @@ from raw input text.
 | `created_at`        | DATETIME     | UTC                                                         |
 | `updated_at`        | DATETIME     | UTC                                                         |
 | `status`            | TEXT (enum)  | `RUNNING` / `COMPLETED` / `FAILED` / `CANCELLED`            |
-| `story_title`       | TEXT         | The story's heading, produced by Agent 0b                   |
-| `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output). **Mutable** — when Agent 4 rewrites a paragraph (§ 7.1 Call 4), the orchestrator overwrites the corresponding `paragraph` block's `text` field in this column before continuing the branch. The blocks structure (order, types, scene_index values) never changes after run creation; only individual paragraph `text` values do. |
+| `source_language`   | TEXT         | One of `sk` / `cs` / `en`. The language Agent 0b authored the story in (carried forward from `sessions.source_language`). Acts as the "source of truth" marker: queries for the story in any other language go through the translation tables in § 5.5. |
+| `topic_short`       | TEXT         | The short topic phrase from Agent 0a's confirmed turn (in `source_language`). Stored on the run so reloads and snapshots can show "Generating the story on …" even if the user navigates away and back while Agent 0b is still working. |
+| `story_title`       | TEXT         | The story's heading, produced by Agent 0b **in `source_language`**. Translations live in `story_translations`. |
+| `story_topic_description` | TEXT   | One-sentence English-equivalent topic description produced by Agent 0b in `source_language`. Distinct from `topic_short`: this one is a full sentence Agent 0b expands from the brief, used by the runs UI as a subtitle and by Agent 5 as input when translating. |
+| `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output). Paragraph blocks carry **`source_language`** prose. **Mutable** — when Agent 4 rewrites a paragraph (§ 7.1 Call 4), the orchestrator overwrites the corresponding `paragraph` block's `text` field in this column before continuing the branch. The blocks structure (order, types, scene_index values) never changes after run creation; only individual paragraph `text` values do. Translations of paragraph text live in `story_block_translations` (§ 5.5). |
 | `style_guide_json`  | TEXT         | JSON; populated at run creation (no longer null)            |
 | `illustration_count`| INTEGER      | Final count after Agent 0b (always exactly 5, per § 7.1)    |
 | `completed_count`   | INTEGER      | Successful illustrations                                    |
@@ -357,12 +425,13 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `scene_excerpt`          | TEXT         | The passage of the generated story this scene depicts. **Mutable** — Agent 4 (§ 7.1 Call 4) returns a new excerpt together with its rewritten paragraph; the orchestrator overwrites this column with the new excerpt before continuing the branch. The new excerpt is always a verbatim substring of the new paragraph text (re-validated server-side, same rule as Agent 0b). |
 | `character_role`         | TEXT (enum)  | `male` / `female` / `mother` — drives MHA character + LoRA selection      |
 | `paragraph_index`        | INTEGER      | 0-based index of the paragraph block (among the paragraph subset of `runs.story_blocks_json`) that this illustration is bound to — i.e. the paragraph block sitting immediately before the matching `illustration` block in document order. Persisted at run creation so the orchestrator and the frontend agree on which paragraph Agent 4 rewrites, independently of any later text changes. |
-| `initial_concept`        | TEXT         | The concept from Agent 0b; never mutated                                  |
-| `current_concept`        | TEXT         | Current concept (changes on concept restart)                              |
+| `initial_concept`        | TEXT         | The concept from Agent 0b **in English** (canonical source of truth); never mutated.   |
+| `current_concept`        | TEXT         | Current concept **in English** (changes on concept restart). Translations live in `illustration_concept_translations` (§ 5.5). |
 | `state`                  | TEXT (enum)  | See § 6 state values                                                      |
 | `concept_attempt`        | INTEGER      | 1..3                                                                      |
 | `prompt_attempt`         | INTEGER      | 1..3                                                                      |
 | `current_prompts_json`   | TEXT NULL    | Last-used prompts (for debugging/visibility)                              |
+| `current_workflow`       | TEXT NULL    | The ComfyUI workflow name chosen for the most recent generate/revise call: `single-lora` or `no-lora` (§ 7.2.1). Persisted so reconnects and snapshots can show which workflow is in flight. NULL until Agent 1 has been called at least once. **Mutable** — Agent 3 may choose a different workflow on revision (rare; usually stays the same across revisions for a given concept). |
 | `last_verdict_json`      | TEXT NULL    | Last Claude verdict (for debugging/visibility)                            |
 | `image_path`             | TEXT NULL    | Relative path under `OUTPUT_DIR`, e.g. `runs/<run_id>/scene_0.png`        |
 | `companion_description`  | TEXT NULL    | The companion's `description` from Agent 0b (or Agent 4 after a rewrite), or NULL if no companion. **Mutable** — Agent 4 may set, change, or clear this. |
@@ -370,6 +439,138 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
+
+### 5.5 Translation tables
+
+Localised copies of every piece of AI-generated text live in dedicated
+tables, never as additional columns on `runs` or `illustrations`. This
+keeps the source-language schema stable, lets new languages be added
+without DDL changes, and avoids per-language column proliferation. The
+"source of truth" copy stays in the existing columns
+(`runs.story_title`, `runs.story_topic_description`,
+`runs.story_blocks_json[].text`, `illustrations.current_concept` /
+`initial_concept`); these tables hold the **non-source** language
+copies plus a hash of the source text they were translated from, so
+the translation client can detect when a stored translation has gone
+stale because the source mutated (e.g. an Agent 4 paragraph rewrite,
+or — for concepts — an Agent 4 concept change).
+
+All three tables share the same minimal columns:
+
+- `id` — UUID4 primary key.
+- `language` — `sk` / `cs` / `en`. The source-language row is NEVER
+  stored here; if `runs.source_language == 'sk'`, then no row with
+  `language='sk'` exists in any of these tables for that run.
+- `source_hash` — SHA-256 (hex, 64 chars) of the source text at the
+  time the translation was generated. On read, the server (or the
+  client, when it has both) recomputes the hash of the current source
+  text and compares: mismatch ⇒ the translation is stale and must be
+  refetched via Agent 5.
+- `text` — the localised text itself.
+- `created_at` / `updated_at` — UTC.
+
+#### `story_translations`
+
+One row per `(run_id, language)`. Carries the run-wide localised
+strings.
+
+| Column            | Type         | Notes                                                       |
+|-------------------|--------------|-------------------------------------------------------------|
+| `id`              | TEXT (UUID4) | Primary key                                                 |
+| `run_id`          | TEXT FK      | → `runs.id`                                                 |
+| `language`        | TEXT         | `sk` / `cs` / `en`; unique together with `run_id`           |
+| `story_title`     | TEXT         | Localised `runs.story_title`                                |
+| `story_topic_description` | TEXT | Localised `runs.story_topic_description`                    |
+| `story_title_source_hash` | TEXT | SHA-256 of `runs.story_title` at translation time           |
+| `story_topic_description_source_hash` | TEXT | SHA-256 of `runs.story_topic_description` at translation time |
+| `created_at`      | DATETIME     |                                                             |
+| `updated_at`      | DATETIME     | Bumped on every refresh via Agent 5                         |
+
+Unique constraint: `(run_id, language)`.
+
+#### `story_block_translations`
+
+One row per `(run_id, paragraph_index, language)`. `paragraph_index`
+is the same 0-based index used by `illustrations.paragraph_index` —
+i.e. the position within the *paragraph-only* subset of
+`runs.story_blocks_json` in document order. This grants per-paragraph
+freshness so Agent 4 rewriting a single paragraph only invalidates
+that paragraph's translations, not the whole story.
+
+| Column            | Type         | Notes                                                       |
+|-------------------|--------------|-------------------------------------------------------------|
+| `id`              | TEXT (UUID4) | Primary key                                                 |
+| `run_id`          | TEXT FK      | → `runs.id`                                                 |
+| `paragraph_index` | INTEGER      | 0-based index among paragraph blocks                        |
+| `language`        | TEXT         | `sk` / `cs` / `en`; unique together with `run_id` + `paragraph_index` |
+| `text`            | TEXT         | Localised paragraph text                                    |
+| `source_hash`     | TEXT         | SHA-256 of the source paragraph text at translation time    |
+| `created_at`      | DATETIME     |                                                             |
+| `updated_at`      | DATETIME     | Bumped on every refresh via Agent 5                         |
+
+Unique constraint: `(run_id, paragraph_index, language)`.
+
+#### `illustration_concept_translations`
+
+One row per `(illustration_id, language)`. Carries the localised
+*UI-display* concept text. Note: image prompts (Agent 1 / 3 output)
+are **never** translated — they go to ComfyUI as Danbooru tags and
+must stay in their canonical form. Only the human-readable concept
+text shown in the `ConceptPopover` is localised.
+
+| Column             | Type         | Notes                                                       |
+|--------------------|--------------|-------------------------------------------------------------|
+| `id`               | TEXT (UUID4) | Primary key                                                 |
+| `illustration_id`  | TEXT FK      | → `illustrations.id`                                        |
+| `language`         | TEXT         | `sk` / `cs` / `en`; unique together with `illustration_id`  |
+| `concept`          | TEXT         | Localised `illustrations.current_concept`                   |
+| `source_hash`      | TEXT         | SHA-256 of `illustrations.current_concept` at translation time |
+| `created_at`       | DATETIME     |                                                             |
+| `updated_at`       | DATETIME     | Bumped on every refresh via Agent 5                         |
+
+Unique constraint: `(illustration_id, language)`.
+
+**Eager seeding at run creation.** Because Agent 0b emits each
+illustration's `concept` in both English *and* the source language
+(§ 7.1 Call 0b), the orchestrator inserts an
+`illustration_concept_translations` row at run creation **only if**
+`runs.source_language != 'en'`. When the source language is English,
+no row is needed (English IS the source). The same eager seed applies
+when Agent 4 returns a new concept (it returns the English source AND
+the same-language translation) — the orchestrator updates / inserts
+the source-language translation row alongside the English-source
+update. Other languages remain absent until the user actually
+requests them via § 8.9.
+
+**Staleness rule for reads.** When the client requests the runs
+snapshot in `language=L` (§ 8.3) and `L != runs.source_language`:
+
+- For each translatable field, look up its `*_translations` row.
+- If the row is absent → that field is **missing in `L`**; the server
+  returns the source-language value and flags the gap so the client
+  knows to fetch via § 8.9.
+- If the row is present but the recomputed source hash does not match
+  the stored `source_hash` → that field is **stale in `L`**; the
+  server returns the stored stale text PLUS a flag so the client can
+  display the stale value immediately and trigger a background
+  refresh.
+
+The "show stale + refetch in background" behavior is what gives the
+user the requested experience of never staring at an empty paragraph
+while Agent 5 is working — they see the previous translation and it
+silently updates in place once Agent 5 returns.
+
+#### Indexes
+
+- `story_translations`: composite index on `(run_id, language)` (also
+  the unique constraint).
+- `story_block_translations`: composite index on
+  `(run_id, language, paragraph_index)`.
+- `illustration_concept_translations`: index on
+  `(illustration_id, language)` (also the unique constraint).
+
+These indexes serve the dominant access pattern: "give me everything
+needed to render run X in language L".
 
 ---
 
@@ -450,7 +651,7 @@ Each state transition writes to DB and emits one SSE event.
 
 ## 7. External Service Contracts
 
-### 7.1 Anthropic Messages API (6 distinct calls)
+### 7.1 Anthropic Messages API (7 distinct calls)
 
 All calls use `claude-sonnet-4-6`. Each agent's full system prompt lives
 in a Markdown file under `backend/app/agents/` and is loaded at startup
@@ -458,11 +659,12 @@ by `services/claude.py` (see § 7.4). The Pydantic schemas below are the
 binding wire contracts; the prose in each agent's `.md` file must produce
 output that validates against the corresponding schema.
 
-Strict JSON-only output is enforced for **Calls 0b through 4** via the
+Strict JSON-only output is enforced for **Calls 0b through 5** via the
 system prompt; **Call 0a (chat) returns a JSON envelope whose `reply`
-field is free-form Slovak chat text** — see Call 0a below. Every JSON
-response is validated with Pydantic, with up to `CLAUDE_JSON_RETRY` (= 2)
-re-prompts on parse failure before treating it as an error.
+field is free-form prose in the active user language** — see Call 0a
+below. Every JSON response is validated with Pydantic, with up to
+`CLAUDE_JSON_RETRY` (= 2) re-prompts on parse failure before treating
+it as an error.
 
 For the `evaluate_image` call, the image is passed as a base64 image block
 alongside the text content.
@@ -472,21 +674,25 @@ alongside the text content.
 **Purpose:** Conversational gathering of the story brief: the cast (subject
 to § 7.3.2) and the overall topic/concept. Detects when enough has been
 agreed, proposes a summary, and detects the user's natural-language
-confirmation.
+confirmation. Additionally **detects the user's chat language** and
+emits a short topic phrase on the confirmation turn so the frontend can
+render the story-skeleton view (§ 9.1 Screen A) before Agent 0b runs.
 
 **Input (to Claude):**
 - The full system prompt from `agents/chat.md`.
 - The full prior message transcript of the session, mapped to Claude
-  `messages` (the initial Slovak `intro` assistant message is included
-  as the first `assistant` turn so the model sees what the user has
-  read).
+  `messages`. The welcome message is **not** part of the transcript
+  sent to Claude — it lives only in the frontend (§ 9.6.2). The first
+  turn the model sees is therefore always the user's first message.
 - The freshly POSTed user message as the last `user` turn.
 
 **Output schema:**
 ```json
 {
-  "reply": "string (Slovak chat reply, free-form prose)",
+  "reply": "string (chat reply, free-form prose, in the same language as the user's latest message)",
   "phase": "gathering" | "awaiting_confirmation" | "confirmed",
+  "language": "sk" | "cs" | "en" | "other" | null,
+  "topic_short": "string (≤8 words, in the detected language, only on phase='confirmed')" | null,
   "collected_brief": {
     "characters": [
       { "role": "male" | "female" | "mother", "name_in_story": "string", "short_description": "string" }
@@ -500,6 +706,40 @@ confirmation.
 }
 ```
 
+**`language` semantics:**
+
+- Set to one of `sk` / `cs` / `en` when the model has enough signal from
+  the latest user turn to classify with confidence.
+- Set to `other` when the user clearly wrote in a language outside the
+  supported set (Polish, Hungarian, German, etc.). The frontend treats
+  `other` as "fall back to English" (§ 9.6.3).
+- Set to `null` only when the model lacks signal — e.g. the first turn
+  is a one-word emoji or pure punctuation. The frontend keeps its
+  current language until a future turn provides signal.
+- **Emission policy (server-enforced):** the agent emits a non-null
+  `language` on (a) the **first turn at which it can classify** and
+  (b) the **`phase="confirmed"` turn** (re-emitted so the server can
+  lock the source language for Agent 0b even if the user switched
+  languages mid-chat). On every other turn the field MAY be `null`;
+  the backend ignores `null` values and keeps `sessions.source_language`
+  unchanged. When the model emits a non-null value, the backend writes
+  it to `sessions.source_language` only on the two emission points
+  above; intermediate emissions are persisted to the message row only
+  (so the frontend can react via the auto-switch flow, § 9.6.3) and do
+  not overwrite `sessions.source_language` until the confirmed turn
+  locks it in.
+
+**`topic_short` semantics:**
+
+- Emitted only on `phase="confirmed"`. On every other phase the field
+  MUST be `null`.
+- Written in the detected `language` (or English if `language="other"`).
+- Concise: ≤ 8 words, capturing the topic in headline form (e.g.
+  *"Mladý hrdina v lete na vidieku"*, *"A girl saying goodbye to her
+  cat"*). The frontend renders this verbatim in the story-skeleton
+  view as: *"Generating the story on … "* / *"Vytváram príbeh o …"* /
+  *"Vytvářím příběh o …"*.
+
 Rules:
 
 - `phase="gathering"` — assistant still needs more or clearer input. `reply`
@@ -512,19 +752,26 @@ Rules:
 - `phase="confirmed"` — the assistant recognized the user's most recent
   message as approval of the previously proposed summary. `collected_brief`
   is the brief that the user approved (carried forward from the previous
-  turn).
+  turn). `topic_short` is set (per the rules above).
 
-  **`reply` is a fixed, deterministic Slovak string** (constant
-  `CONFIRMED_ACK_SK` in `backend/app/constants.py`, value:
-  `"Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"`). The system
-  prompt instructs Agent 0a to use exactly this string on confirmation
-  turns, and the server normalizes any close-but-not-identical reply
-  back to this constant before persisting / returning, so the frontend
-  can safely identify a confirmation turn purely by `phase` without
-  having to interpret free-form prose. This is what the frontend keys
-  off to auto-start the pipeline (§ 9.1 Screen A): `phase` is a
-  categorical machine marker; `reply` is only displayed verbatim in
-  the chat thread.
+  **The model is instructed to leave `reply` empty (`""`) on the
+  confirmed turn.** The chat-thread message shown to the user is a
+  fixed deterministic per-language acknowledgment that lives on the
+  frontend (`i18n.t('chat.confirmedAck')` — see § 9.6.2). The backend
+  also keeps a server-side copy of the same per-language strings in
+  `app/constants.py` as `CONFIRMED_ACK[lang]` (Slovak: "Skvelé, ide na
+  to. Pripravujem príbeh a ilustrácie…"; Czech: "Skvělé, jdeme na to.
+  Připravuji příběh a ilustrace…"; English: "Great, let's do it.
+  Preparing the story and illustrations…"). On `phase="confirmed"`
+  the server normalizes whatever the model wrote in `reply` to
+  `CONFIRMED_ACK[sessions.source_language]` (falling back to `en` if
+  the session's source language is `NULL` or `other`) before
+  persisting, so reloads from the database show the canonical string.
+  The frontend ignores the persisted `reply` in favor of
+  `i18n.t('chat.confirmedAck')` and only displays the persisted text
+  as a fallback if i18n is misconfigured. This is what the frontend
+  keys off to auto-start the pipeline (§ 9.1 Screen A): `phase` is a
+  categorical machine marker; the acknowledgment prose is purely UI.
 
 Hard rules enforced by the prompt (and re-checked server-side):
 
@@ -581,16 +828,22 @@ recovery) before storing or returning it.
 short story together with the illustration concepts. This is the single
 authoritative call that defines a run's content.
 
-**Input:** the validated `collected_brief` from Agent 0a (as JSON in the
-user turn).
+**Input (to Claude):** a JSON user turn containing
+- the validated `collected_brief` from Agent 0a;
+- `source_language` — the value the server resolved on the confirmed
+  turn (`sk` / `cs` / `en`; never `null` or `other` here — see § 8.2
+  for how the server resolves these cases before invoking Agent 0b);
+- `topic_short` — for Agent 0b's situational awareness (it must not
+  echo this verbatim, but the story should clearly be *on this topic*).
 
 **Output schema:**
 ```json
 {
   "story": {
-    "title": "string",
+    "title": "string (in source_language)",
+    "topic_description": "string (one full sentence, in source_language)",
     "blocks": [
-      { "type": "paragraph", "text": "string" },
+      { "type": "paragraph", "text": "string (in source_language)" },
       { "type": "illustration", "scene_index": 0 }
     ]
   },
@@ -603,9 +856,10 @@ user turn).
   "illustrations": [
     {
       "scene_index": 0,
-      "scene_excerpt": "string (verbatim slice of the story prose this illustration depicts)",
-      "concept": "string",
-      "character_role": "male" | "female" | "mother",
+      "scene_excerpt": "string (verbatim slice of the source-language story prose this illustration depicts)",
+      "concept": "string (the canonical English concept — single source of truth, used by Agents 1 / 2 / 3)",
+      "concept_localized": "string (the same concept in source_language; used by the UI ConceptPopover; same meaning, idiomatic phrasing) | null when source_language='en'",
+      "character_role": "male" | "female" | "mother" | null,
       "companion": {
         "description": "string (must match — case-insensitive substring or exact — one description from collected_brief.companions)",
         "interaction": "string (concrete visual relationship in this scene)"
@@ -635,13 +889,21 @@ Hard rules enforced by the prompt and re-checked server-side:
    finalize ends with `STORY_BUILD_FAILED`. The agent's system prompt
    states this rule explicitly so it plans the story arc around 5
    illustration beats from the start.
-5. **Cast.** Every `character_role` used in `illustrations` must
-   correspond to a character present in the approved brief. If the brief
-   has no `mother`, no illustration may have `character_role="mother"`.
-6. **Single-character scenes** (§ 7.3.3) and **specificity of expression /
-   gesture / action** (§ 7.3.4) apply — each `concept` must explicitly
-   mention at least one concrete facial expression, gesture/posture, or
-   action.
+5. **Cast.** Every non-null `character_role` used in `illustrations`
+   must correspond to a character present in the approved brief. If the
+   brief has no `mother`, no illustration may have
+   `character_role="mother"`. **`character_role` MAY be `null`** for an
+   illustration whose visible subject is the companion alone, or — very
+   rarely — a pure environment beat with no characters at all (see
+   rules #12 / #13 below).
+6. **Specificity of expression / gesture / action** (§ 7.3.4) applies
+   to every illustration that includes either a human character
+   (`character_role != null`) or a companion. Each such `concept` must
+   explicitly mention at least one concrete facial expression,
+   gesture/posture, or action. For the rare pure-environment beat
+   (rule #13), the concept must instead name a concrete, depictable
+   moment in the *environment* (lighting, weather, a specific object
+   in frame).
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
    technical constraints (single human character optionally accompanied
@@ -669,6 +931,32 @@ Hard rules enforced by the prompt and re-checked server-side:
     hand-object precision envelope (e.g., character pouring water,
     picking up a coin, holding something delicate), Agent 0b must not
     additionally place a companion that compounds the difficulty.
+12. **Per-illustration cast triplet (workflow-driving).** Every
+    illustration falls into exactly one of three cast shapes:
+    - **Single human + optional companion** — `character_role` is one
+      of `male` / `female` / `mother`; `companion` is null or set.
+      This is the dominant shape; the `single-lora.json` workflow
+      renders it (§ 7.2.1).
+    - **Companion alone** — `character_role` is `null`; `companion` is
+      set. Rendered by `no-lora.json`. Used for beats where the
+      companion's *own* presence (the cat asleep on the bed; the
+      dragon perched on a rooftop watching) carries the moment.
+    - **No characters** — `character_role` is `null`; `companion` is
+      `null`. Rendered by `no-lora.json`. **Rare** — reserved for
+      story-essential environment beats (the empty classroom after
+      she left; the storm rolling in over the harbor). Multiple
+      character-less illustrations in the same run are discouraged;
+      Agent 0b should not produce more than one such scene unless the
+      story arc strongly motivates it.
+13. **Workflow distribution discipline.** Agent 0b implicitly
+    determines the workflow each illustration will use via the cast
+    shape it returns (rule #12). It must design the story so that the
+    overall mix is sensible: most illustrations should feature a
+    human character. A run where 4-out-of-5 illustrations are
+    character-less environment beats is rejected at validation time
+    as poorly aligned with the app's purpose. The server caps
+    `no-human` illustrations (i.e. `character_role == null`) at
+    **≤ 2 out of 5** and re-prompts on violation.
 
 Unlike the previous spec, Agent 0b **does not** have a "no suitable
 scenes" escape hatch. The brief has already been negotiated and confirmed
@@ -677,36 +965,58 @@ hard rules above is treated as a Claude failure (`STORY_BUILD_FAILED`).
 
 #### Call 1 — `generate_prompts`
 
-**Input:** `current_concept`, `style_guide`, `character_role` (so the
-prompt can pull the right entry from `character_config`), and the
-optional `companion` (`{ description, interaction } | null`) attached
-to the illustration. When `companion` is non-null the agent must
-incorporate it per § 7.3.10 (companion prompting guidance) and apply
-the conditional adjustments to the negative baseline described in
-§ 7.3.6.
+**Input:** `current_concept` (English — single source of truth),
+`style_guide`, `character_role` (`male` / `female` / `mother` / `null` —
+when `null`, the agent treats the illustration as character-less; see
+rule below), and the optional `companion` (`{ description, interaction }
+| null`) attached to the illustration. When `companion` is non-null the
+agent must incorporate it per § 7.3.10 (companion prompting guidance)
+and apply the conditional adjustments to the negative baseline
+described in § 7.3.6.
 
 **Output schema:**
 ```json
 {
   "positive": "string",
-  "negative": "string"
+  "negative": "string",
+  "workflow": "single-lora" | "no-lora"
 }
 ```
 
 The `positive` field is the full per-scene positive prompt (character +
 environment + action + expression + companion if any, all expressed as
-Danbooru tags). The `negative` field is the full per-scene negative
-prompt. Style-level tags are NOT included here — they live in
-`style_guide` and are composed in by the workflow itself (see § 7.2).
-See § 7.3.4 and § 7.3.10 for the content requirements that this prompt
-must satisfy.
+Danbooru tags — *always in English*, regardless of the run's source
+language). The `negative` field is the full per-scene negative prompt.
+Style-level tags are NOT included here — they live in `style_guide` and
+are composed in by the workflow itself (see § 7.2). See § 7.3.4 and
+§ 7.3.10 for the content requirements that this prompt must satisfy.
+
+**`workflow` selection rule (hard-enforced):**
+
+- Return `"single-lora"` **iff** `character_role` is non-null (i.e. the
+  illustration shows exactly one human character — optionally
+  accompanied by one non-human companion). The character LoRA wiring
+  is taken from `character_config[role]` (§ 7.3.7) and the
+  `CHARACTER_LORA` placeholder is filled in by the workflow runner.
+- Return `"no-lora"` **iff** `character_role` is `null` (i.e. the
+  illustration shows no human — either the companion alone, or no
+  characters at all). The `no-lora.json` workflow does not have a
+  `CHARACTER_LORA` placeholder (§ 7.2.1).
+
+Any other combination (e.g. `workflow="single-lora"` with
+`character_role=null`, or `workflow="no-lora"` with a non-null
+`character_role`) is rejected server-side and re-prompted up to
+`CLAUDE_JSON_RETRY` times. The agent is told the rule is *purely
+mechanical* and gives no creative latitude — workflow follows directly
+from `character_role`.
 
 #### Call 2 — `evaluate_image`
 
-**Input:** image (base64), `current_concept`, `style_guide`,
-`character_role`, and the illustration's `companion` (`{ description,
-interaction } | null`). The agent's checklist is companion-aware
-(§ 7.3.5 items 1a + 1b).
+**Input:** image (base64), `current_concept` (English), `style_guide`,
+`character_role` (`male` / `female` / `mother` / `null`), and the
+illustration's `companion` (`{ description, interaction } | null`). The
+agent's checklist is companion-aware **and cast-aware** (§ 7.3.5 items
+1a + 1b + 1c).
 
 **Output schema:**
 ```json
@@ -729,13 +1039,19 @@ or
 
 #### Call 3 — `revise_prompts`
 
-**Input:** current `prompts`, last `verdict`, `current_concept`,
-`style_guide`, `character_role`, and the illustration's `companion`
-(`{ description, interaction } | null`). When `companion` is non-null
-the same companion guidance applies as in Call 1 (§ 7.3.10 + the
-§ 7.3.6 conditional negative adjustments).
+**Input:** current `prompts`, last `verdict`, `current_concept`
+(English), `style_guide`, `character_role` (`male` / `female` /
+`mother` / `null`), and the illustration's `companion` (`{ description,
+interaction } | null`). When `companion` is non-null the same companion
+guidance applies as in Call 1 (§ 7.3.10 + the § 7.3.6 conditional
+negative adjustments).
 
-**Output schema:** same as Call 1.
+**Output schema:** same as Call 1 (i.e. `{ positive, negative,
+workflow }`). The `workflow` selection rule is identical to Call 1 and
+is hard-enforced server-side. Agent 3 almost always returns the same
+workflow as the previous attempt — it has no reason to switch
+workflows just because a prompt failed — but the field is still
+required and re-validated to keep the contract uniform.
 
 #### Call 4 — `rethink_concept`
 
@@ -773,19 +1089,37 @@ particular *moment* the paragraph crystallizes can change as needed.
 - `companions_pool` — the brief's full `companions` pool (list of
   `{ description }` entries) so Agent 4 knows which companions, if any,
   it may select from.
+- `source_language` — `runs.source_language`. Tells Agent 4 which
+  language the rewritten paragraph and the localized concept must be
+  authored in. The canonical concept is still English (single source
+  of truth for Agents 1 / 2 / 3); the paragraph and the
+  `concept_localized` go in `source_language`.
 
 **Output schema:**
 ```json
 {
-  "concept": "string (a meaningfully different visual concept)",
-  "paragraph_text": "string (the rewritten Slovak paragraph that replaces current_paragraph_text)",
+  "concept": "string (canonical English concept, meaningfully different from failed_concept)",
+  "concept_localized": "string (the same concept in source_language) | null when source_language='en'",
+  "paragraph_text": "string (the rewritten paragraph that replaces current_paragraph_text, in source_language)",
   "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)",
+  "character_role": "male" | "female" | "mother" | null,
   "companion": {
     "description": "string (must match an entry in companions_pool)",
     "interaction": "string (concrete visual relationship in the new scene)"
   } | null
 }
 ```
+
+`character_role` is **also rewritable** by Agent 4 (it was already in
+Call 4's narrative scope but was implicit; making it explicit clarifies
+that Agent 4 can switch a scene from human-with-companion to
+companion-alone — and vice versa — as long as the resulting cast
+shape (Call 0b rule #12) is one of the three permitted triplets, and
+the global per-run cap of ≤ 2 character-less illustrations (Call 0b
+rule #13) is still respected across the run after applying this
+change). The orchestrator persists the new `character_role` on the
+illustration row and uses it on the subsequent Call 1 / Call 3, which
+in turn updates `current_workflow`.
 
 Hard rules enforced by the prompt and re-checked server-side:
 
@@ -856,19 +1190,125 @@ current concept. When the new companion differs from the previous
 emits an `illustration_companion_updated` SSE event (§ 8.4). No event
 is emitted when the companion is unchanged.
 
+Agent 4's `concept_localized` and `paragraph_text` together replace
+the corresponding source-language texts and **invalidate** any
+existing translations for the same paragraph and concept in
+`story_block_translations` / `illustration_concept_translations`
+(their `source_hash` no longer matches). The orchestrator does not
+proactively call Agent 5; staleness is resolved lazily on the next
+read in a non-source language (§ 5.5, § 8.9).
+
+#### Call 5 — `translate` (Agent 5, "the translator")
+
+**Purpose:** Translate AI-generated story content from its
+`source_language` into a requested target language. Invoked lazily,
+only when the user is viewing `/runs/:id` and switches into a
+language for which not every piece of content has an up-to-date
+translation. The contract is intentionally generic so a single call
+can refresh anywhere from one paragraph to the entire story.
+
+**When NOT to call:** Agent 5 is *only* invoked from the
+`POST /api/runs/{run_id}/translations` endpoint (§ 8.9). It is never
+invoked from the chat phase, from finalize, from any branch state
+transition, or from Agent 4. The chat phase has its own i18n flow
+(detection + auto-switch + frontend-localized welcome / ack), and
+the initial run-creation already emits source-language + English
+content, so Agent 5 is exclusively for *later* language switches.
+
+**Input (to Claude):** a JSON user turn containing
+- `source_language` — the run's source language;
+- `target_language` — one of `sk` / `cs` / `en`; never equal to
+  `source_language`;
+- `items` — an ordered array describing each piece of text to
+  translate. The shape is polymorphic so a single call can mix kinds:
+  ```json
+  [
+    { "kind": "story_title", "text": "string" },
+    { "kind": "story_topic_description", "text": "string" },
+    { "kind": "paragraph", "paragraph_index": 0, "text": "string" },
+    { "kind": "illustration_concept", "scene_index": 0, "text": "string" }
+  ]
+  ```
+  `text` is always the **current source-language value** of the
+  field. The backend selects items based on the staleness rule
+  (§ 5.5) and the client's request payload (§ 8.9).
+- `context` — a small JSON envelope carrying the run's
+  `story_title` and `story_topic_description` in the source language
+  (even when those are themselves being translated in this call).
+  This gives Agent 5 enough thematic context to keep tone and proper
+  nouns consistent across items.
+
+**Output schema:**
+```json
+{
+  "items": [
+    { "kind": "story_title", "text": "string (translated)" },
+    { "kind": "story_topic_description", "text": "string (translated)" },
+    { "kind": "paragraph", "paragraph_index": 0, "text": "string (translated)" },
+    { "kind": "illustration_concept", "scene_index": 0, "text": "string (translated)" }
+  ]
+}
+```
+
+Hard rules enforced by the prompt and re-checked server-side:
+
+1. **Same length and order.** `output.items` has exactly the same
+   length as `input.items`, in the same order, with each item's
+   `kind` matching the input position. Items that identify a
+   position (`paragraph_index`, `scene_index`) preserve that
+   identifier verbatim. Mismatches are rejected and re-prompted.
+2. **No translation drift.** The translator must preserve the
+   meaning, tone, register, and proper nouns of the source. The
+   shared persona-fragment from `build_story.md` (and
+   `rethink_concept.md`) is embedded in `translate.md` so the
+   translated prose matches the voice of the authored prose.
+3. **Idiomatic target language.** Output is fluent target-language
+   prose, not a literal word-for-word translation. Names of human
+   characters (`name_in_story`) are kept verbatim; only generic nouns
+   and verbs are rendered idiomatically.
+4. **No additions.** The translator must not invent new content,
+   editorialize, or add explanatory footnotes. Length parity is not
+   required, but the translation must cover the source's meaning
+   completely.
+5. **Concept translations are still UI text, not prompts.** The
+   `illustration_concept` items translate the human-readable concept
+   text shown in the `ConceptPopover`. They are **never** sent to
+   ComfyUI; the canonical English concept stays the source of truth
+   for image generation. The translator is reminded explicitly that
+   Danbooru tag syntax is not the goal here — prose is.
+6. **Empty input is rejected.** `items` must be non-empty. The
+   backend never sends an empty array; if all items are fresh, the
+   endpoint returns immediately without calling Claude (§ 8.9).
+
+The orchestrator persists the returned items into the appropriate
+`*_translations` tables (creating or updating rows by
+`(run_id, language[, paragraph_index | illustration_id])`) with the
+freshly-computed `source_hash` of each input `text`. If the source
+text changes again later (Agent 4 rewrite), the next read in that
+language detects the stale `source_hash` and triggers another Agent 5
+call (§ 5.5).
+
 ### 7.2 RunPod ComfyUI Serverless
 
-(Unchanged from previous spec.)
+The app ships **two** workflow files in `app/workflows/`, both in
+**ComfyUI API format**:
 
-The `default.json` workflow file is in **ComfyUI API format**. Five
-placeholder strings appear as values in this file and must be replaced
-recursively (matching by exact string equality, regardless of JSON path):
+- `single-lora.json` — single human character (optionally accompanied
+  by one non-human companion). The character LoRA is wired in via the
+  `CHARACTER_LORA` placeholder.
+- `no-lora.json` — no human character (companion alone, or pure
+  environment). No character LoRA is referenced in this file; the
+  `CHARACTER_LORA` placeholder is **not** present.
 
-- `POSITIVE_PROMPT`
-- `NEGATIVE_PROMPT`
-- `CHARACTER_LORA`
-- `STYLE_POSITIVE_PROMPT`
-- `STYLE_NEGATIVE_PROMPT`
+Both workflows share the same five placeholder strings (some optional)
+that the workflow runner replaces recursively (matching by exact string
+equality, regardless of JSON path):
+
+- `POSITIVE_PROMPT`           (required in both files)
+- `NEGATIVE_PROMPT`           (required in both files)
+- `CHARACTER_LORA`            (required in `single-lora.json`; absent in `no-lora.json`)
+- `STYLE_POSITIVE_PROMPT`     (required in both files)
+- `STYLE_NEGATIVE_PROMPT`     (required in both files)
 
 The workflow author composes style and scene prompts together inside the
 workflow itself. The recommended convention is to use two CLIP Text Encode
@@ -885,12 +1325,52 @@ Mapping:
 |---------------------------------|---------------------------------------|
 | `POSITIVE_PROMPT`               | Call 1 / Call 3 → `positive`          |
 | `NEGATIVE_PROMPT`               | Call 1 / Call 3 → `negative`          |
-| `CHARACTER_LORA`                | `character_config[role].lora_filename` (see § 7.3.7) |
+| `CHARACTER_LORA`                | `character_config[role].lora_filename` (see § 7.3.7) — used only by `single-lora.json` |
 | `STYLE_POSITIVE_PROMPT`         | Call 0b → `style_guide.overall_style_positive` |
 | `STYLE_NEGATIVE_PROMPT`         | Call 0b → `style_guide.overall_style_negative` |
 
 If a placeholder is not found in the workflow JSON, log a warning but
 continue. Track which placeholders were found, for diagnostics.
+
+#### 7.2.1 Workflow selection
+
+The workflow used for a given illustration is determined by Agent 1
+(and confirmed by Agent 3 on revision) via the `workflow` field of
+Call 1 / Call 3's output (§ 7.1). The choice is **purely mechanical**
+and follows from `illustrations.character_role`:
+
+| `character_role`             | Workflow            | Cast shape (per Call 0b rule #12)              |
+|------------------------------|---------------------|-------------------------------------------------|
+| `male` / `female` / `mother` | `single-lora.json`  | Single human + optional companion              |
+| `null`                       | `no-lora.json`      | Companion alone, or no characters at all       |
+
+Server-side enforcement:
+
+1. The workflow runner picks the workflow file by mapping the
+   agent-returned `workflow` string (`"single-lora"` / `"no-lora"`)
+   to `${WORKFLOWS_DIR}/single-lora.json` /
+   `${WORKFLOWS_DIR}/no-lora.json` respectively.
+2. Before dispatch, it verifies that the agent's choice matches the
+   illustration's current `character_role`:
+   - `single-lora` ⇔ non-null role,
+   - `no-lora`     ⇔ null role.
+   A mismatch is treated as a Claude failure and re-prompted up to
+   `CLAUDE_JSON_RETRY` times (§ 7.1 Call 1). If the agent still
+   misclassifies, the branch transitions to `FAILED` with a
+   `current_workflow=NULL` row and an informative `error_message`.
+3. `illustrations.current_workflow` is set to the agent-returned
+   value once verification passes, so reconnects and snapshots
+   accurately reflect which workflow is rendering each scene.
+4. When the agent returns `"single-lora"` but the workflow JSON has
+   no `CHARACTER_LORA` placeholder (or vice versa: returns
+   `"no-lora"` but the JSON unexpectedly has `CHARACTER_LORA`), the
+   workflow runner refuses to dispatch and logs a clear error — this
+   protects against the wrong file being shipped under the wrong
+   name.
+
+Per-language note: the workflow files are language-agnostic. Prompts
+go to ComfyUI in English regardless of the run's `source_language`
+(see Call 1 output rules and § 7.3.1).
 
 **Endpoint flow:**
 1. `POST https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run` with
@@ -959,12 +1439,23 @@ descriptors for each character are loaded from configuration (see
 
 #### 7.3.3 Scene composition constraint (MVP)
 
-Each illustration depicts exactly one of the three permitted human
-character roles, optionally accompanied by exactly one non-human,
-non-anthropomorphic companion drawn from the run's brief pool. Scenes
-with multiple human characters, group scenes, crowds, scenes with
-multiple non-human entities visible, and scenes with no clear
-character focus are excluded.
+Each illustration falls into one of three permitted cast shapes
+(§ 7.1 Call 0b rule #12):
+
+1. **Single human + optional companion** — dominant shape. One of the
+   three permitted human character roles, optionally accompanied by
+   exactly one non-human, non-anthropomorphic companion drawn from the
+   run's brief pool. Rendered by `single-lora.json` (§ 7.2.1).
+2. **Companion alone** — no human character; exactly one non-human
+   companion from the brief's pool is the visible subject. Rendered by
+   `no-lora.json`.
+3. **No characters** — *rare*; reserved for story-essential environment
+   beats. No human, no companion. Rendered by `no-lora.json`. Capped at
+   ≤ 2 per run by Call 0b rule #13.
+
+Scenes with multiple human characters, group scenes, crowds, scenes
+with multiple non-human entities visible, and scenes whose subject is
+ambiguous are excluded under all three shapes.
 
 A non-human companion has a body plan fundamentally different from
 humans — quadrupeds, winged creatures, serpents, mechanical entities
@@ -1270,7 +1761,7 @@ prompts.
 ### 7.4 Agent prompt files
 
 Each Claude agent's system prompt lives in its own Markdown file under
-`backend/app/agents/`. There are six files, one per call in § 7.1:
+`backend/app/agents/`. There are seven files, one per call in § 7.1:
 
 | File                  | Agent | Call name           |
 |-----------------------|-------|---------------------|
@@ -1280,10 +1771,11 @@ Each Claude agent's system prompt lives in its own Markdown file under
 | `evaluate_image.md`   | 2     | `evaluate_image`    |
 | `revise_prompts.md`   | 3     | `revise_prompts`    |
 | `rethink_concept.md`  | 4     | `rethink_concept`   |
+| `translate.md`        | 5     | `translate`         |
 
 Loading rules:
 
-- `services/claude.py` reads all six files at process startup and caches
+- `services/claude.py` reads all seven files at process startup and caches
   their contents in memory. The contents are used verbatim as the
   Anthropic `system` parameter for the corresponding call. No template
   substitution is applied to the prompt body; runtime context (the
@@ -1307,11 +1799,16 @@ end-to-end and contain at minimum:
 3. References to the relevant § 7.3 subsections that govern its output.
 4. The exact output schema the model must emit (as a fenced JSON block),
    matching the Pydantic schema in § 7.1.
-5. For Agent 0a only: an explicit reminder that `reply` is Slovak prose
-   and must not contain JSON, headings, or scene lists.
-6. For Agents 0b through 4: an explicit reminder that the only output is
-   the JSON object — no Markdown fences, no prefatory text, no trailing
-   commentary.
+5. For Agent 0a only: an explicit reminder that `reply` is prose in
+   the user's language and must not contain JSON, headings, or scene
+   lists; plus the language-detection / `topic_short` rules from § 7.1
+   Call 0a.
+6. For Agents 0b through 5: an explicit reminder that the only output
+   is the JSON object — no Markdown fences, no prefatory text, no
+   trailing commentary.
+7. For Agent 5 (`translate.md`): the embedded persona-fragment from
+   `build_story.md` (so translated prose matches the authored voice)
+   and the list of supported `target_language` codes.
 
 Agents 0a and 0b share a short persona-fragment ("the assistant's voice")
 that is embedded into each file's text (copy-pasted, not imported) so
@@ -1349,31 +1846,51 @@ Request body:
 ```
 
 Behavior:
-1. Create a `sessions` row with `state=CHATTING`.
-2. Insert the welcome message (§ 9.2.1) as the first `session_messages`
-   row (`role=assistant`, `phase=intro`).
-3. Insert the user's message as the second row (`role=user`).
-4. Synchronously invoke Agent 0a with the full transcript so far.
-5. Persist the assistant reply (third row) with the returned `phase`.
+1. Create a `sessions` row with `state=CHATTING` and
+   `source_language=NULL`. The welcome message is **not** persisted
+   here — it lives only on the frontend (§ 9.6.2).
+2. Insert the user's message as the first row (`role=user`).
+3. Synchronously invoke Agent 0a with the transcript so far.
+4. Persist the assistant reply (second row) with the returned `phase`.
+5. If Agent 0a's response carries a non-null `language`:
+   - If `language` is one of `sk` / `cs` / `en`, write it to
+     `sessions.source_language` (overwriting the previous value).
+   - If `language` is `"other"`, write `"en"` to
+     `sessions.source_language` (Agent 0b authors in English when the
+     user's actual language is unsupported).
+   The `language` value itself is also returned in the response so
+   the frontend can drive the auto-switch flow (§ 9.6.3).
 6. If `phase=confirmed` against the rules in § 7.1 Call 0a, the server
    downgrades it (see § 7.1 Call 0a server-side guard).
-7. If `phase=confirmed` (legitimately), the response still returns the
-   acknowledgment reply; the client is expected to follow up with
-   `POST /api/sessions/{id}/finalize` (§ 8.2). The backend does NOT
-   auto-finalize.
+7. If `phase=confirmed` (legitimately): the server normalizes `reply`
+   to the per-language `CONFIRMED_ACK` constant (§ 7.1 Call 0a) and
+   writes `topic_short` to `sessions.topic_short`. The response
+   returns the acknowledgment reply, the `topic_short`, and the
+   resolved `source_language`; the client is expected to follow up
+   with `POST /api/sessions/{id}/finalize` (§ 8.2). The backend does
+   NOT auto-finalize.
 
 Response 201:
 ```json
 {
   "session_id": "uuid",
   "state": "CHATTING" | "AWAITING_CONFIRMATION" | "BUILDING_STORY",
+  "source_language": "sk" | "cs" | "en" | null,
+  "detected_language": "sk" | "cs" | "en" | "other" | null,
+  "topic_short": "string" | null,
   "messages": [
-    { "id": "uuid", "order_index": 0, "role": "assistant", "phase": "intro", "content": "string", "created_at": "iso" },
-    { "id": "uuid", "order_index": 1, "role": "user", "phase": null, "content": "string", "created_at": "iso" },
-    { "id": "uuid", "order_index": 2, "role": "assistant", "phase": "gathering" | "awaiting_confirmation" | "confirmed", "content": "string", "created_at": "iso" }
+    { "id": "uuid", "order_index": 0, "role": "user", "phase": null, "content": "string", "created_at": "iso" },
+    { "id": "uuid", "order_index": 1, "role": "assistant", "phase": "gathering" | "awaiting_confirmation" | "confirmed", "content": "string", "created_at": "iso" }
   ]
 }
 ```
+
+`source_language` reflects `sessions.source_language` *after* the
+server's normalization (§ 8.1 step 5). `detected_language` is the
+raw `language` value Agent 0a returned on this turn — exposed
+separately so the frontend can detect mismatches and trigger the
+auto-switch + toast (§ 9.6.3). `topic_short` is non-null only when
+the assistant reply's `phase` is `"confirmed"`.
 
 Errors:
 - 400 if `content` is empty or over `CHAT_MESSAGE_MAX_CHARS`.
@@ -1400,10 +1917,19 @@ Response 200:
 {
   "session_id": "uuid",
   "state": "CHATTING" | "AWAITING_CONFIRMATION" | "BUILDING_STORY",
+  "source_language": "sk" | "cs" | "en" | null,
+  "detected_language": "sk" | "cs" | "en" | "other" | null,
+  "topic_short": "string" | null,
   "user_message": { "id": "uuid", "order_index": N, "role": "user", "phase": null, "content": "string", "created_at": "iso" },
   "assistant_message": { "id": "uuid", "order_index": N+1, "role": "assistant", "phase": "gathering" | "awaiting_confirmation" | "confirmed", "content": "string", "created_at": "iso" }
 }
 ```
+
+Same i18n semantics as `POST /api/sessions`: `source_language` is the
+post-normalization value persisted on the session;
+`detected_language` is the raw `language` from this turn's Agent 0a
+output; `topic_short` is non-null only when `assistant_message.phase
+=== "confirmed"`. See § 9.6.3 for the frontend auto-switch flow.
 
 Errors:
 - 404 if session does not exist.
@@ -1423,6 +1949,8 @@ Response 200:
   "session": {
     "id": "uuid",
     "state": "CHATTING|AWAITING_CONFIRMATION|BUILDING_STORY|COMPLETED|FAILED",
+    "source_language": "sk|cs|en|null",
+    "topic_short": "string|null",
     "run_id": "uuid|null",
     "error_code": "string|null",
     "error_message": "string|null",
@@ -1433,6 +1961,11 @@ Response 200:
 }
 ```
 
+The session row carries `source_language` and `topic_short` so a
+direct navigation to `/runs/:id` (or a reload of the chat page after
+confirmation) can render the story-skeleton view (§ 9.1 Screen A)
+correctly while Agent 0b is still working.
+
 ### 8.2 Finalize — chat → run handoff
 
 #### `POST /api/sessions/{id}/finalize`
@@ -1441,40 +1974,83 @@ Triggered by the frontend after the user has confirmed (i.e. after a
 message exchange that landed on `state=AWAITING_CONFIRMATION` followed
 by a user reply that produced an `assistant_message.phase=confirmed`).
 
-Behavior (blocking):
+Behavior (non-blocking — returns as soon as the building-story
+intent is recorded, so the frontend can switch from the chat thread
+to the story-skeleton view immediately):
+
 1. Reject with 409 if session is not in a confirmable state. A
    confirmable session is one whose latest assistant message has
    `phase=confirmed`, and whose `state` is one of
-   `AWAITING_CONFIRMATION` or `CHATTING` (the latter occurs because step
-   2 below has not yet run).
-2. Transition session to `state=BUILDING_STORY`.
-3. Invoke Agent 0b synchronously with the brief stored on the session
-   (the last validated `collected_brief`).
-4. Validate the result against the schema and the hard rules in § 7.1
-   Call 0b. On validation failure after retries: mark session
-   `state=FAILED`, set `error_code=STORY_BUILD_FAILED`, respond 502.
-5. Create a `runs` row in `status=RUNNING`, populated with
-   `story_title`, `story_blocks_json`, `style_guide_json`,
-   `illustration_count`. Create one `illustrations` row per scene in
-   `state=PENDING`.
-6. Schedule the per-illustration branches (§ 6) as a background task.
-7. Update the session: `state=COMPLETED`, `run_id=<new run id>`.
+   `AWAITING_CONFIRMATION` or `CHATTING` (the latter occurs because
+   step 2 below has not yet run).
+2. Resolve `source_language`: if `sessions.source_language` is
+   `NULL` (the user never gave detectable signal), default to `"en"`
+   and write it back to the session. Already-resolved values
+   (including `"en"` previously coerced from `"other"`) are kept
+   verbatim.
+3. Transition session to `state=BUILDING_STORY`. Persist
+   `source_language` and `topic_short` on the session row if not
+   already persisted (the latter was set on the confirmed turn, so
+   this is usually a no-op).
+4. Respond **202 Accepted** with the resolved language + topic. The
+   server then *asynchronously* (background task) invokes Agent 0b
+   and, on success, creates the `runs` + `illustrations` rows,
+   transitions the session to `COMPLETED` + `run_id=<id>`, and
+   begins the per-illustration branches (§ 6). On Agent 0b failure
+   after retries it transitions the session to `FAILED` with
+   `error_code=STORY_BUILD_FAILED`.
+5. The frontend learns the eventual outcome via a session-level
+   SSE stream (`GET /api/sessions/{id}/events`, § 8.2.1).
+   Specifically: a `story_built` event carries the new `run_id`
+   when Agent 0b succeeds (the frontend then navigates to
+   `/runs/:run_id`); a `story_build_failed` event carries the
+   `error_code` / `error_message` when it does not.
 
-Response 201:
+Response 202:
 ```json
-{ "run_id": "uuid" }
+{
+  "session_id": "uuid",
+  "state": "BUILDING_STORY",
+  "source_language": "sk" | "cs" | "en",
+  "topic_short": "string"
+}
 ```
 
 Errors:
 - 404 if session does not exist.
 - 409 if session is not in a confirmable state.
-- 502 if Agent 0b fails after retries (`error_code=STORY_BUILD_FAILED`).
-- 500 if any other unhandled exception occurs (`error_code=INTERNAL_ERROR`).
+- 500 if scheduling the background task itself fails
+  (`error_code=INTERNAL_ERROR`). Agent 0b failures do not surface as
+  HTTP errors here — they surface via the SSE stream in § 8.2.1.
 
-### 8.3 `GET /api/runs/{run_id}`
+#### 8.2.1 `GET /api/sessions/{id}/events` (SSE)
+
+Session-level SSE stream used by the frontend during the
+`BUILDING_STORY` phase. The stream opens once the client receives
+the 202 from `POST /api/sessions/{id}/finalize` and closes on the
+first terminal event.
+
+On connection, the server emits a synthetic `session_snapshot`
+event built from the current session row, so reconnects pick up the
+latest state without races.
+
+| Event                  | Payload                                                                          |
+|------------------------|----------------------------------------------------------------------------------|
+| `session_snapshot`     | `{ "state", "source_language", "topic_short", "run_id" \| null, "error_code" \| null, "error_message" \| null }` |
+| `story_built`          | `{ "run_id": "uuid" }` — Agent 0b succeeded; the run is ready                    |
+| `story_build_failed`   | `{ "error_code": "STORY_BUILD_FAILED", "error_message": "string" }`              |
+| `heartbeat`            | `{}` every 15 s                                                                  |
+
+The stream closes after `story_built` or `story_build_failed`. The
+frontend then closes the EventSource and either navigates to
+`/runs/:run_id` or shows the session error banner (§ 9.1 Screen A).
+
+### 8.3 `GET /api/runs/{run_id}?lang={lang}`
 
 Returns a snapshot of the run and all its illustrations. Used by the
-frontend on reconnect / direct navigation.
+frontend on reconnect / direct navigation. The `lang` query parameter
+is optional and defaults to the run's `source_language`. Accepted
+values: `sk` / `cs` / `en`.
 
 Response 200:
 ```json
@@ -1483,9 +2059,15 @@ Response 200:
     "id": "uuid",
     "session_id": "uuid",
     "status": "RUNNING|COMPLETED|FAILED|CANCELLED",
-    "story_title": "string",
+    "source_language": "sk|cs|en",
+    "language": "sk|cs|en",
+    "story_title": "string (in `language`)",
+    "story_title_translation_state": "source|fresh|stale|missing",
+    "story_topic_description": "string (in `language`)",
+    "story_topic_description_translation_state": "source|fresh|stale|missing",
+    "topic_short": "string (in source_language; not translated by Agent 5)",
     "story_blocks": [
-      { "type": "paragraph", "text": "string" },
+      { "type": "paragraph", "paragraph_index": 0, "text": "string (in `language`)", "translation_state": "source|fresh|stale|missing" },
       { "type": "illustration", "scene_index": 0 }
     ],
     "style_guide": { ... } | null,
@@ -1501,10 +2083,12 @@ Response 200:
     {
       "id": "uuid",
       "scene_index": 0,
-      "scene_excerpt": "string",
+      "scene_excerpt": "string (in `language`)",
       "paragraph_index": 0,
-      "character_role": "male|female|mother",
-      "current_concept": "string",
+      "character_role": "male|female|mother|null",
+      "current_concept": "string (in `language` — UI-display concept; the canonical English source is on the server, never sent)",
+      "current_concept_translation_state": "source|fresh|stale|missing",
+      "current_workflow": "single-lora|no-lora|null",
       "state": "PENDING|...|COMPLETED|FAILED|CANCELLED",
       "concept_attempt": 1,
       "prompt_attempt": 1,
@@ -1514,6 +2098,41 @@ Response 200:
   ]
 }
 ```
+
+`translation_state` semantics (per § 5.5):
+
+- `"source"` — `language == run.source_language`; the field is the
+  canonical source. No translation row consulted.
+- `"fresh"` — translation row exists and its `source_hash` matches
+  the current source. The returned text is the up-to-date
+  translation.
+- `"stale"` — translation row exists but its `source_hash` does NOT
+  match (source mutated since translation). The returned text is the
+  stored *stale* translation; the client should call § 8.9 in the
+  background to refresh.
+- `"missing"` — no translation row exists. The returned text is the
+  source-language fallback; the client should call § 8.9 to fill
+  the gap.
+
+Notes:
+
+- `topic_short` is intentionally never translated by Agent 5 — it is
+  a confirmation-time string that lives only as a "Generating the
+  story on …" header before the run actually exists in `runs`. By
+  the time the user lands on `/runs/:id`, the skeleton is already
+  gone and `topic_short` is purely an archival/snapshot field; the
+  UI uses `story_topic_description` instead.
+- `current_concept` returned here is the **UI-display** concept in
+  the requested language. The English canonical concept is not part
+  of this response (it stays server-side for Agents 1/2/3). Only
+  the staleness machinery uses it.
+- `scene_excerpt` follows the same translation logic as paragraphs
+  (it is conceptually a "view" of a paragraph): for the requested
+  language, the server computes the excerpt from the localised
+  paragraph text by finding the same character range. When the
+  paragraph translation is `missing` or `stale`, the excerpt is
+  returned in the source language together with the appropriate
+  `translation_state` carried on the paragraph block.
 
 `image_url` is `null` until completed, then `/static/runs/<run_id>/scene_N.png`.
 
@@ -1535,10 +2154,18 @@ block this illustration is bound to without walking the blocks array.
 It is stable for the lifetime of the run — Agent 4 rewrites the
 paragraph's `text`, never its position.
 
-### 8.4 `GET /api/runs/{run_id}/events`  (SSE)
+### 8.4 `GET /api/runs/{run_id}/events?lang={lang}`  (SSE)
 
 (Unchanged contract from previous spec; payload shape updated to match
 § 8.3.)
+
+The optional `lang` query parameter selects which language all
+language-bearing payloads are rendered in (defaults to the run's
+`source_language`). The server uses the same translation-resolution
+logic as § 8.3 — present-translation, stale-translation, or
+source-fallback are all valid and are flagged via `translation_state`
+fields where applicable. Two clients on the same run may subscribe in
+different languages independently.
 
 On connection, the server emits a synthetic `snapshot` event built from
 current DB state (mirroring the shape of `GET /api/runs/{run_id}`), then
@@ -1555,10 +2182,12 @@ SSE event types (`event:` field) and JSON payloads:
 
 | Event                       | Payload                                                                 |
 |-----------------------------|-------------------------------------------------------------------------|
-| `snapshot`                  | `{ "run": {...}, "illustrations": [...] }`                              |
-| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept", "scene_excerpt" }` |
-| `paragraph_updated`         | `{ "paragraph_index", "text" }`                                         |
+| `snapshot`                  | `{ "run": {...}, "illustrations": [...] }` — same shape as § 8.3, in subscriber's `lang` |
+| `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept", "current_concept_translation_state", "scene_excerpt", "current_workflow" }` |
+| `paragraph_updated`         | `{ "paragraph_index", "text", "translation_state" }`                    |
 | `illustration_companion_updated` | `{ "illustration_id", "scene_index", "companion": { "description", "interaction" } \| null }` |
+| `illustration_role_updated` | `{ "illustration_id", "scene_index", "character_role": "male\|female\|mother\|null" }` — emitted only when Agent 4 swaps a scene's cast shape |
+| `translations_refreshed`    | `{ "language", "items": [ { "kind": "story_title\|story_topic_description\|paragraph\|illustration_concept", "paragraph_index"?: N, "scene_index"?: N, "text": "string" } ] }` — emitted to every subscriber after § 8.9 completes, so multi-tab views in the same language stay in sync |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
 | `run_completed`             | `{ "completed": N, "failed": M }`                                       |
@@ -1636,6 +2265,82 @@ Response 200:
 
 Returns 409 if the run is already in a terminal state.
 
+### 8.9 `POST /api/runs/{run_id}/translations`
+
+On-demand translation endpoint that backs the runs-view language
+switcher. Invoked by the frontend whenever the user switches to a
+language for which some piece of run content is `missing` or `stale`
+(per § 5.5 / § 8.3). May also be called proactively by the FE on
+mount when the requested language is non-source.
+
+Request body:
+
+```json
+{
+  "target_language": "sk" | "cs" | "en",
+  "items": [
+    { "kind": "story_title" },
+    { "kind": "story_topic_description" },
+    { "kind": "paragraph", "paragraph_index": 0 },
+    { "kind": "illustration_concept", "scene_index": 0 }
+  ]
+}
+```
+
+- `target_language` must differ from the run's `source_language`. A
+  request with `target_language == run.source_language` is rejected
+  with **400** (nothing to translate).
+- `items` is non-empty and lists exactly the fields the client wants
+  refreshed. The server looks up the *current source-language* value
+  of each item, builds the Agent 5 input (§ 7.1 Call 5), and on
+  success persists each result into the corresponding translation
+  table (creating or updating the row keyed by the item's natural
+  identifier) with a freshly-computed `source_hash`.
+- Items the server already considers `fresh` (existing row, matching
+  `source_hash`) are **skipped silently** — the server filters them
+  out of the Agent 5 input. This is the "never translate twice"
+  guarantee: if a tab races to call this endpoint with items another
+  tab has already refreshed, the second tab's call is effectively a
+  no-op for those items.
+- If the resulting filtered input is empty (all requested items are
+  already fresh), the server skips Agent 5 entirely and returns 200
+  with the current values from the translation tables.
+
+Response 200:
+
+```json
+{
+  "target_language": "sk",
+  "items": [
+    { "kind": "story_title", "text": "string (translated)" },
+    { "kind": "paragraph", "paragraph_index": 0, "text": "string (translated)" },
+    { "kind": "illustration_concept", "scene_index": 0, "text": "string (translated)" }
+  ]
+}
+```
+
+The response items mirror the *resolved* state of every requested
+item — whether it was freshly translated by this call or already
+fresh in the DB. The frontend writes each item to the same place in
+its Pinia store regardless of whether Agent 5 actually ran.
+
+Errors:
+
+- 400 if `target_language` equals `run.source_language`, if
+  `items` is empty, if an unknown `kind` appears, or if an item
+  identifier (`paragraph_index` / `scene_index`) is out of range
+  for this run.
+- 404 if the run does not exist.
+- 502 if Agent 5 fails after `CLAUDE_JSON_RETRY` retries; the
+  endpoint still persists any items it received valid translations
+  for (Agent 5 returns its items in one call, so partial results
+  only occur on parse-recovery edges — see § 7.1 Call 5 rule #1).
+
+Side effect: emits a `translations_refreshed` SSE event (§ 8.4) on
+the run's event bus, scoped to subscribers in `target_language`, so
+sibling tabs / windows pick up the same translations without having
+to re-request them.
+
 ### 8.6 Error codes
 
 The following `error_code` values are defined for MVP.
@@ -1653,6 +2358,12 @@ The following `error_code` values are defined for MVP.
 | `error_code`           | Meaning                                                                                          |
 |------------------------|--------------------------------------------------------------------------------------------------|
 | `INTERNAL_ERROR`       | Any unhandled exception in the orchestrator after the run was already created.                   |
+
+**Translation endpoint** (HTTP-only, not persisted on any row):
+
+| `error_code`           | Meaning                                                                                          |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| `TRANSLATE_FAILED`     | Agent 5 failed after `CLAUDE_JSON_RETRY` retries. Returned in the 502 body so the frontend can show a toast and keep displaying the stale / source-language fallback. |
 
 The previous run-level codes `NO_SUITABLE_SCENES` and `STEP0_FAILED` are
 removed. Their replacement at the session layer is `STORY_BUILD_FAILED`
@@ -1683,9 +2394,22 @@ take down the whole run.
 
 ### 9.1 Screens
 
-The frontend is a 2-screen SPA.
+The frontend is a 2-screen SPA, served under a mandatory `/:lang/`
+path prefix (§ 9.6). Visiting `/` redirects (server-side 200 or
+client-side `replace`) to `/{detected}/` where `detected` is one of
+`sk` / `cs` / `en`. Both screens described below sit under that
+prefix:
 
-#### Screen A — Home (`/`)
+- **Screen A — Home:** `/sk/`, `/cs/`, `/en/`.
+- **Screen B — Run:** `/sk/runs/:run_id`, `/cs/runs/:run_id`,
+  `/en/runs/:run_id`.
+
+The two `:lang/` variations of the same logical screen are the same
+route record in `vue-router`; navigating between them keeps the
+component instance mounted (§ 9.6.5), so switching language never
+unmounts the chat thread or the runs view.
+
+#### Screen A — Home (`/:lang/`)
 
 **Purpose:** Chat with the virtual assistant (Agent 0a) to agree on a
 story brief, then trigger story generation.
@@ -1695,29 +2419,60 @@ input control is the chat composer at the bottom of the chat thread.
 
 **Elements (top to bottom):**
 
-1. **Header:** "Anime ilustrátor". A short subtitle: "Vytvor krátky
-   ilustrovaný anime príbeh s pomocou asistenta."
+1. **Header:** the app title (`i18n.t('app.title')`) and a short
+   subtitle (`i18n.t('app.subtitle')`). The header row also hosts the
+   `LanguageSwitcher` in its **top-right** slot, anchored to the
+   centered app container; the switcher is sized so it never overlaps
+   the title or the subtitle at any supported viewport width (§ 9.8).
 2. **Chat thread** (`ChatThread`): a vertically scrolling list of
    `ChatMessage` items. Assistant messages are aligned left with the
    assistant's avatar; user messages are aligned right. The very first
-   message is always the welcome message (see § 9.2.1) rendered with
-   the `#word#` segments shown in **bold**.
-3. **"Building story" placeholder:** while `session.state ===
-   "BUILDING_STORY"`, the chat composer is replaced by an inline status
-   strip: a spinner and the Slovak text "Pripravujem príbeh a
-   ilustrácie...". The chat thread is read-only during this phase.
+   message is always the welcome message — rendered locally from
+   `i18n.t('chat.welcome')` (see § 9.6.2). The welcome is **not** a
+   real `session_messages` row; it is a frontend-only "pretend" turn
+   that swaps language together with the rest of the UI. Once the
+   user submits their first message, the chat thread shows the
+   welcome (still local), the user's message, and from then on the
+   real persisted turns. The welcome's `#word#`-marked segments
+   render in **bold**.
+3. **Story-building skeleton** (`StoryBuildingSkeleton`): while
+   `session.state === "BUILDING_STORY"`, the chat thread and the
+   composer are *both* removed from the layout and replaced by this
+   component. It shows:
+   - A single line `i18n.t('home.generatingOn', { topic: session.topic_short })`,
+     e.g. *"Vytváram príbeh o: Mladý hrdina v lete na vidieku"*
+     / *"Vytvářím příběh o: Mladý hrdina v létě na venkově"*
+     / *"Generating the story on: A boy's summer in the countryside"*.
+     `topic_short` is taken from the session row (§ 5.1) — it was
+     produced by Agent 0a on the confirmed turn in the session's
+     `source_language`. It is intentionally **not** translated by the
+     UI language switcher; the boilerplate label *"Generating the
+     story on: "* is localized, the topic phrase is the author-language
+     verbatim.
+   - Five `SkeletonBlock` paragraph-skeletons stacked vertically at a
+     "middle generic" line height (~ 4–6 pulsing lines each). No
+     illustration cards yet — they only appear after navigation to
+     `/:lang/runs/:run_id`.
+   The skeleton view is entered as soon as `POST /api/sessions/{id}/finalize`
+   returns 202 (§ 8.2). The frontend then opens
+   `GET /api/sessions/{id}/events` (§ 8.2.1) and listens for
+   `story_built` (→ navigate to `/:lang/runs/:run_id`) or
+   `story_build_failed` (→ swap the skeleton for the session error
+   banner, restore the chat thread read-only with the transcript).
 4. **Chat composer** (`ChatComposer`): a single-line auto-expanding
-   `<textarea>` with a "Odoslať" button. Submits on Enter (Shift+Enter
-   inserts newline). Disabled when:
-   - the session is in `BUILDING_STORY`, `COMPLETED`, or `FAILED` state,
+   `<textarea>` with a send button (`i18n.t('chat.send')`). Submits on
+   Enter (Shift+Enter inserts newline). Hidden entirely while the
+   story-building skeleton is active. Disabled when:
+   - the session is `COMPLETED` or `FAILED`,
    - or a request is in flight,
    - or the input is empty or exceeds `CHAT_MESSAGE_MAX_CHARS`.
    A character counter "X / CHAT_MESSAGE_MAX_CHARS" appears below.
 5. **Confirm hint:** when the latest assistant message has
-   `phase="awaiting_confirmation"`, a small Slovak hint appears
-   underneath the composer: "Ak súhlasíš so zhrnutím, odpovedz napríklad
-   'áno' alebo 'do toho'." There is no separate confirm button — the
-   user types their answer like any other reply.
+   `phase="awaiting_confirmation"`, a small localized hint appears
+   underneath the composer (`i18n.t('chat.confirmHint')`), e.g.
+   "Ak súhlasíš so zhrnutím, odpovedz napríklad 'áno' alebo 'do toho'."
+   There is no separate confirm button — the user types their answer
+   like any other reply.
 
    The chat experience also covers the optional companion topic
    (§ 7.1 Call 0a rules #6–#9). Agent 0a is expected to surface the
@@ -1733,8 +2488,10 @@ input control is the chat composer at the bottom of the chat thread.
    Agent 0a returns `phase="confirmed"` (see Behavior below). The
    `ChatComposer` exposes only the "Odoslať" send control.
 6. **Error banner** (`SessionErrorBanner`): visible when
-   `session.state === "FAILED"`. Displays a Slovak message mapped from
-   `session.error_code` via `src/i18n/sessionErrors.ts` (see § 9.4),
+   `session.state === "FAILED"`. Displays a message localized via
+   `i18n.t(sessionErrors[session.error_code])` against the active
+   locale, where `sessionErrors` maps each code to an i18n key in
+   `src/i18n/sessionErrors.ts` (see § 9.4),
    plus a "Skúsiť znova" link that resets to a fresh `/` (drops the
    in-memory session and reloads).
 
@@ -1771,29 +2528,46 @@ input control is the chat composer at the bottom of the chat thread.
     populated and the optimistic row is reconciled with the persisted
     one.
 - After receiving an assistant reply with `phase="confirmed"`:
-  - Show the reply in the chat.
+  - Show the per-language `i18n.t('chat.confirmedAck')` as the
+    rendered text of that assistant bubble (ignore the persisted
+    `content` for display — the i18n key is the source of truth,
+    § 7.1 Call 0a).
   - Immediately call `POST /api/sessions/{id}/finalize` (no extra UI
     action required). The trigger is the `phase` field on the reply —
     never the prose content — so localisation and minor wording drift
     cannot break the handoff.
-  - Show the "Pripravujem príbeh a ilustrácie..." status while the call
-    is in flight.
-  - On 201 with `{ run_id }`, navigate to `/runs/:run_id`.
-  - On error, show the session error banner.
+  - On 202: transition the local UI into the
+    `StoryBuildingSkeleton` view (§ 9.1 Screen A element #3) using
+    `topic_short` from the response. Open the session SSE stream
+    (§ 8.2.1).
+  - On the SSE `story_built` event, navigate to `/:lang/runs/:run_id`.
+  - On `story_build_failed`, exit the skeleton, show the session
+    error banner.
+  - On any other error during finalize, show the session error
+    banner.
 
-#### Screen B — Run (`/runs/:run_id`)
+- On any session POST response (`POST /api/sessions` or
+  `POST /api/sessions/{id}/messages`), the store also processes
+  `detected_language` per § 9.6.3 to drive the auto-switch + toast.
+
+#### Screen B — Run (`/:lang/runs/:run_id`)
 
 **Purpose:** Show the generated story together with progress of the
 illustrations, or the final state of a completed run.
 
 **Elements (top to bottom):**
 
-1. **Header:** A back link "← Nový príbeh".
+1. **Header:** A back link (`i18n.t('runs.newStory')`) on the left
+   and the `LanguageSwitcher` in the top-right slot (§ 9.8). The
+   switcher is positioned so it never overlaps the story title even
+   when titles are unusually long (multi-line title still keeps a
+   right gutter for the switcher).
 2. **Run status pill:** "Beží" (with spinner) / "Hotovo" / "Zlyhalo" /
    "Zrušené".
 3. **Run-level error banner** (`RunErrorBanner`): visible when
-   `run.status === "FAILED"`. Maps `run.error_code` to a Slovak
-   message via `src/i18n/runErrors.ts` (§ 9.4).
+   `run.status === "FAILED"`. Maps `run.error_code` to an i18n key
+   via `src/i18n/runErrors.ts` and renders the message in the active
+   locale (§ 9.4).
 4. **Global progress:** "Hotové: K z N". Below it, a minimal horizontal
    bar showing `completed_count / illustration_count`.
 5. **Cancel button** (`CancelButton`): visible only while status is
@@ -1883,10 +2657,20 @@ small info-icon (e.g. a question-mark or info glyph) at the right end
 of the header row, after the state label. On hover (desktop) or
 focus / tap (touch / keyboard) the icon reveals a popover containing:
 
-- A small label, e.g. "Aktuálny koncept".
-- The reactive `illustration.current_concept` text.
-- Below it, a subtler line "Pasáž príbehu:" followed by
-  `illustration.scene_excerpt` truncated to ~200 chars.
+- A small label, `i18n.t('illustration.currentConcept')` (Slovak:
+  "Aktuálny koncept"; Czech: "Aktuální koncept"; English: "Current
+  concept").
+- The reactive **translated** `illustration.current_concept` text —
+  i.e. the version in the active UI language (per § 8.3 / § 5.5).
+  This replaces the previous behavior of showing the English source;
+  the popover now mirrors the user's reading language. If the
+  translation state is `stale` or `missing`, the popover displays
+  whichever value the snapshot returned (stale translation or
+  source fallback) and the runStore fires a background § 8.9 call
+  to refresh.
+- Below it, a subtler line `i18n.t('illustration.storyExcerpt')`
+  followed by `illustration.scene_excerpt` (in the active language,
+  same translation logic as paragraphs) truncated to ~200 chars.
 
 The popover content stays reactive: when SSE `illustration_state`
 events update `current_concept` or `scene_excerpt`, an open popover
@@ -1898,8 +2682,10 @@ keyboard focus, not only on hover.
 
 **Each `IllustrationCard` shows (revised list):**
 
-- Scene number "Ilustrácia K" (left of header).
-- The current state with its Slovak label (see § 6 table).
+- Scene number, rendered via `i18n.t('story.illustration_n', { n: K })`
+  (left of header).
+- The current state, rendered via `i18n.t('illustration.state.${state}')`
+  against the active locale (the state-key table is documented in § 6).
 - A small spinner / pulse animation while the state is non-terminal.
 - The current attempt counters if relevant: "pokus K/3" during
   `RENDERING`, attempt info also during `REVISING_PROMPTS` /
@@ -1942,26 +2728,29 @@ loss of expanded / collapsed UI state.
 #### 9.2.1 `sessionStore` (Pinia)
 
 State:
-- `session: Session | null`
+- `session: Session | null` (now includes `source_language` and
+  `topic_short`)
 - `messages: ChatMessage[]` (ordered by `order_index`)
+- `lastDetectedLanguage: 'sk' | 'cs' | 'en' | 'other' | null` — the
+  raw `detected_language` from the most recent server response. Used
+  by the auto-switch listener (§ 9.6.3) and reset to `null` on
+  language-switch acknowledgement.
 - `isSending: boolean`
-- `isFinalizing: boolean`
+- `isFinalizing: boolean` — `true` between the user's `confirmed`
+  turn and the SSE `story_built` / `story_build_failed` event. Drives
+  the `StoryBuildingSkeleton` visibility (§ 9.1 Screen A).
 - `error: { code: string, message: string } | null`
 
-Welcome message — local constant, rendered on `HomeView` mount:
+Welcome message — frontend-only, rendered on `HomeView` mount from
+the `i18n.t('chat.welcome')` key. The key carries the same prose in
+all three locale files (`sk.ts`, `cs.ts`, `en.ts`); the `#word#`
+segments stay across all three so the bold renderer (§ 9.6.2) works
+uniformly. The welcome is **not** sent to Claude as part of the
+transcript and **not** persisted as a `session_messages` row (§ 7.1
+Call 0a, § 8.1). It is a "pretend" assistant turn that the chat
+thread always shows first.
 
-> "Ahoj, som tvoj virtuálny asistent a som tu na to, aby som ti pomohol
-> vytvoriť krátky ilustrovaný anime príbeh. Aby sme mohli pokračovať,
-> musíme sa najprv spolu zhodnúť na nejakom celkovom koncepte príbehu.
-> Začni tým, že napíšeš čokoľvek, čo ti príde na myseľ a čo by malo
-> ovplyvniť výsledný príbeh. Platí len jedno pravidlo. Keďže ide o
-> obmedzenú demo verziu aplikácie, v príbehu môže vystupovať len
-> **jeden mužský** a/alebo **jedna ženská** postava. Jedinou povolenou
-> výnimkou je, že hlavná postava môže mať aj svoju **matku**."
-
-English source as provided by the product owner (kept here so the
-translator and the prompt author can stay aligned with the original
-intent):
+English source (canonical, kept here for product-owner reference):
 
 > "Hi, I'm your virtual assistant and I'm here to help you create the
 > short illustrated anime story. In order to proceed, we must agree on
@@ -1972,9 +2761,10 @@ intent):
 > female** character. The only supported exception is that the main
 > character can also have their **mother**."
 
-The same Slovak text is also inserted as the first `session_messages`
-row when the backend creates the session, so reloading the page after
-the first user message preserves the welcome verbatim.
+The Slovak and Czech equivalents live verbatim in the corresponding
+locale files. Editing the welcome means editing all three locale
+files (mechanical, but a unit test enforces parity of the `#word#`
+markers across the three).
 
 State (additions for optimistic rendering):
 - Each `ChatMessage` in `messages` carries an optional `pending: boolean`
@@ -2000,9 +2790,13 @@ Actions (all message-sending actions implement the optimistic pattern):
      assistant reply.
   4. On failure: rollback (remove optimistic row, restore draft, set
      `error`).
-- `finalize()` → `POST /api/sessions/{id}/finalize`, returns `run_id`.
+- `finalize()` → `POST /api/sessions/{id}/finalize` (202-based; § 8.2).
   Triggered automatically when the latest assistant reply has
-  `phase="confirmed"`.
+  `phase="confirmed"`. The action sets `isFinalizing=true`, stores
+  the response's `topic_short` on the session, opens the session SSE
+  stream (§ 8.2.1), and resolves with `{ run_id }` when the
+  `story_built` event arrives. On `story_build_failed` it rejects
+  with the error and sets `isFinalizing=false`.
 - `reset()` → clears all state to start a fresh session.
 
 The optimistic reconciliation MUST preserve the array index of the user
@@ -2013,16 +2807,58 @@ response lands.
 #### 9.2.2 `runStore` (Pinia)
 
 State:
-- `run: Run | null`
-- `illustrations: Illustration[]` (by `scene_index` order)
+- `run: Run | null` (carries `source_language`, `language`,
+  `story_title`, `story_topic_description`, `topic_short`,
+  `story_blocks` with translation states — all per § 8.3)
+- `illustrations: Illustration[]` (by `scene_index` order; carries
+  `current_concept`, `current_concept_translation_state`,
+  `current_workflow`, `character_role: string|null`)
+- `translations: Record<Language, RunTranslationCache>` — the
+  in-memory per-language cache of every piece of translatable text
+  for this run, keyed by language. Each cache entry stores the text
+  AND the `source_hash` that was current when the entry was
+  generated, mirroring the DB schema (§ 5.5). The cache survives
+  language switches inside `/runs/:run_id` so the user can switch
+  back and forth without re-fetching. Cleared on `loadRun()` for a
+  new run.
+- `currentLanguage: 'sk' | 'cs' | 'en'` — the language the runStore
+  is currently presenting. Bound to the locale store (§ 9.6) but
+  treated as the source of truth for "which language was the
+  snapshot fetched in" purposes.
+- `pendingTranslationLanguages: Set<Language>` — languages currently
+  being refreshed via § 8.9; used to de-duplicate concurrent
+  switches.
 - `isConnecting: boolean`
 - `sseError: string | null`
 
 Actions:
-- `loadRun(runId)` → GET snapshot.
-- `subscribe(runId)` → opens EventSource, dispatches updates.
+- `loadRun(runId, language)` → GET snapshot in the given language.
+  Replaces `run` + `illustrations` + writes the returned text into
+  `translations[language]`.
+- `subscribe(runId, language)` → opens EventSource with
+  `?lang={language}`, dispatches updates.
 - `unsubscribe()` → closes EventSource.
 - `cancel()` → POST cancel.
+- `switchLanguage(language)` — central action invoked by the locale
+  store when the user changes UI language while on `/runs/:run_id`
+  (§ 9.6.4). Behavior:
+  1. If `language === run.source_language` OR every translatable
+     field in `translations[language]` is `"fresh"` against current
+     source hashes → swap `currentLanguage` and re-render from the
+     cache, no network call.
+  2. Otherwise: collect the set of `missing` + `stale` items into
+     an array of `{ kind, paragraph_index?, scene_index? }` and
+     issue `POST /api/runs/:run_id/translations` (§ 8.9) for that
+     subset. The cached `stale` values stay visible during the
+     in-flight call. When the response arrives, write each item
+     into `translations[language]` (and into the live `run` /
+     `illustrations` view if the active language still matches).
+  3. While the call is in flight, `pendingTranslationLanguages.add(language)`.
+     The store ignores duplicate concurrent `switchLanguage(language)`
+     calls for the same language. Clears the entry on response.
+  4. Also reopens the EventSource with `?lang={newLanguage}` so
+     subsequent live events arrive pre-translated and so other tabs'
+     `translations_refreshed` events are observed.
 
 Derived getters:
 - `illustrationByScene(sceneIndex)` — live illustration object for a
@@ -2043,31 +2879,63 @@ Derived getters:
 SSE handlers:
 
 - `snapshot` → replaces `run` and `illustrations` wholesale (this is
-  authoritative; § 8.4).
+  authoritative; § 8.4). The payload is already projected for
+  `currentLanguage` per § 8.4 — the store ALSO copies every
+  translatable field into `translations[currentLanguage]` along with
+  its `source_hash` and `translation_state`, so subsequent
+  `switchLanguage()` calls back to the same language hit the cache.
 - `illustration_state` → finds the illustration by `illustration_id`
   and mutates the existing reactive object **in place**:
   - `state`, `concept_attempt`, `prompt_attempt` always.
   - `current_concept` — always copied from the payload (non-null on
-    every transition, per § 8.4).
+    every transition, per § 8.4). The payload's
+    `current_concept_translation_state` is copied alongside; if the
+    state is `"stale"` or `"missing"` and the active language is not
+    the source language, the store enqueues a lazy translation
+    refresh by calling `switchLanguage(currentLanguage)` (which
+    de-duplicates against any in-flight call).
+  - `current_workflow` — always copied from the payload (selected by
+    Agents 1 / 3 per § 7.1; drives the workflow-aware rendering of
+    the IllustrationCard, e.g. omitting the "character" badge when
+    `current_workflow === "no-lora"`).
   - `scene_excerpt` — always copied from the payload. The excerpt can
     change across an Agent 4 cycle (§ 7.1 Call 4); the assignment is
     field-level so any component bound to it (most notably the concept
     popover in `IllustrationCard`) re-renders without remount.
 - `paragraph_updated` → locate the paragraph block at
   `event.paragraph_index` in the paragraph subset of
-  `run.story_blocks` and assign `block.text = event.text` on that
+  `run.story_blocks` and assign `block.text = event.text` and
+  `block.translation_state = event.translation_state` on that
   existing reactive object. Because the assignment is field-level, the
   `StoryParagraph` bound to that block re-renders in place. The store
   MUST NOT replace the whole `story_blocks` array or swap the block
   object — both would force every `StoryParagraph` to remount and
   break the skeleton-to-text crossfade. A reference-identity assertion
-  in the tests verifies this (§ 11.3).
+  in the tests verifies this (§ 11.3). The store ALSO writes the new
+  text + hash into `translations[currentLanguage]` for the
+  `paragraph[i]` slot so the cache stays in sync.
 - `illustration_companion_updated` → finds the illustration by
   `illustration_id` and assigns `illustration.companion = event.companion`
   on the existing reactive object (replacement of the whole companion
   field is fine — its inner fields are not bound separately, since the
   whole object can transition to/from null). The IllustrationCard's
   companion subtitle re-renders without remount.
+- `illustration_role_updated` → finds the illustration by
+  `illustration_id` and assigns `illustration.character_role =
+  event.character_role` on the existing reactive object. The role
+  field is nullable (§ 5) and toggling it drives whether the
+  `no-lora` vs `single-lora` badge renders on the card. A field-level
+  assignment keeps the card mounted across the change.
+- `translations_refreshed` → cross-tab / cross-session sync event
+  emitted by § 8.9 whenever any other client refreshes translations
+  for this run. Payload carries `{ language, items: [...] }`. The
+  store writes each item into `translations[event.language]` along
+  with its `source_hash`. If `event.language === currentLanguage`,
+  it also patches the live `run` / `illustrations` views in place
+  (paragraph text, story_title, story_topic_description,
+  illustration concept_localized) using the same field-level
+  assignment rules as the dedicated handlers above — no array or
+  object replacement, so no remounts.
 - `illustration_completed`, `illustration_failed`, `run_completed`,
   `run_failed`, `run_cancelled`, `heartbeat` — as previously specified.
 
@@ -2089,7 +2957,8 @@ or stale paragraph; the swap is single-frame.
   one accent color. No UI kit (the only third-party visual component
   is the popover from `floating-vue` — § 9.5).
 - Chat bubbles use the accent color for the user side and a neutral
-  surface for the assistant side; the welcome message visually matches
+  surface for the assistant side; the welcome message (rendered
+  frontend-only via `i18n.t('chat.welcome')` — § 9.6) visually matches
   other assistant messages.
 
 #### 9.3.1 Typography
@@ -2149,26 +3018,35 @@ keyframe over ~1.6 s) over a neutral surface color from `_tokens.scss`.
 The animation respects `@media (prefers-reduced-motion: reduce)` and
 falls back to a static muted block in that case.
 
-### 9.4 Error code → Slovak UX message mapping
+### 9.4 Error code → i18n key mapping
 
-Two mapping modules, both unit-tested.
+Two mapping modules, both unit-tested. Each module maps a backend
+`error_code` to an i18n message **key**, not a literal string — the
+actual rendered text is resolved by `i18n.t(key)` against the locale
+files in `src/i18n/locales/{sk,cs,en}.ts` (§ 9.6.1). The same code
+therefore renders in whichever UI language is currently active.
 
 **`src/i18n/sessionErrors.ts`:**
 
-| `error_code`           | Slovak UX message                                                                                                                                |
-|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `CHAT_FAILED`          | "Asistent momentálne nedokáže odpovedať. Skús to prosím o chvíľu znova."                                                                          |
-| `STORY_BUILD_FAILED`   | "Pri tvorbe príbehu sa niečo pokazilo. Skús prosím začať odznova a mierne upraviť zadanie."                                                       |
-| `INTERNAL_ERROR`       | "Vyskytla sa neočakávaná chyba. Skontrolujte log servera pre detaily."                                                                            |
+| `error_code`           | i18n key                       |
+|------------------------|--------------------------------|
+| `CHAT_FAILED`          | `errors.session.chat_failed`   |
+| `STORY_BUILD_FAILED`   | `errors.session.story_build_failed` |
+| `TRANSLATE_FAILED`     | `errors.session.translate_failed`   |
+| `INTERNAL_ERROR`       | `errors.session.internal_error`     |
 
 **`src/i18n/runErrors.ts`:**
 
-| `error_code`           | Slovak UX message                                                                                                                                |
-|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INTERNAL_ERROR`       | "Vyskytla sa neočakávaná chyba pri generovaní ilustrácií. Skontrolujte log servera pre detaily."                                                  |
+| `error_code`           | i18n key                       |
+|------------------------|--------------------------------|
+| `INTERNAL_ERROR`       | `errors.run.internal_error`    |
+| `TRANSLATE_FAILED`     | `errors.run.translate_failed`  |
 
-Unknown codes in either map fall back to the `INTERNAL_ERROR` message.
-`null` / `undefined` produces an empty string (the banner stays hidden).
+Unknown codes in either map fall back to the corresponding
+`internal_error` key. `null` / `undefined` produces an empty string
+(the banner stays hidden). Each locale file MUST provide every key
+listed above; a unit test enforces key-parity across the three
+locales (§ 11.3).
 
 ### 9.5 Popover component (`floating-vue`)
 
@@ -2202,6 +3080,248 @@ modals, dropdown menus, autocomplete lists, or anything else in this
 spec. Adding any new use of the library requires extending this
 section.
 
+### 9.6 Internationalization module (`vue-i18n`)
+
+The app supports three UI languages — Slovak (`sk`), Czech (`cs`), and
+English (`en`) — at every screen. The locale lives in the URL path
+(`/:lang/...`), so every page is bookmarkable in a chosen language and
+copy-pasted links preserve the language for the recipient.
+
+#### 9.6.1 Setup
+
+- `vue-i18n` v9 in Composition-API mode is added to
+  `frontend/package.json`. Configured in `src/i18n/index.ts`:
+  ```ts
+  createI18n({
+    legacy: false,
+    locale: detectInitialLanguage(),
+    fallbackLocale: 'en',
+    messages: { sk, cs, en },
+    missingWarn: import.meta.env.DEV,
+    fallbackWarn: import.meta.env.DEV,
+  })
+  ```
+- Locale dictionaries live under `src/i18n/locales/{sk,cs,en}.ts`.
+  Each is a plain TypeScript object with the same nested shape — top-level
+  groups include `chat`, `story`, `nav`, `errors.session`, `errors.run`,
+  `language` (display names of the three languages used by the
+  switcher), and `toast`.
+- `src/main.ts` registers the i18n plugin with `app.use(i18n)` before
+  mounting the router.
+
+Locale-file parity is enforced by a unit test (§ 11.3): if any key is
+present in one locale and missing in another, the test fails. Adding a
+new string therefore forces all three files to be updated in the same
+commit. Translations the operator hasn't yet provided are committed as
+the English text wrapped in a `// TODO(translate)` comment — this keeps
+the keys present while flagging untranslated copy in code review.
+
+#### 9.6.2 Supported languages constant
+
+`src/i18n/supported.ts` exports:
+
+```ts
+export const SUPPORTED_LANGUAGES = ['sk', 'cs', 'en'] as const
+export type Language = (typeof SUPPORTED_LANGUAGES)[number]
+```
+
+The router guards (§ 9.6.4), the language switcher (§ 9.8), the locale
+store (`stores/locale.ts`), and the chat / run stores all import from
+this single module. There is no other place where the list of
+supported languages lives in the frontend.
+
+#### 9.6.3 Initial language detection
+
+`detectInitialLanguage()` (in `src/i18n/index.ts`) resolves the
+initial language in this order:
+
+1. **URL prefix.** If the current `window.location.pathname` starts
+   with `/sk/`, `/cs/`, `/en/`, or equals `/sk`, `/cs`, `/en`, use
+   that. (The router resolves the same value once mounted; this is
+   only relevant for the very first paint.)
+2. **Persisted preference.** `localStorage.getItem('illustration-app:language')`
+   if it is one of `SUPPORTED_LANGUAGES`.
+3. **Browser locale.** `navigator.language` is matched against
+   `SUPPORTED_LANGUAGES` after stripping the region (`'sk-SK'` → `'sk'`).
+4. **Fallback.** `'en'`.
+
+The chosen value is immediately written back to `localStorage` so a
+subsequent visit without a path prefix bounces to the same language.
+
+#### 9.6.4 Routing
+
+`src/router/index.ts` defines a single parent route with `path:
+'/:lang(sk|cs|en)'` and nests every existing route underneath as a
+child (`''` → SessionView, `runs/:run_id` → RunView). The redirect
+strategy:
+
+- `path: '/'` redirects to `/{detectInitialLanguage()}/`.
+- `path: '/runs/:run_id'` (any legacy un-prefixed link, e.g. links
+  copy-pasted from before i18n shipped) redirects to
+  `/{detectInitialLanguage()}/runs/:run_id`.
+- A catch-all `path: '/:pathMatch(.*)*'` redirects to
+  `/{detectInitialLanguage()}/` — the app does not present a 404 in
+  MVP; un-routable URLs bounce home in the user's language.
+
+A global `beforeEach` guard, on every navigation:
+
+1. Reads `to.params.lang`. If it is not in `SUPPORTED_LANGUAGES`, it
+   replaces the route with the user's detected language (this is a
+   safety net — the path regex already restricts to the three
+   languages).
+2. Writes the new language into the locale store (§ 9.6.5) and into
+   `i18n.global.locale.value`.
+3. Sets `document.documentElement.lang` to the new language.
+
+Route components do NOT each call `useI18n()` just to pick the locale —
+the guard guarantees `i18n.global.locale.value` matches the URL by the
+time the component mounts.
+
+#### 9.6.5 Locale store (`stores/locale.ts`)
+
+A Pinia store with:
+
+- State: `currentLanguage: Language` (initialized from
+  `detectInitialLanguage()`; kept in sync with both the URL and
+  `i18n.global.locale.value`).
+- Action `setLanguage(language: Language, { silent?: boolean })`:
+  1. If `language === currentLanguage`, no-op.
+  2. Replace the `lang` segment of the current route with the new
+     value (`router.replace`). This triggers the `beforeEach` guard
+     which updates `i18n` and `documentElement.lang`.
+  3. Persist to `localStorage`.
+  4. If the active route is `/runs/:run_id`, call
+     `runStore.switchLanguage(language)` (§ 9.2.2).
+  5. If the active route is the SessionView with an active session,
+     no action on the session itself is needed — the welcome bubble
+     and any other purely-UI text re-render reactively from `i18n.t`,
+     and the persisted chat transcript already contains the
+     user/Claude messages in the source language as originally
+     produced.
+
+#### 9.6.6 Auto-switch on chat detection
+
+Agent 0a emits `language: 'sk' | 'cs' | 'en' | 'other'` per § 7.1
+Call 0a. The chat-message SSE handler (or fetch response, depending
+on transport per § 8.1):
+
+1. Ignores `'other'` and any value equal to the current language.
+2. For one of `sk` / `cs` / `en` that differs from
+   `localeStore.currentLanguage` AND that has not yet been
+   auto-switched in this session (the session store tracks
+   `lastDetectedLanguage`):
+   a. Calls `localeStore.setLanguage(detected, { silent: false })`.
+   b. Fires a toast (§ 9.7) via `toast.info(i18n.t('toast.language_switched', { language: i18n.t(`language.${detected}`) }))`.
+   c. Records `lastDetectedLanguage = detected` on the session store
+      to avoid re-toasting on every subsequent turn.
+
+The auto-switch never fires after the user has manually selected a
+language via the LanguageSwitcher (§ 9.8) — the manual switch sets a
+`languageLockedByUser` flag on the locale store that suppresses any
+further auto-switching for the lifetime of the session.
+
+### 9.7 Toast notifications (`vue-sonner`)
+
+The app uses **`vue-sonner`** — the Vue port of the `sonner` library —
+as the single toast surface. Added to `frontend/package.json` as a
+regular dependency. No other notification system (alerts, custom
+banners outside the inline error banners, etc.) is introduced.
+
+Setup:
+
+- `<Toaster />` is rendered once at the top of `App.vue` with
+  props `position="top-center"` and `rich-colors` enabled.
+- A thin wrapper `src/composables/useToast.ts` exposes
+  `{ info, success, error }` functions that call `sonner`'s API
+  with the app's default options (5 s duration, dismissable).
+- Wrappers always go through `i18n.t(key, params)` — toast text
+  is never hard-coded at the call site. Keys live under the
+  `toast.*` group in each locale file.
+
+Use sites in MVP:
+
+- Auto-switch announcement (§ 9.6.6) — `toast.language_switched`.
+- Translation refresh failure — `toast.translate_failed`
+  (rendered when the lazy translation request from § 9.2.2
+  `switchLanguage()` returns a `TRANSLATE_FAILED` error code).
+
+Adding any new toast call site requires extending this list and the
+corresponding `toast.*` keys in every locale.
+
+### 9.8 Language switcher (`LanguageSwitcher.vue`)
+
+A small component rendered in the top-right of the centered page
+container on every screen. Implementation rules:
+
+- Trigger: a button showing the active language as its ISO code
+  (`SK` / `CS` / `EN`) plus a small chevron. No flag emoji — flags
+  are politically loaded and don't map cleanly to languages (e.g.
+  Swiss German). The chevron rotates 180° when the menu is open.
+- Surface: a 3-row menu mounted via `floating-vue` (§ 9.5) with
+  one row per supported language. Each row shows the language's
+  endonym (`Slovenčina` / `Čeština` / `English` — read from
+  `i18n.t('language.${code}')` so it changes with the active
+  locale). The active language row is marked with a check glyph.
+- Click handler invokes `localeStore.setLanguage(code, { silent:
+  true })` and closes the menu.
+- Manual selection sets `localeStore.languageLockedByUser = true`
+  (§ 9.6.6).
+
+Positioning rules (NOT-overlap with titles):
+
+- The switcher is rendered inside the same centered container as
+  the page content, anchored with `position: absolute; top: 16px;
+  right: 16px;` relative to the container (NOT the viewport). This
+  guarantees it sits inside the safe area even on wide viewports.
+- The page header (the `<h1>` title on SessionView, the story
+  title on RunView) reserves a right-side padding equal to the
+  switcher's width plus a 16 px gap (`padding-right: calc(72px +
+  16px)`). The switcher therefore never overlaps the title and the
+  title never reflows when the menu opens.
+- On viewports narrower than 480 px the switcher shrinks to a
+  pure-icon (globe) button and the menu becomes a centered
+  bottom-anchored sheet via `floating-vue`'s `bottom-end`
+  placement, eliminating right-margin pressure on tight screens.
+
+Accessibility: the trigger is a `<button>` with
+`aria-haspopup="menu"`, `aria-expanded`, and an `aria-label` resolved
+from `i18n.t('nav.change_language')`. The menu items have
+`role="menuitemradio"` with `aria-checked` on the active row.
+
+### 9.9 Story-building skeleton view (`StoryBuildingSkeleton.vue`)
+
+Rendered on SessionView between the user's confirmation turn and the
+arrival of the `story_built` event on the session-level SSE stream
+(§ 8.2.1). When the skeleton is shown, BOTH the chat thread and the
+chat composer are hidden — the user's task is complete and there is
+nothing for them to type until the run page loads.
+
+Layout:
+
+- A single centered line of body text reading `i18n.t('story.building',
+  { topic: session.topic_short })` — e.g. *"Generating the story on the
+  topic of the brave little fox…"* The `topic_short` value comes from
+  Agent 0a's last `confirmed` turn (§ 7.1 Call 0a).
+- Below the line, **exactly five** `SkeletonBlock shape="line"
+  :lines="4"` placeholders stacked vertically with the same spacing
+  the real `StoryParagraph` will use, so the visual rhythm is
+  preserved across the transition.
+- No illustration placeholders are shown here — the illustrations
+  belong on the run page, not the session page.
+
+Transition out: on `story_built`, the sessionStore (§ 9.2.1) sets the
+run id and the router navigates to `/:lang/runs/:run_id/`. Because the
+skeleton lives on a different route than the run view, there is no
+in-place crossfade — the router transition handles it.
+
+Transition error: on `story_build_failed`, the skeleton is replaced
+inline by an error banner rendering the i18n message for
+`STORY_BUILD_FAILED` (§ 9.4) plus a button bound to
+`i18n.t('story.try_again')`. The button resets the session store and
+returns the chat thread + composer with the user's last brief
+preserved as a draft, so they can edit and re-confirm without retyping
+from scratch.
+
 ---
 
 ## 10. Constants
@@ -2219,12 +3339,27 @@ Defined in `backend/app/constants.py`:
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
-| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 6 calls                 |
-| `WELCOME_MESSAGE_SK`              | (multiline string, see § 9.2.1) | Server copy of the welcome text inserted as first session message |
-| `CONFIRMED_ACK_SK`                | `"Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"` | Canonical Slovak `reply` returned by Agent 0a on `phase="confirmed"`; server normalizes any other prose to this value (see § 7.1) |
+| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 7 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, translate) |
+| `SUPPORTED_LANGUAGES`             | `("sk", "cs", "en")` | Tuple of UI / story languages the backend accepts (§ 9.6). The chat agent emits one of these or `"other"`; the build_story, translate, and run APIs all validate against this tuple. |
+| `CONFIRMED_ACK`                   | `Mapping[str, str]` (see below) | Per-language canonical `reply` returned by Agent 0a on `phase="confirmed"`; the chat service looks up `CONFIRMED_ACK[detected_language]` and overwrites any other prose Claude returned. |
+
+`CONFIRMED_ACK` contents (one entry per `SUPPORTED_LANGUAGES`):
+
+| Language | Canonical reply text                                                          |
+|----------|-------------------------------------------------------------------------------|
+| `sk`     | `"Skvelé, ide na to. Pripravujem príbeh a ilustrácie…"`                       |
+| `cs`     | `"Skvělé, jdu na to. Připravuji příběh a ilustrace…"`                         |
+| `en`     | `"Great, on it. Building your story and illustrations…"`                      |
+
+If Agent 0a returns `language="other"` on a `confirmed` turn, the
+server falls back to `CONFIRMED_ACK["en"]` (English is the universal
+fallback per § 9.6.1 fallbackLocale).
 
 The `STORY_MAX_CHARS` constant from the previous spec is removed (raw
-story text is no longer a public input).
+story text is no longer a public input). The `WELCOME_MESSAGE_SK`
+constant from the prior spec revision is also removed — the welcome
+message is now a frontend-only i18n string (`i18n.t('chat.welcome')`,
+§ 9.6.1) and never round-trips through the backend.
 
 ---
 
@@ -2243,15 +3378,17 @@ to chase 100 % line coverage.
     based on the per-illustration role.
 - **Character config loader**: as previously specified.
 - **Agent prompt loader** (new test file, `tests/unit/test_agents_loader.py`):
-  - Loads all six `.md` files from a temporary `AGENTS_DIR` fixture and
-    exposes them on the Claude client.
-  - Refuses to start (raises typed error) when any of the six files is
-    missing, empty, or unreadable.
+  - Loads all seven `.md` files (chat, build_story, generate_prompts,
+    evaluate_image, revise_prompts, rethink_concept, translate) from a
+    temporary `AGENTS_DIR` fixture and exposes them on the Claude
+    client.
+  - Refuses to start (raises typed error) when any of the seven files
+    is missing, empty, or unreadable.
   - The system prompt sent to Anthropic for each call equals the file
     contents verbatim (verified by intercepting the outgoing request with
     respx).
 - **Claude IO schemas** (`schemas/...`):
-  - Each of the 6 response Pydantic models accepts a valid example.
+  - Each of the 7 response Pydantic models accepts a valid example.
   - Each rejects a malformed example (missing field, wrong type).
   - **Call 0a (chat) schema:**
     - `reply` is required and is a non-empty string.
@@ -2425,22 +3562,29 @@ temporary file per test, schema-applied via Alembic (`command.upgrade`)
 as described in § 5.0.
 
 - **End-to-end happy path:**
-  - `POST /api/sessions` → mocked Agent 0a returns `phase=gathering`.
+  - `POST /api/sessions` → mocked Agent 0a returns `phase=gathering`
+    with `language: 'sk'`.
   - `POST /api/sessions/{id}/messages` → mocked Agent 0a returns
     `phase=awaiting_confirmation` with a valid brief.
   - `POST /api/sessions/{id}/messages` (user "áno") → mocked Agent 0a
-    returns `phase=confirmed`.
-  - `POST /api/sessions/{id}/finalize` → mocked Agent 0b returns a
-    valid story + 3 illustrations → 201 with `run_id`.
-  - `GET /api/runs/{id}` returns the run with story blocks and 3
-    `PENDING` illustrations.
+    returns `phase=confirmed` with `language: 'sk'` and a
+    `topic_short` value.
+  - `POST /api/sessions/{id}/finalize` returns **202** carrying
+    `topic_short` immediately (§ 8.2).
+  - The session-level SSE stream (`GET /api/sessions/{id}/events`,
+    § 8.2.1) emits `story_built{run_id}` after the mocked Agent 0b
+    returns 5 valid illustrations.
+  - `GET /api/runs/{id}?lang=sk` returns the run with story blocks
+    and 5 `PENDING` illustrations, `source_language = 'sk'`.
   - Background work runs to completion → `GET /api/runs/{id}` shows
     `COMPLETED` with image paths written under a tmp `OUTPUT_DIR`. The
     SSE stream emits the expected sequence ending with `run_completed`.
 - **STORY_BUILD_FAILED end-to-end:** as above, but mock Agent 0b to
-  return invalid output. The finalize call ends with 502, the session
-  becomes `FAILED` with `error_code=STORY_BUILD_FAILED`, and no run is
-  created.
+  return invalid output. The finalize call still returns 202 (the
+  failure is asynchronous); the session-level SSE stream then emits
+  `story_build_failed{error_code: "STORY_BUILD_FAILED"}`, the
+  persisted session ends in `FAILED` with the same error code, and no
+  run is created.
 - **CHAT_FAILED end-to-end:** mock the Anthropic API to return errors
   for Agent 0a. The first `POST /api/sessions` returns 502, the
   persisted session is `FAILED` with `error_code=CHAT_FAILED`.
@@ -2481,6 +3625,42 @@ as described in § 5.0.
     text.
   - `illustrations[k].initial_concept` is unchanged from Agent 0b's
     original concept (immutable, per § 5.4).
+- **Workflow selection end-to-end (new):** drive a run whose Agent 0b
+  output yields a mix of `character_role: null` rows and non-null
+  rows. Assert:
+  - Every row with `character_role IS NULL` ends up with
+    `current_workflow = "no-lora"` and the recorded RunPod dispatch
+    used `no-lora.json` (no `CHARACTER_LORA` substitution).
+  - Every row with `character_role` set ends up with
+    `current_workflow = "single-lora"` and the dispatched workflow
+    file is `single-lora.json` with the correct `CHARACTER_LORA`
+    placeholder substituted (per § 7.2.1).
+  - Agent 4 mocked to flip a row from `single-lora` to `no-lora`
+    emits `illustration_role_updated{character_role: null}` on the
+    SSE stream and a subsequent dispatch uses `no-lora.json`.
+- **Translation end-to-end (new):** finalize a session with
+  `source_language = 'sk'`. After the run completes:
+  - `GET /api/runs/{id}?lang=sk` returns every translation_state
+    field as `"source"`.
+  - `POST /api/runs/{id}/translations` with all paragraph + concept
+    items for `language = 'cs'` invokes the mocked Agent 5 (translate)
+    once, persists rows in the three translation tables (§ 5.5),
+    returns 200 with the full set, and emits a `translations_refreshed`
+    event on the run-level SSE stream carrying the same items.
+  - A second `POST /api/runs/{id}/translations` request for the same
+    items returns immediately with the cached values and DOES NOT
+    invoke Agent 5 again (the "never translate twice" rule of § 8.9).
+  - Force a paragraph rewrite (Agent 4 mocked path) for one paragraph.
+    The `source_hash` for `paragraph[i]` changes; a subsequent
+    `GET /api/runs/{id}?lang=cs` reports that paragraph's
+    `translation_state` as `"stale"` while keeping the previous cached
+    Czech text. A targeted POST for that one item invokes Agent 5
+    again and updates the row to `"fresh"`.
+- **TRANSLATE_FAILED end-to-end (new):** mock Agent 5 to raise. The
+  `POST /api/runs/{id}/translations` call returns 502 with
+  `error_code = "TRANSLATE_FAILED"`; no rows are persisted in the
+  translation tables for the affected items; a subsequent retry with
+  Agent 5 mocked to succeed completes normally.
 
 ### 11.3 Frontend unit (`frontend/tests/`)
 
@@ -2488,10 +3668,13 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
 
 - **ChatMessage / ChatThread:**
   - Renders user and assistant messages in transcript order.
-  - The welcome message is always shown first when the transcript is
-    empty, with the `#word#`-marked segments rendered in **bold**.
-  - Shows a small "Asistent píše…" indicator while a request is in
-    flight.
+  - The welcome message (resolved frontend-only via
+    `i18n.t('chat.welcome')`, § 9.6.1) is always shown first when the
+    transcript is empty, with the `#word#`-marked segments rendered
+    in **bold**. The welcome message is not part of `session.messages`
+    and is not sent to the backend on any subsequent turn.
+  - Shows a small typing indicator (i18n key `chat.assistant_typing`)
+    while a request is in flight.
 - **ChatComposer:**
   - Disabled when the session state is `BUILDING_STORY`, `COMPLETED`,
     or `FAILED`.
@@ -2500,12 +3683,18 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
   - Submits on Enter, inserts newline on Shift+Enter.
 - **SessionErrorBanner:**
   - Hidden when session state is not `FAILED`.
-  - Renders the Slovak message mapped via `sessionErrors.ts`.
-  - Unknown code falls back to `INTERNAL_ERROR` message.
+  - Renders the message resolved by `i18n.t(sessionErrors[code])`.
+  - Unknown code falls back to `errors.session.internal_error`.
+  - The exact same component, mounted with `locale='cs'` / `'en'`,
+    renders the Czech / English translation of the same key.
 - **`sessionErrors.ts` mapping** (new unit test file):
-  - Each known code maps to its specified Slovak message.
-  - Unknown code falls back to `INTERNAL_ERROR`.
+  - Each known `error_code` maps to its specified i18n key (§ 9.4).
+  - Unknown code falls back to `errors.session.internal_error`.
   - `null` / `undefined` produces empty string.
+  - **Locale parity:** for each of `sk`, `cs`, `en` the locale file
+    contains every key listed in `sessionErrors.ts` and
+    `runErrors.ts`; the test fails if any key is missing in any
+    locale.
 - **sessionStore:**
   - `sendFirstMessage` posts to `/api/sessions` and replaces local
     state with the response payload.
@@ -2601,7 +3790,8 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     placeholder when `FAILED`, and a grey placeholder when `CANCELLED`.
 - **IllustrationCard / ProgressCounter / CancelButton / RunErrorBanner /
   runErrors.ts mapping:** behaviors as previously specified, with the
-  reduced error_code surface (`INTERNAL_ERROR` only) for runs.
+  reduced error_code surface (`INTERNAL_ERROR`, `TRANSLATE_FAILED`)
+  for runs and i18n-key-based message resolution (§ 9.4).
 - **runStore:**
   - `snapshot` event replaces full state.
   - `illustration_state` updates the right illustration by id.
@@ -2630,6 +3820,91 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     status to `FAILED`, and unsubscribes.
   - `illustrationByScene` getter returns the right illustration by
     `scene_index`.
+- **i18n module (`src/i18n/`):**
+  - `detectInitialLanguage()` returns the URL-prefix language when
+    present, the `localStorage` value when set, then the browser
+    locale stripped to its base tag, then `'en'` (each path covered
+    by a dedicated test that mocks the relevant input).
+  - Locale-file parity: every key in `sk.ts` is present in `cs.ts`
+    and `en.ts` and vice versa. The test walks the nested object
+    structure recursively and reports any missing path.
+  - The catch-all router redirect targets the detected language
+    (e.g. when `localStorage` is `'cs'`, `/foo/bar` resolves to
+    `/cs/`).
+- **LanguageSwitcher.vue:**
+  - Renders three menu items in the order `sk`, `cs`, `en` with the
+    endonym labels resolved from `i18n.t('language.${code}')`.
+  - Clicking a non-active item invokes `localeStore.setLanguage(code,
+    { silent: true })` exactly once and closes the menu.
+  - Clicking the active item is a no-op (the menu still closes).
+  - Selecting a language manually sets
+    `localeStore.languageLockedByUser = true`.
+  - The trigger button has the accessibility attributes specified
+    in § 9.8 (`aria-haspopup`, `aria-expanded`, `aria-label`).
+- **localeStore (`stores/locale.ts`):**
+  - `setLanguage('cs')` from `'sk'` calls `router.replace` with the
+    `lang` path segment rewritten to `'cs'` and writes `'cs'` into
+    both `i18n.global.locale.value` and `localStorage`.
+  - `setLanguage(current)` is a no-op (no router push, no storage
+    write).
+  - When the route is `/runs/:run_id`, `setLanguage` additionally
+    invokes `runStore.switchLanguage` with the new language.
+  - The Agent 0a chat handler invokes `setLanguage(detected, {
+    silent: false })` exactly once per session (subsequent identical
+    detections do not re-toast).
+  - Manual selection prevents subsequent chat-driven auto-switches
+    (asserted by setting `languageLockedByUser = true` then dispatching
+    a chat reply with a different `language` value and verifying
+    `setLanguage` was not called).
+- **StoryBuildingSkeleton.vue:**
+  - Renders the title line via `i18n.t('story.building', { topic })`
+    with the topic value from a mounted-in test prop.
+  - Renders exactly five `SkeletonBlock shape="line"` placeholders
+    in DOM order under the title.
+  - Renders an error banner (mapped via `sessionErrors.ts`) plus a
+    `i18n.t('story.try_again')` button when the session reaches the
+    `story_build_failed` state during the skeleton phase.
+  - Clicking `try_again` invokes the session-store reset action
+    (preserving the user's last draft, per § 9.9).
+- **sessionStore (i18n + skeleton):**
+  - After receiving an Agent 0a reply carrying `language: 'cs'` and
+    `phase: 'confirmed'`, the store records `lastDetectedLanguage = 'cs'`
+    and calls `localeStore.setLanguage('cs', { silent: false })` exactly
+    once. A second confirmed reply with the same `language` does not
+    re-invoke `setLanguage`.
+  - After `POST /api/sessions/{id}:finalize` responds `202` with
+    `topic_short`, the store sets `isFinalizing = true` and
+    `topic_short = <value>`, hiding the chat composer and revealing
+    the skeleton view via a derived getter.
+  - On `story_built` SSE event, the store sets `run_id` and
+    `isFinalizing = false`; on `story_build_failed`, it sets
+    `error_code` and `isFinalizing = false`.
+- **runStore (i18n + translations):**
+  - `loadRun(runId, 'sk')` populates `translations['sk']` from the
+    snapshot's translatable fields, each with its `source_hash`.
+  - `switchLanguage('en')` when `currentLanguage === 'en'` is a
+    no-op (no fetch, no SSE reopen).
+  - `switchLanguage('cs')` when `translations['cs']` is fully fresh
+    against current source hashes performs no network call and just
+    flips `currentLanguage` + re-renders.
+  - `switchLanguage('cs')` when at least one item is missing or stale
+    issues exactly one `POST /api/runs/:id/translations` carrying only
+    the missing+stale item descriptors and writes the response back
+    into the cache.
+  - Concurrent `switchLanguage('cs')` invocations while
+    `pendingTranslationLanguages.has('cs')` do not issue a second
+    POST.
+  - `translations_refreshed` SSE event for `language === currentLanguage`
+    patches the live `run` / `illustrations` fields in place
+    (reference-survival assertion on `run.story_blocks` and on each
+    illustration object).
+  - `translations_refreshed` SSE event for a different language only
+    writes the cache, does not touch the live view.
+  - `illustration_role_updated` SSE event mutates
+    `illustration.character_role` on the existing illustration object
+    (reference-survival assertion).
+  - `illustration_state` event with a new `current_workflow` value
+    mutates that field in place.
 
 ### 11.4 What is NOT required (out of scope for MVP)
 
@@ -2689,7 +3964,6 @@ presets) are not.
 
 ## 12. Non-goals for MVP (explicitly out of scope)
 
-- Multiple workflows / workflow selection by Claude.
 - Retrying a single failed illustration without re-running the whole
   story.
 - Resuming a failed session (the user starts a new chat from scratch).
@@ -2698,7 +3972,14 @@ presets) are not.
 - User accounts / multi-tenant.
 - Run / session history listing UI (the DB will accumulate rows, but
   no UI to browse).
-- Internationalization beyond Slovak UI labels.
+- UI / story languages other than Slovak, Czech, and English (the
+  data model in § 5.5 is open — any ISO language code can be added by
+  shipping a new locale file and extending `SUPPORTED_LANGUAGES`, but
+  MVP ships exactly those three).
+- Inline RTL / vertical-script layout support (none of the three MVP
+  languages requires it).
+- Server-rendered translated content via SSR / SEO crawlers
+  (translations are fetched on demand by the SPA).
 - Mid-flight cancellation of an already-dispatched ComfyUI job.
 - Hot reload of agent prompt `.md` files.
 - Streaming Agent 0a / Agent 0b responses to the UI token-by-token.
@@ -2717,23 +3998,26 @@ The MVP is considered complete when:
 
 1. All tests defined in § 11.1–11.3 pass, and all lint/format/type-check
    commands defined in § 11.5 exit with zero errors.
-2. With valid `.env` values, the six agent `.md` files present, and
+2. With valid `.env` values, the seven agent `.md` files present, and
    `character_config.json` populated, running `uvicorn` (backend) —
    which applies any pending Alembic migrations on startup — and
    `npm run dev` (frontend) starts both services without errors.
-3. A user can land on `/`, read the welcome message, chat with the
-   assistant, see the assistant push back when their proposed cast
-   violates the character constraint, eventually get a summary and a
-   request for confirmation, reply "áno", and be navigated to
-   `/runs/:id` once the story is built. **No "Spustiť ilustrácie" /
-   "Generate illustrations" (or equivalent) button exists in the UI
-   at any point;** the navigation to `/runs/:id` is triggered solely
-   by Agent 0a returning `phase="confirmed"`.
-   Every user message — including the very first one and the "áno"
-   confirmation — appears in the chat thread **immediately** on send,
-   before the assistant's reply arrives (verified by manual smoke
-   test: with the network throttled, the user bubble is visible while
-   the "Asistent píše…" indicator is still active).
+3. A user can land on `/` (which redirects to `/{detected_lang}/`),
+   read the welcome message (resolved via `i18n.t('chat.welcome')`),
+   chat with the assistant, see the assistant push back when their
+   proposed cast violates the character constraint, eventually get a
+   summary and a request for confirmation, reply with an affirmative
+   ("áno" / "ano" / "yes" / …), and be navigated to
+   `/{lang}/runs/:id` once the story is built. **No "Generate" (or
+   equivalent) button exists in the UI at any point;** the navigation
+   to `/{lang}/runs/:id` is triggered solely by Agent 0a returning
+   `phase="confirmed"` AND the subsequent `story_built` SSE event
+   from the session-level stream (§ 8.2.1). Every user message —
+   including the very first one and the confirmation — appears in
+   the chat thread **immediately** on send, before the assistant's
+   reply arrives (verified by manual smoke test: with the network
+   throttled, the user bubble is visible while the assistant-typing
+   indicator is still active).
 4. On `/runs/:id`, the user sees the generated story heading and
    paragraphs immediately, with inline placeholders for the
    illustrations showing loaders, while the illustration cards below
@@ -2766,7 +4050,8 @@ The MVP is considered complete when:
 7. No secrets are present in the frontend bundle.
 8. When Agent 0b fails (or returns invalid output beyond retry), the
    session ends in `FAILED` with `error_code=STORY_BUILD_FAILED`, the
-   chat screen shows the dedicated Slovak message, and no run is
+   `StoryBuildingSkeleton` swaps inline to the error banner showing
+   the i18n-resolved message for the active locale, and no run is
    created.
 9. Editing any agent prompt `.md` file and restarting the backend
    visibly changes that agent's behavior on the next call (verified by
@@ -2801,3 +4086,54 @@ The MVP is considered complete when:
     `illustration_companion_updated{companion: null}` event,
     persists the columns as NULL, and the card subtitle disappears
     reactively without a page reload.
+13. **Path-prefix routing.** A fresh visit to `/` redirects to one of
+    `/sk/`, `/cs/`, `/en/` per the detection rules of § 9.6.3.
+    Direct visits to `/sk/`, `/cs/`, `/en/` open the SessionView with
+    the matching UI language. Direct visits to `/runs/:run_id` (no
+    prefix) redirect to `/{detected}/runs/:run_id` without losing
+    the run id. A direct visit to `/cs/runs/:run_id` shows the run
+    rendered in Czech (story text translated lazily via § 8.9 when
+    Czech is not the source language). The browser URL always
+    carries the active `lang` segment.
+14. **Chat language auto-switch.** When the user opens the chat in
+    `/sk/` and types in Czech, Agent 0a returns
+    `language: 'cs'` (§ 7.1 Call 0a). The locale store transitions
+    to `'cs'`, the URL rewrites to `/cs/`, the UI strings re-render
+    in Czech, and a `vue-sonner` toast announces the switch (i18n
+    key `toast.language_switched`). A subsequent same-detection turn
+    does NOT re-toast. After the user manually picks a language via
+    the LanguageSwitcher, further chat-driven auto-switches do not
+    fire.
+15. **Workflow selection.** With a brief whose `companions` array is
+    empty and a build that yields one or more illustrations with
+    `character_role = null`, every `character_role IS NULL` row has
+    `current_workflow = "no-lora"` and the dispatched ComfyUI job
+    uses `no-lora.json` (§ 7.2.1) — no `CHARACTER_LORA` placeholder
+    is substituted. Rows with a non-null `character_role` have
+    `current_workflow = "single-lora"` and use `single-lora.json`.
+    The acceptance check inspects both the DB rows and the recorded
+    workflow file name from the RunPod dispatch logs.
+16. **Story-building skeleton.** Upon Agent 0a returning
+    `phase="confirmed"`, the frontend hides the chat thread and
+    composer and shows `StoryBuildingSkeleton.vue` (§ 9.9) with
+    `i18n.t('story.building', { topic })` and exactly five
+    paragraph-shaped skeleton lines. The transition to
+    `/:lang/runs/:run_id/` is triggered by the `story_built` SSE
+    event from § 8.2.1, not by polling. On `story_build_failed`,
+    the skeleton swaps inline to an error banner with a retry
+    button that returns the user to the chat composer with their
+    draft preserved.
+17. **Translation refresh.** Switching from `/sk/runs/:id` to
+    `/cs/runs/:id` (for a run whose `source_language = sk`) issues
+    exactly one `POST /api/runs/:id/translations` request the first
+    time, returns all paragraph + concept_localized + story_title
+    + story_topic_description items, and updates the UI in place
+    without remounting `StoryParagraph` or `IllustrationCard`.
+    Switching back to `/sk/` performs no network call (the source
+    is already in memory). Switching to `/en/` later issues a
+    second translation request only for items that are missing or
+    stale; if every item is already cached and fresh, no POST is
+    issued. A second tab open on the same run receives the
+    `translations_refreshed` SSE event when the first tab triggers
+    a refresh and patches its own view in place if it is currently
+    viewing the same language.

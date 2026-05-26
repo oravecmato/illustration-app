@@ -55,6 +55,8 @@ class Session(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
     state: Mapped[str] = mapped_column(String, default=SessionState.CHATTING)
+    source_language: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    topic_short: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     collected_brief_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     run_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
@@ -89,7 +91,10 @@ class Run(Base):
     )
     session_id: Mapped[str] = mapped_column(String, ForeignKey("sessions.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, default=RunStatus.RUNNING)
+    source_language: Mapped[str] = mapped_column(String)
+    topic_short: Mapped[str] = mapped_column(Text)
     story_title: Mapped[str] = mapped_column(Text)
+    story_topic_description: Mapped[str] = mapped_column(Text)
     story_blocks_json: Mapped[str] = mapped_column(Text)
     style_guide_json: Mapped[str] = mapped_column(Text)
     illustration_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -111,7 +116,8 @@ class Illustration(Base):
     scene_index: Mapped[int] = mapped_column(Integer)
     scene_excerpt: Mapped[str] = mapped_column(Text)
     paragraph_index: Mapped[int] = mapped_column(Integer)
-    character_role: Mapped[str] = mapped_column(String)
+    character_role: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    current_workflow: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     initial_concept: Mapped[str] = mapped_column(Text)
     current_concept: Mapped[str] = mapped_column(Text)
     state: Mapped[str] = mapped_column(String, default=IllustrationState.PENDING)
@@ -129,3 +135,51 @@ class Illustration(Base):
     )
 
     run: Mapped["Run"] = relationship("Run", back_populates="illustrations")
+
+
+class StoryTranslation(Base):
+    """Stores translated story_title and story_topic_description per language."""
+
+    __tablename__ = "story_translations"
+
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("runs.id"), primary_key=True)
+    language: Mapped[str] = mapped_column(String, primary_key=True)
+    story_title: Mapped[str] = mapped_column(Text)
+    story_title_source_hash: Mapped[str] = mapped_column(String)
+    story_topic_description: Mapped[str] = mapped_column(Text)
+    story_topic_description_source_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class StoryBlockTranslation(Base):
+    """Stores translated paragraph text per language."""
+
+    __tablename__ = "story_block_translations"
+
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("runs.id"), primary_key=True)
+    paragraph_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    language: Mapped[str] = mapped_column(String, primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    text_source_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class IllustrationConceptTranslation(Base):
+    """Stores translated concept_localized per language."""
+
+    __tablename__ = "illustration_concept_translations"
+
+    illustration_id: Mapped[str] = mapped_column(String, ForeignKey("illustrations.id"), primary_key=True)
+    language: Mapped[str] = mapped_column(String, primary_key=True)
+    concept_localized: Mapped[str] = mapped_column(Text)
+    concept_localized_source_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )

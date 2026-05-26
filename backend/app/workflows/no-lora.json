@@ -1,0 +1,121 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "Illustrious-XL-v1.0.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "2": {
+    "inputs": {
+      "lora_name": "my_hero_academy_style_v2.safetensors",
+      "strength_model": 0.7,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "3": {
+    "inputs": {
+      "width": 1536,
+      "height": 1536,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "EmptySD3LatentImage"
+    }
+  },
+  "4": {
+    "inputs": {
+      "text": "safe, masterpiece, best quality, amazing quality, very aesthetic, absurdres,\nno humans, animal focus, cat focus,\n1cat, solo, black cat, black fur, yellow eyes, wide eyes, dilated pupils,\nscared, frightened, fur standing on end, arched back, ears flattened back,\ncrouching, tail curled around body, paws gripping branch,\nsitting on tree branch, high up in tree, top of tree, treetop,\noak tree, thick branches, green leaves, dense foliage,\nlooking down, vertigo, height,\nforest, daytime, soft sunlight, dappled light through leaves,\ndetailed background, depth of field,\nmha style, anime, manga illustration, clean linework, soft shading",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "text": "worst quality, bad quality, lowres, jpeg artifacts, watermark, signature,\nartist name, traditional media, sketch, blurry, oversaturated,\nbad anatomy, deformed, extra limbs, extra tails, malformed paws,\nmultiple cats, two cats, 2cats, group of animals,\n1girl, 1boy, solo, person, human, character, people,\ncalm cat, sleeping cat, relaxed, happy, peaceful, smiling,\nwhite cat, orange cat, brown cat, tabby, kitten,\nground, floor, indoor, on grass, lying down,\nrealistic, photo, 3d, western cartoon, furry",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "seed": 543832218914727,
+      "steps": 25,
+      "cfg": 6,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "latent_image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "7": {
+    "inputs": {
+      "samples": [
+        "6",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "8": {
+    "inputs": {
+      "filename_prefix": "background_",
+      "images": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

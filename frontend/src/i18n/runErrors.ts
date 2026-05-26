@@ -1,15 +1,10 @@
-const MESSAGES: Record<string, string> = {
-  CHAT_FAILED:
-    "Konverzácia s asistentom zlyhala. Skúste obnoviť stránku a začať novú reláciu.",
-  STORY_BUILD_FAILED:
-    "Tvorba príbehu zlyhala. Skúste prosím začať novú reláciu a opísať tému trochu inak.",
-  INTERNAL_ERROR:
-    "Vyskytla sa neočakávaná chyba. Skontrolujte log servera pre detaily.",
-};
+export function runErrorKey(errorCode: string | null | undefined): string {
+  if (!errorCode) return ''
 
-const FALLBACK = MESSAGES.INTERNAL_ERROR;
+  const mapping: Record<string, string> = {
+    INTERNAL_ERROR: 'errors.run.internal_error',
+    TRANSLATE_FAILED: 'errors.run.translate_failed',
+  }
 
-export function getRunErrorMessage(errorCode: string | null | undefined): string {
-  if (!errorCode) return "";
-  return MESSAGES[errorCode] ?? FALLBACK;
+  return mapping[errorCode] || 'errors.run.internal_error'
 }
