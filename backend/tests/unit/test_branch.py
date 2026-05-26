@@ -92,6 +92,8 @@ def make_illustration(run_id="run-1", scene_index=0, character_role="male"):
     ill.prompt_attempt = 1
     ill.image_path = None
     ill.error_message = None
+    ill.companion_description = None
+    ill.companion_interaction = None
     return ill
 
 

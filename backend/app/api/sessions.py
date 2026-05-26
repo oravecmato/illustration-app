@@ -178,6 +178,7 @@ async def finalize_session(
                 cancel_flag=cancel_flag,
                 character_config=runs_api._character_config,
                 session_factory=factory,
+                companions_pool=result.companions_pool,
             )
 
     background_tasks.add_task(pipeline_task)

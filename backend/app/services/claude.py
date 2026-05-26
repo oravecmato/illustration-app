@@ -21,6 +21,7 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     CollectedBrief,
+    Companion,
     EvaluateImageResponse,
     GeneratePromptsResponse,
     RethinkConceptResponse,
@@ -134,10 +135,14 @@ class ClaudeClient:
         characters_json = json.dumps(
             [c.model_dump() for c in brief.characters], ensure_ascii=False, indent=2
         )
+        companions_json = json.dumps(
+            [c.model_dump() for c in brief.companions], ensure_ascii=False, indent=2
+        )
         user_text = (
             "Construct the Slovak story and the illustration scenes for the brief below, "
             "obeying every rule in your instructions.\n\n"
             f"characters:\n{characters_json}\n\n"
+            f"companions:\n{companions_json}\n\n"
             f"topic: {brief.topic}\n\n"
             f"notes: {brief.notes or '(none)'}\n\n"
             "Respond with the JSON object specified in your instructions and nothing else."
@@ -158,9 +163,15 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str,
         character_config: dict,
+        companion: Companion | None = None,
     ) -> GeneratePromptsResponse:
         char_entry = character_config[character_role]
         char_display = CHARACTER_ROLE_MAP[character_role]
+        companion_line = (
+            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
+            if companion is not None
+            else "companion: null"
+        )
         user_text = (
             f"character_display: {char_display}\n"
             f"character_role: {character_role}\n"
@@ -169,7 +180,8 @@ class ClaudeClient:
             f"style_positive: {style_guide.overall_style_positive}\n"
             f"style_negative: {style_guide.overall_style_negative}\n"
             f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
-            f"concept: {current_concept}\n\n"
+            f"concept: {current_concept}\n"
+            f"{companion_line}\n\n"
             f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
             'Respond with JSON: {"positive": "...", "negative": "..."}'
         )
@@ -189,10 +201,16 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str,
         character_config: dict,
+        companion: Companion | None = None,
     ) -> EvaluateImageResponse:
         char_display = CHARACTER_ROLE_MAP[character_role]
         char_entry = character_config[character_role]
         image_b64 = base64.standard_b64encode(image_bytes).decode()
+        companion_line = (
+            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
+            if companion is not None
+            else "companion: null"
+        )
         messages = [
             {
                 "role": "user",
@@ -208,10 +226,11 @@ class ClaudeClient:
                     {
                         "type": "text",
                         "text": (
-                            f"Evaluate this anime illustration against the 7-point checklist.\n\n"
+                            f"Evaluate this anime illustration against the checklist.\n\n"
                             f"Expected character: {char_display} (role: {character_role})\n"
                             f"Expected trigger tags: {char_entry['trigger_tags']}\n"
                             f"Concept: {current_concept}\n"
+                            f"{companion_line}\n"
                             f"Global style: {style_guide.overall_style_positive}\n\n"
                             "Respond with JSON per your instructions."
                         ),
@@ -236,9 +255,15 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str,
         character_config: dict,
+        companion: Companion | None = None,
     ) -> RevisePromptsResponse:
         char_entry = character_config[character_role]
         char_display = CHARACTER_ROLE_MAP[character_role]
+        companion_line = (
+            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
+            if companion is not None
+            else "companion: null"
+        )
         user_text = (
             f"character_display: {char_display}\n"
             f"character_role: {character_role}\n"
@@ -248,6 +273,7 @@ class ClaudeClient:
             f"style_negative: {style_guide.overall_style_negative}\n"
             f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
             f"concept: {current_concept}\n"
+            f"{companion_line}\n"
             f"current_positive: {current_prompts.positive}\n"
             f"current_negative: {current_prompts.negative}\n\n"
             f"verdict_problem: {verdict.problem}\n"
@@ -274,8 +300,11 @@ class ClaudeClient:
         story_blocks: list[dict],
         current_paragraph_index: int,
         character_role: str,
+        current_companion: Companion | None = None,
+        companions_pool: list[str] | None = None,
     ) -> RethinkConceptResponse:
         char_display = CHARACTER_ROLE_MAP[character_role]
+        pool = companions_pool or []
         # Render the full story for the agent: paragraph texts inline,
         # illustration blocks as numbered markers so the agent can see where
         # in the arc each illustration sits.
@@ -289,6 +318,12 @@ class ClaudeClient:
         full_story = "\n\n".join(rendered_blocks)
         current_paragraph_text = story_blocks[current_paragraph_index]["text"]
 
+        current_companion_json = (
+            json.dumps(current_companion.model_dump(), ensure_ascii=False)
+            if current_companion is not None
+            else "null"
+        )
+        companions_pool_json = json.dumps(pool, ensure_ascii=False)
         user_text = (
             f"character_display: {char_display}\n"
             f"character_role: {character_role}\n\n"
@@ -298,6 +333,8 @@ class ClaudeClient:
             f"current_paragraph_text: {current_paragraph_text}\n"
             f"current_scene_excerpt: {current_scene_excerpt}\n"
             f"failed_concept: {current_concept}\n"
+            f"current_companion: {current_companion_json}\n"
+            f"companions_pool: {companions_pool_json}\n"
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
             "Respond with the JSON object specified in your instructions."

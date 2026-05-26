@@ -1,8 +1,34 @@
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
 from app.constants import MAX_ILLUSTRATIONS
+
+
+def _normalize_companion_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def companion_in_pool(description: str, pool: Iterable[str]) -> bool:
+    """Whitespace-tolerant, case-insensitive pool-fidelity check.
+
+    Returns True iff ``description`` matches at least one pool entry by
+    exact normalized equality or by normalized substring (either
+    direction — pool entry inside description, or description inside
+    pool entry).
+    """
+    norm = _normalize_companion_text(description)
+    if not norm:
+        return False
+    for entry in pool:
+        e = _normalize_companion_text(entry)
+        if not e:
+            continue
+        if norm == e or norm in e or e in norm:
+            return True
+    return False
+
 
 # ── Shared shapes ────────────────────────────────────────────────────────────
 
@@ -14,11 +40,33 @@ class StyleGuide(BaseModel):
     character_baseline_description: str
 
 
+class Companion(BaseModel):
+    """A non-human companion attached to an illustration.
+
+    Both fields are required and non-empty. Used in Agent 0b output and
+    Agent 4 output. The ``description`` must reference an entry in the
+    run's ``collected_brief.companions`` pool (pool-fidelity check runs
+    server-side, outside this schema).
+    """
+
+    description: str
+    interaction: str
+
+    @model_validator(mode="after")
+    def _validate_non_empty(self) -> "Companion":
+        if not self.description.strip():
+            raise ValueError("companion.description must be non-empty")
+        if not self.interaction.strip():
+            raise ValueError("companion.interaction must be non-empty")
+        return self
+
+
 class IllustrationConcept(BaseModel):
     scene_index: int
     scene_excerpt: str
     concept: str
     character_role: Literal["male", "female", "mother"]
+    companion: Companion | None = None
 
 
 # ── Agent 0a: chat ───────────────────────────────────────────────────────────
@@ -30,8 +78,21 @@ class BriefCharacter(BaseModel):
     short_description: str
 
 
+class BriefCompanion(BaseModel):
+    """One companion entry in the brief's agreed pool (Agent 0a)."""
+
+    description: str
+
+    @model_validator(mode="after")
+    def _validate_non_empty(self) -> "BriefCompanion":
+        if not self.description.strip():
+            raise ValueError("companion description must be non-empty")
+        return self
+
+
 class CollectedBrief(BaseModel):
     characters: list[BriefCharacter]
+    companions: list[BriefCompanion] = []
     topic: str
     notes: str
 
@@ -46,6 +107,8 @@ class CollectedBrief(BaseModel):
             raise ValueError("a brief consisting only of 'mother' is invalid")
         if "mother" in roles and not ({"male", "female"} & set(roles)):
             raise ValueError("'mother' requires at least one of 'male' or 'female'")
+        if len(self.companions) > 2:
+            raise ValueError("companions may contain at most 2 entries")
         return self
 
 
@@ -162,6 +225,7 @@ class RethinkConceptResponse(BaseModel):
     concept: str
     paragraph_text: str
     scene_excerpt: str
+    companion: Companion | None = None
 
     @model_validator(mode="after")
     def _validate_excerpt_in_paragraph(self) -> "RethinkConceptResponse":

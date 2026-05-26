@@ -26,6 +26,10 @@
       {{ truncatedExcerpt }}
     </div>
 
+    <div v-if="illustration.companion" class="companion-subtitle">
+      V scéne je tiež: {{ illustration.companion.description }}
+    </div>
+
     <div class="image-slot">
       <a
         v-if="illustration.state === 'COMPLETED' && illustration.image_url"
@@ -171,6 +175,14 @@ const truncatedExcerpt = computed(() => {
   font-style: italic;
   margin-bottom: 12px;
   line-height: 1.4;
+  font-family: var(--font-body);
+}
+
+.companion-subtitle {
+  font-size: 0.8em;
+  color: #777;
+  margin-top: -6px;
+  margin-bottom: 12px;
   font-family: var(--font-body);
 }
 

@@ -51,6 +51,7 @@ function makeBrief(): CollectedBrief {
     ],
     topic: "prvý deň v škole",
     notes: "",
+    companions: [],
   };
 }
 

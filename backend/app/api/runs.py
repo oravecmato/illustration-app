@@ -23,7 +23,7 @@ from app.schemas.api import (
     RunDetailResponse,
     RunResponse,
 )
-from app.schemas.claude import StyleGuide
+from app.schemas.claude import Companion, StyleGuide
 from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
 
@@ -90,6 +90,12 @@ def _build_illustration_response(ill) -> IllustrationResponse:
     image_url = None
     if ill.image_path:
         image_url = f"/static/{ill.image_path}"
+    companion = None
+    if ill.companion_description and ill.companion_interaction:
+        companion = Companion(
+            description=ill.companion_description,
+            interaction=ill.companion_interaction,
+        )
     return IllustrationResponse(
         id=ill.id,
         scene_index=ill.scene_index,
@@ -101,6 +107,7 @@ def _build_illustration_response(ill) -> IllustrationResponse:
         concept_attempt=ill.concept_attempt,
         prompt_attempt=ill.prompt_attempt,
         image_url=image_url,
+        companion=companion,
     )
 
 

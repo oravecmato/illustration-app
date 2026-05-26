@@ -19,8 +19,13 @@ export interface BriefCharacter {
   short_description: string;
 }
 
+export interface BriefCompanion {
+  description: string;
+}
+
 export interface CollectedBrief {
   characters: BriefCharacter[];
+  companions: BriefCompanion[];
   topic: string;
   notes: string;
 }
@@ -98,6 +103,11 @@ export interface Run {
   error_message: string | null;
 }
 
+export interface Companion {
+  description: string;
+  interaction: string;
+}
+
 export interface Illustration {
   id: string;
   scene_index: number;
@@ -109,6 +119,7 @@ export interface Illustration {
   concept_attempt: number;
   prompt_attempt: number;
   image_url: string | null;
+  companion: Companion | null;
 }
 
 // SSE event payloads
@@ -144,6 +155,12 @@ export interface IllustrationFailedEvent {
   error_message: string;
 }
 
+export interface IllustrationCompanionUpdatedEvent {
+  illustration_id: string;
+  scene_index: number;
+  companion: Companion | null;
+}
+
 export interface RunCompletedEvent {
   completed: number;
   failed: number;
@@ -159,6 +176,7 @@ export type SseEvent =
   | { type: "illustration_state"; data: IllustrationStateEvent }
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
+  | { type: "illustration_companion_updated"; data: IllustrationCompanionUpdatedEvent }
   | { type: "paragraph_updated"; data: ParagraphUpdatedEvent }
   | { type: "run_completed"; data: RunCompletedEvent }
   | { type: "run_failed"; data: RunFailedEvent }

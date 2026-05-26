@@ -120,6 +120,8 @@ class Illustration(Base):
     current_prompts_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     last_verdict_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     image_path: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    companion_description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    companion_interaction: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

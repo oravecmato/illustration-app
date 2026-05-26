@@ -16,6 +16,7 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
+    companion: null,
     ...overrides,
   };
 }
@@ -174,5 +175,52 @@ describe("IllustrationCard", () => {
     });
     const skeleton = wrapper.find(".skeleton-block.shape-rect");
     expect(skeleton.exists()).toBe(true);
+  });
+
+  it("does not render companion subtitle when companion is null", () => {
+    const wrapper = mount(IllustrationCard, {
+      props: { illustration: makeIllustration({ companion: null }) },
+    });
+    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
+  });
+
+  it("renders companion subtitle when companion is present", () => {
+    const wrapper = mount(IllustrationCard, {
+      props: {
+        illustration: makeIllustration({
+          companion: {
+            description: "a small black cat",
+            interaction: "curled on her lap",
+          },
+        }),
+      },
+    });
+    const subtitle = wrapper.find(".companion-subtitle");
+    expect(subtitle.exists()).toBe(true);
+    expect(subtitle.text()).toContain("V scéne je tiež");
+    expect(subtitle.text()).toContain("a small black cat");
+  });
+
+  it("reactively updates companion subtitle when companion changes in place", async () => {
+    // Mirrors the runStore behavior for illustration_companion_updated:
+    // the same object's companion field is mutated; the card should
+    // re-render the subtitle without remounting.
+    const illustration = reactive(makeIllustration({ companion: null }));
+    const wrapper = mount(IllustrationCard, {
+      props: { illustration },
+    });
+    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
+
+    illustration.companion = {
+      description: "a brass clockwork owl",
+      interaction: "perched on his shoulder",
+    };
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".companion-subtitle").exists()).toBe(true);
+    expect(wrapper.text()).toContain("a brass clockwork owl");
+
+    illustration.companion = null;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
   });
 });

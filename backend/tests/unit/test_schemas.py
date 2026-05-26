@@ -8,10 +8,12 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     CollectedBrief,
+    Companion,
     EvaluateImageResponse,
     GeneratePromptsResponse,
     RethinkConceptResponse,
     RevisePromptsResponse,
+    companion_in_pool,
 )
 
 # ---- CollectedBrief ----
@@ -359,3 +361,135 @@ def test_rethink_concept_rejects_excerpt_not_in_paragraph():
             paragraph_text="Pršalo a on plakal.",
             scene_excerpt="Slniečko svietilo.",
         )
+
+
+# ---- Companion + CollectedBrief.companions ----
+
+
+def _brief_with_companions(companion_descriptions: list[str]) -> dict:
+    payload = _brief(["male"])
+    payload["companions"] = [{"description": d} for d in companion_descriptions]
+    return payload
+
+
+def test_collected_brief_accepts_empty_companions():
+    brief = CollectedBrief(**_brief(["male"]))
+    assert brief.companions == []
+
+
+def test_collected_brief_accepts_one_companion():
+    brief = CollectedBrief(**_brief_with_companions(["a small black cat"]))
+    assert len(brief.companions) == 1
+    assert brief.companions[0].description == "a small black cat"
+
+
+def test_collected_brief_accepts_two_companions():
+    brief = CollectedBrief(**_brief_with_companions(["a small black cat", "a brass clockwork owl"]))
+    assert len(brief.companions) == 2
+
+
+def test_collected_brief_rejects_three_companions():
+    with pytest.raises(ValidationError):
+        CollectedBrief(**_brief_with_companions(["a", "b", "c"]))
+
+
+def test_collected_brief_rejects_empty_companion_description():
+    with pytest.raises(ValidationError):
+        CollectedBrief(**_brief_with_companions(["   "]))
+
+
+def test_companion_requires_non_empty_fields():
+    with pytest.raises(ValidationError):
+        Companion(description="", interaction="curled on her lap")
+    with pytest.raises(ValidationError):
+        Companion(description="a small black cat", interaction="")
+
+
+def test_companion_accepts_valid():
+    c = Companion(description="a small black cat", interaction="curled on her lap")
+    assert c.description == "a small black cat"
+
+
+def test_build_story_accepts_illustration_with_companion():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    illustrations[0]["companion"] = {
+        "description": "a small black cat",
+        "interaction": "curled on her lap",
+    }
+    resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+    assert resp.illustrations[0].companion is not None
+    assert resp.illustrations[0].companion.description == "a small black cat"
+
+
+def test_build_story_accepts_all_illustrations_without_companion():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+    assert all(i.companion is None for i in resp.illustrations)
+
+
+def test_rethink_concept_accepts_companion_null():
+    resp = RethinkConceptResponse(
+        concept="A new concept",
+        paragraph_text="Pršalo a on plakal.",
+        scene_excerpt="Pršalo a on plakal.",
+        companion=None,
+    )
+    assert resp.companion is None
+
+
+def test_rethink_concept_accepts_companion_populated():
+    resp = RethinkConceptResponse(
+        concept="A new concept",
+        paragraph_text="Sedela pri okne. Mačka sa jej krčila na kolenách.",
+        scene_excerpt="Sedela pri okne.",
+        companion={
+            "description": "a small black cat",
+            "interaction": "curled on her lap",
+        },
+    )
+    assert resp.companion is not None
+    assert resp.companion.description == "a small black cat"
+
+
+def test_rethink_concept_rejects_companion_with_empty_field():
+    with pytest.raises(ValidationError):
+        RethinkConceptResponse(
+            concept="A new concept",
+            paragraph_text="Pršalo.",
+            scene_excerpt="Pršalo.",
+            companion={"description": "a cat", "interaction": ""},
+        )
+
+
+# ---- companion_in_pool ----
+
+
+def test_companion_in_pool_exact_match():
+    assert companion_in_pool("a small black cat", ["a small black cat"])
+
+
+def test_companion_in_pool_case_insensitive():
+    assert companion_in_pool("A Small Black Cat", ["a small black cat"])
+
+
+def test_companion_in_pool_whitespace_tolerant():
+    assert companion_in_pool("a  small   black cat", ["a small black cat"])
+
+
+def test_companion_in_pool_substring_in_either_direction():
+    # description is substring of pool entry
+    assert companion_in_pool("small black cat", ["a small black cat"])
+    # pool entry is substring of description
+    assert companion_in_pool("a small black cat sitting", ["small black cat"])
+
+
+def test_companion_in_pool_rejects_unrelated():
+    assert not companion_in_pool("a red dragon", ["a small black cat"])
+
+
+def test_companion_in_pool_rejects_empty_description():
+    assert not companion_in_pool("", ["a small black cat"])
+
+
+def test_companion_in_pool_rejects_empty_pool():
+    assert not companion_in_pool("a small black cat", [])

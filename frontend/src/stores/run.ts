@@ -99,6 +99,17 @@ export const useRunStore = defineStore("run", () => {
         }
         break;
       }
+      case "illustration_companion_updated": {
+        // Agent 4 may keep/drop/swap the companion during a rewrite.
+        // Mutate the existing illustration object in place so the
+        // IllustrationCard re-renders the companion subtitle without
+        // remounting. (§ 9.2.2)
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          ill.companion = event.data.companion;
+        }
+        break;
+      }
       case "run_completed": {
         if (run.value) {
           run.value.status = "COMPLETED";

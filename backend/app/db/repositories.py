@@ -92,6 +92,8 @@ class RunRepository:
         paragraph_index: int,
         concept: str,
         character_role: str,
+        companion_description: str | None = None,
+        companion_interaction: str | None = None,
     ) -> Illustration:
         ill = Illustration(
             run_id=run_id,
@@ -101,6 +103,8 @@ class RunRepository:
             character_role=character_role,
             initial_concept=concept,
             current_concept=concept,
+            companion_description=companion_description,
+            companion_interaction=companion_interaction,
         )
         self.session.add(ill)
         await self.session.commit()

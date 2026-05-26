@@ -14,6 +14,7 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     CollectedBrief,
+    companion_in_pool,
 )
 from app.services.claude import ClaudeClient, ClaudeError
 
@@ -43,6 +44,7 @@ class FinalizeResult:
     story_blocks: list[dict]
     style_guide: dict
     illustrations: list[dict]
+    companions_pool: list[str]
 
 
 class SessionService:
@@ -181,6 +183,27 @@ class SessionService:
             )
             raise SessionError("STORY_BUILD_FAILED", str(e)) from e
 
+        # Server-side pool fidelity: every companion attached to an
+        # illustration must reference an entry in the brief's companions
+        # pool. The brief's pool may be empty, in which case no
+        # illustration may have a companion.
+        pool = [c.description for c in brief.companions]
+        for ill in story.illustrations:
+            if ill.companion is None:
+                continue
+            if not companion_in_pool(ill.companion.description, pool):
+                msg = (
+                    f"Agent 0b proposed companion '{ill.companion.description}' for "
+                    f"scene_index={ill.scene_index} that is not in the agreed pool {pool}."
+                )
+                await self.repo.update_session(
+                    s,
+                    state=SessionState.FAILED,
+                    error_code="STORY_BUILD_FAILED",
+                    error_message=msg,
+                )
+                raise SessionError("STORY_BUILD_FAILED", msg)
+
         # Persist run + illustrations.
         import json as _json
 
@@ -215,6 +238,12 @@ class SessionService:
                 paragraph_index=paragraph_index_by_scene[ill.scene_index],
                 concept=ill.concept,
                 character_role=ill.character_role,
+                companion_description=(
+                    ill.companion.description if ill.companion is not None else None
+                ),
+                companion_interaction=(
+                    ill.companion.interaction if ill.companion is not None else None
+                ),
             )
             illustrations.append(
                 {
@@ -228,6 +257,14 @@ class SessionService:
                     "concept_attempt": row.concept_attempt,
                     "prompt_attempt": row.prompt_attempt,
                     "image_url": None,
+                    "companion": (
+                        {
+                            "description": row.companion_description,
+                            "interaction": row.companion_interaction,
+                        }
+                        if row.companion_description is not None
+                        else None
+                    ),
                 }
             )
 
@@ -239,4 +276,5 @@ class SessionService:
             story_blocks=[b.model_dump() for b in story.story_blocks],
             style_guide=story.style_guide.model_dump(),
             illustrations=illustrations,
+            companions_pool=[c.description for c in brief.companions],
         )

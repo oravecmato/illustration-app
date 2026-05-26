@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from app.schemas.claude import CollectedBrief, StyleGuide
+from app.schemas.claude import CollectedBrief, Companion, StyleGuide
 
 # ── Sessions ─────────────────────────────────────────────────────────────────
 
@@ -70,6 +70,7 @@ class IllustrationResponse(BaseModel):
     concept_attempt: int
     prompt_attempt: int
     image_url: str | None
+    companion: Companion | None = None
 
 
 class RunDetailResponse(BaseModel):

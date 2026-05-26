@@ -8,7 +8,7 @@ from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
 from app.db.models import Illustration, IllustrationState
 from app.db.repositories import RunRepository
 from app.orchestrator.events import EventBus
-from app.schemas.claude import StyleGuide
+from app.schemas.claude import Companion, StyleGuide, companion_in_pool
 from app.services.claude import ClaudeClient
 from app.services.images import save_image
 from app.services.runpod import RunPodClient
@@ -31,12 +31,22 @@ async def run_branch(
     story_title: str = "",
     story_blocks: list[dict] | None = None,
     story_lock: asyncio.Lock | None = None,
+    companions_pool: list[str] | None = None,
 ) -> None:
     """Run the state machine for a single illustration branch."""
     char_config = character_config or {}
     character_role = illustration.character_role
     blocks = story_blocks if story_blocks is not None else []
     lock = story_lock or asyncio.Lock()
+    pool = companions_pool or []
+
+    def _current_companion() -> Companion | None:
+        if illustration.companion_description and illustration.companion_interaction:
+            return Companion(
+                description=illustration.companion_description,
+                interaction=illustration.companion_interaction,
+            )
+        return None
 
     async def transition(state: IllustrationState, **extra) -> None:
         await repo.update_illustration(illustration, state=state, **extra)
@@ -73,6 +83,7 @@ async def run_branch(
                 concept_attempt=concept_attempt,
                 prompt_attempt=1,
             )
+            prev_companion = _current_companion()
             try:
                 rethink_result = await claude.rethink_concept(
                     current_concept=illustration.current_concept,
@@ -82,6 +93,8 @@ async def run_branch(
                     story_blocks=blocks,
                     current_paragraph_index=illustration.paragraph_index,
                     character_role=character_role,
+                    current_companion=prev_companion,
+                    companions_pool=pool,
                 )
             except Exception as e:
                 logger.error("rethink_concept failed: %s", e)
@@ -91,12 +104,30 @@ async def run_branch(
                 )
                 return
 
+            # Server-side pool fidelity: Agent 4 may only set a companion
+            # whose description is present in the agreed pool. If the pool
+            # is empty, the companion must be null.
+            new_companion: Companion | None = rethink_result.companion
+            if new_companion is not None and not companion_in_pool(new_companion.description, pool):
+                msg = (
+                    f"Agent 4 proposed companion '{new_companion.description}' that is "
+                    f"not in the agreed pool {pool}."
+                )
+                logger.error(msg)
+                await transition(
+                    IllustrationState.FAILED,
+                    error_message=msg,
+                )
+                return
+
             # Apply rewrite: mutate the shared in-memory story_blocks,
             # persist the new story_blocks_json on the run, update the
-            # illustration's excerpt + concept, then publish
+            # illustration's excerpt + concept + companion, then publish
             # paragraph_updated BEFORE the next illustration_state event
             # so the frontend renders the new paragraph before clearing
-            # its regenerating-skeleton (§ 9.5).
+            # its regenerating-skeleton (§ 9.5). Publish
+            # illustration_companion_updated only when the companion
+            # actually changed.
             paragraph_index = illustration.paragraph_index
             async with lock:
                 if 0 <= paragraph_index < len(blocks):
@@ -114,6 +145,12 @@ async def run_branch(
                 illustration,
                 current_concept=rethink_result.concept,
                 scene_excerpt=rethink_result.scene_excerpt,
+                companion_description=(
+                    new_companion.description if new_companion is not None else None
+                ),
+                companion_interaction=(
+                    new_companion.interaction if new_companion is not None else None
+                ),
             )
             await event_bus.publish(
                 "paragraph_updated",
@@ -122,6 +159,30 @@ async def run_branch(
                     "text": rethink_result.paragraph_text,
                 },
             )
+            companion_changed = (prev_companion is None) != (new_companion is None) or (
+                prev_companion is not None
+                and new_companion is not None
+                and (
+                    prev_companion.description != new_companion.description
+                    or prev_companion.interaction != new_companion.interaction
+                )
+            )
+            if companion_changed:
+                await event_bus.publish(
+                    "illustration_companion_updated",
+                    {
+                        "illustration_id": illustration.id,
+                        "scene_index": illustration.scene_index,
+                        "companion": (
+                            {
+                                "description": new_companion.description,
+                                "interaction": new_companion.interaction,
+                            }
+                            if new_companion is not None
+                            else None
+                        ),
+                    },
+                )
 
         # Generate prompts for current concept
         if cancel_flag.is_set():
@@ -139,6 +200,7 @@ async def run_branch(
                 style_guide=style_guide,
                 character_role=character_role,
                 character_config=char_config,
+                companion=_current_companion(),
             )
         except Exception as e:
             logger.error("generate_prompts failed: %s", e)
@@ -201,6 +263,7 @@ async def run_branch(
                     style_guide=style_guide,
                     character_role=character_role,
                     character_config=char_config,
+                    companion=_current_companion(),
                 )
             except Exception as e:
                 logger.error("evaluate_image failed: %s", e)
@@ -257,6 +320,7 @@ async def run_branch(
                         style_guide=style_guide,
                         character_role=character_role,
                         character_config=char_config,
+                        companion=_current_companion(),
                     )
                 except Exception as e:
                     logger.error("revise_prompts failed: %s", e)

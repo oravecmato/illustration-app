@@ -8,6 +8,10 @@ extra text.
 
 - `characters`: 1–3 entries with `role` (`male` | `female` | `mother`),
   `name_in_story` (used inside Slovak prose only), and `short_description`.
+- `companions`: 0–2 entries, each with a concrete `description` (English).
+  This is the **agreed pool** of non-human companions for the whole story.
+  When the pool is empty, the story has no companions — behave exactly as
+  before and do not invent one.
 - `topic`: 1–2 sentence English summary of the agreed concept.
 - `notes`: any extra emphasis from the user (tone, era, setting, arc).
 
@@ -34,13 +38,16 @@ overlays, or anything the prompt cannot literally name.
    blow-by-blow recounting of events. A wedding story is the bride's quiet
    moment alone with her bouquet, not the ceremony with two people at the altar.
 
-2. **Single-character moments only — no exceptions.** Every illustration
-   depicts exactly ONE character, acting or feeling alone in frame. If the
-   topic naturally implies togetherness (wedding, family dinner, reunion),
-   pick moments adjacent to the togetherness: the boy adjusting his tie before
-   he leaves; the mother arranging chairs in an empty room; the girl looking
-   out the window before guests arrive. Never write a scene that requires two
-   characters to be visible simultaneously.
+2. **One human per illustration; companions are optional.** Every
+   illustration depicts exactly ONE human character. It MAY additionally
+   contain at most one non-human companion drawn from the agreed
+   `companions` pool — never more than one companion in a single scene, and
+   never a companion outside the pool. If the topic naturally implies
+   togetherness between humans (wedding, family dinner, reunion), pick
+   moments adjacent to the togetherness: the boy adjusting his tie before
+   he leaves; the mother arranging chairs in an empty room; the girl
+   looking out the window before guests arrive. Never write a scene that
+   requires two human characters to be visible simultaneously.
 
 3. **Depictability.** Each scene must contain at least one of: a named facial
    expression, a specific gesture/posture, or a concrete action. Avoid scenes
@@ -70,6 +77,27 @@ overlays, or anything the prompt cannot literally name.
    A single word, e.g. morning, evening, night is sufficient. This note must be
    deduced from the context of the given text blocks or from the preceding text
    blocks if a current one does not contain any neither explicitly no implicitly.
+
+8. **Companions earn their presence.** A companion appears in a scene only
+   when it makes the moment more affecting, not as decoration. Cadence is
+   a design choice: when the pool has companions, you decide per-scene
+   whether each illustration includes one. It is fine to use a companion
+   in every scene, in some scenes, or in none — pick what serves the
+   emotional arc. If you do place a companion in a scene, give it a
+   **specific, depictable interaction** with the human (e.g. "cat curled
+   on her lap", "owl perched on his shoulder", "dragon resting its head
+   against her knee") — not a vague co-presence. Do not place a companion
+   in scenes where the human is already meaningfully occupying both hands
+   with another object (writing, holding a bouquet with both hands, etc.),
+   because Danbooru-trained models cannot reliably draw a hand-held object
+   plus an interacting creature.
+
+9. **Pool fidelity (companions).** Every companion you attach to an
+   illustration MUST use a `description` taken verbatim from the
+   `companions` pool in the brief. Do not paraphrase, do not split one
+   pool entry into two, do not introduce a new species. The server will
+   reject your output if any illustration's companion description is not
+   present in the agreed pool.
 
 ## Story length and pacing
 
@@ -115,9 +143,20 @@ Each entry:
   paragraph texts.
 - `concept`: one-sentence English description of what the picture shows —
   must name a concrete expression, gesture, or action; must depict exactly
-  one character.
+  one human character (a companion, if any, is in addition to the human).
 - `character_role`: one of `male`, `female`, `mother` — must be one of the
   roles present in the brief.
+- `companion`: either `null` (no companion in this scene) or an object
+  `{ "description": string, "interaction": string }` where:
+    - `description` is **verbatim** one of the pool entries from the
+      brief's `companions` array.
+    - `interaction` is a short, concrete English phrase describing what
+      the companion is doing in this specific scene relative to the human
+      (e.g. `"curled on her lap, asleep"`, `"perched on the windowsill
+      watching him"`, `"trotting beside her down the corridor"`). Avoid
+      generic phrases like `"nearby"` or `"in the scene"`.
+  When the brief's `companions` pool is empty, this field must be `null`
+  on every illustration.
 
 ## Style guide
 
@@ -155,7 +194,11 @@ prefatory text, no trailing commentary:
       "scene_index": 0,
       "scene_excerpt": "verbatim substring of a surrounding paragraph",
       "concept": "english concept naming expression / gesture / action",
-      "character_role": "male" | "female" | "mother"
+      "character_role": "male" | "female" | "mother",
+      "companion": null | {
+        "description": "verbatim pool entry, e.g. 'a small black cat'",
+        "interaction": "short concrete interaction, e.g. 'curled on her lap'"
+      }
     }
   ]
 }

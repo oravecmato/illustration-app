@@ -295,7 +295,7 @@ shaping a story.
 | `created_at`          | DATETIME     | UTC                                                  |
 | `updated_at`          | DATETIME     | UTC                                                  |
 | `state`               | TEXT (enum)  | `CHATTING` / `AWAITING_CONFIRMATION` / `BUILDING_STORY` / `COMPLETED` / `FAILED` |
-| `collected_brief_json`| TEXT NULL    | JSON: the brief captured by Agent 0a; set on confirmation |
+| `collected_brief_json`| TEXT NULL    | JSON: the brief captured by Agent 0a; set on confirmation. Shape includes the optional `companions` pool (§ 7.1 Call 0a) but the column itself remains plain TEXT JSON — no schema change. |
 | `run_id`              | TEXT FK NULL | → `runs.id`; set when Agent 0b finishes and the run is created |
 | `error_code`          | TEXT NULL    | `STORY_BUILD_FAILED`, `CHAT_FAILED`, `INTERNAL_ERROR` (see § 8.6) |
 | `error_message`       | TEXT NULL    | Human-readable technical detail (English)            |
@@ -365,6 +365,8 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `current_prompts_json`   | TEXT NULL    | Last-used prompts (for debugging/visibility)                              |
 | `last_verdict_json`      | TEXT NULL    | Last Claude verdict (for debugging/visibility)                            |
 | `image_path`             | TEXT NULL    | Relative path under `OUTPUT_DIR`, e.g. `runs/<run_id>/scene_0.png`        |
+| `companion_description`  | TEXT NULL    | The companion's `description` from Agent 0b (or Agent 4 after a rewrite), or NULL if no companion. **Mutable** — Agent 4 may set, change, or clear this. |
+| `companion_interaction`  | TEXT NULL    | The companion's `interaction` from Agent 0b (or Agent 4), or NULL. **Mutable** — same as above. |
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
@@ -399,15 +401,24 @@ for concept_attempt in 1..MAX_CONCEPT_ATTEMPTS (3):       # initial + 2 restarts
         # excerpt (§ 7.1 Call 4). The orchestrator:
         #   1. validates the new excerpt is a verbatim substring of the
         #      new paragraph;
-        #   2. overwrites runs.story_blocks_json[paragraph_index].text;
-        #   3. overwrites illustrations.scene_excerpt;
-        #   4. emits SSE paragraph_updated{paragraph_index, text};
-        #   5. updates current_concept.
-        (current_concept, new_paragraph_text, new_scene_excerpt) =
+        #   2. validates that any non-null companion belongs to the
+        #      brief's companions pool (§ 7.1 Call 4 rule #7);
+        #   3. overwrites runs.story_blocks_json[paragraph_index].text;
+        #   4. overwrites illustrations.scene_excerpt;
+        #   5. emits SSE paragraph_updated{paragraph_index, text};
+        #   6. updates current_concept;
+        #   7. overwrites illustrations.companion_description and
+        #      illustrations.companion_interaction when the new
+        #      companion differs from the previous (including any
+        #      transition to/from null); emits SSE
+        #      illustration_companion_updated in that case.
+        (current_concept, new_paragraph_text, new_scene_excerpt, new_companion) =
             claude.rethink_concept(
                 full_story_text=<latest joined paragraph blocks>,
                 current_paragraph_text=<latest paragraph at paragraph_index>,
                 scene_excerpt=<current excerpt>,
+                current_companion=<current illustrations.companion_*>,
+                companions_pool=<sessions.collected_brief.companions>,
                 failed_concept=<previous current_concept>,
                 verdict=<last verdict>,
                 style_guide=...,
@@ -480,6 +491,9 @@ confirmation.
     "characters": [
       { "role": "male" | "female" | "mother", "name_in_story": "string", "short_description": "string" }
     ],
+    "companions": [
+      { "description": "string (concrete English description of one allowed non-human entity)" }
+    ],
     "topic": "string (1–2 sentence summary of the agreed concept)",
     "notes": "string (anything else the user emphasized that should shape the story)"
   } | null
@@ -535,6 +549,26 @@ Hard rules enforced by the prompt (and re-checked server-side):
    list any scene concepts. That is Agent 0b's job. Its `reply` may
    discuss themes and tone with the user, but must not deliver the
    finished narrative.
+6. **Companion pool size.** `collected_brief.companions` may contain
+   **at most 2** entries. An empty array (the default) means the story
+   has no companions. Agent 0a must not push the user toward companions
+   — it only captures them if the user volunteers the idea or
+   explicitly agrees when asked.
+7. **Companion shape.** Each entry has a non-empty, visualizable
+   `description`. Agent 0a nudges the user toward concrete descriptions
+   ("a small black cat" not "an animal") before moving to
+   `awaiting_confirmation`.
+8. **Non-humanoid only.** A companion must have a body plan
+   fundamentally different from humans — quadrupeds, winged creatures,
+   serpents, mechanical entities without human form factor, etc.
+   Anthropomorphic / humanoid creatures (cat-girls, elf-like beings,
+   humanoid androids with human faces, etc.) are forbidden and treated
+   as humans for scope purposes. Agent 0a refuses such companions and
+   stays in `gathering` until the user proposes a non-humanoid one or
+   drops the idea.
+9. **No companions without a human main character.** Companions belong
+   to a human; the prerequisite from rule #2 (at least one of `male` or
+   `female`) still applies before any companion can be accepted.
 
 Server-side guard: if the validated response is `phase="confirmed"` but
 no `awaiting_confirmation` turn exists in the session history, the backend
@@ -571,7 +605,11 @@ user turn).
       "scene_index": 0,
       "scene_excerpt": "string (verbatim slice of the story prose this illustration depicts)",
       "concept": "string",
-      "character_role": "male" | "female" | "mother"
+      "character_role": "male" | "female" | "mother",
+      "companion": {
+        "description": "string (must match — case-insensitive substring or exact — one description from collected_brief.companions)",
+        "interaction": "string (concrete visual relationship in this scene)"
+      } | null
     }
   ]
 }
@@ -606,9 +644,31 @@ Hard rules enforced by the prompt and re-checked server-side:
    action.
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
-   technical constraints (single character, simple ComfyUI workflow with
-   no regional prompting or inpainting, naturally-varied environments
-   per scene).
+   technical constraints (single human character optionally accompanied
+   by one non-human companion, simple ComfyUI workflow with no regional
+   prompting or inpainting, naturally-varied environments per scene).
+8. **Companion pool fidelity.** If `companion` is set on an illustration,
+   its `description` MUST come from the brief's `companions` pool
+   (whitespace-tolerant, case-insensitive substring or exact match). The
+   server re-checks this on receipt and re-prompts on failure. Agent 0b
+   must not invent new companion types.
+9. **Companion cadence is a story-design choice.** Agent 0b decides which
+   of the 5 scenes feature a companion. There is no required minimum
+   or maximum beyond "each scene has at most one companion." When the
+   brief's `companions` pool is empty, every illustration's `companion`
+   field MUST be `null`. Agent 0b should use companions meaningfully
+   (when their presence adds emotional weight) rather than
+   decoratively — see § 7.3.9 principle 8.
+10. **`interaction` specificity.** When `companion` is set, its
+    `interaction` text must describe a visualizable spatial or
+    behavioral relationship (`held in lap`, `perched on shoulder`,
+    `walking beside her`). Vague phrasing (`there with him`) is
+    rejected.
+11. **No companion in scenes requiring hand-object precision.** This
+    complements § 7.3.9 principle 4. If a scene's `concept` pushes the
+    hand-object precision envelope (e.g., character pouring water,
+    picking up a coin, holding something delicate), Agent 0b must not
+    additionally place a companion that compounds the difficulty.
 
 Unlike the previous spec, Agent 0b **does not** have a "no suitable
 scenes" escape hatch. The brief has already been negotiated and confirmed
@@ -618,7 +678,12 @@ hard rules above is treated as a Claude failure (`STORY_BUILD_FAILED`).
 #### Call 1 — `generate_prompts`
 
 **Input:** `current_concept`, `style_guide`, `character_role` (so the
-prompt can pull the right entry from `character_config`).
+prompt can pull the right entry from `character_config`), and the
+optional `companion` (`{ description, interaction } | null`) attached
+to the illustration. When `companion` is non-null the agent must
+incorporate it per § 7.3.10 (companion prompting guidance) and apply
+the conditional adjustments to the negative baseline described in
+§ 7.3.6.
 
 **Output schema:**
 ```json
@@ -629,15 +694,19 @@ prompt can pull the right entry from `character_config`).
 ```
 
 The `positive` field is the full per-scene positive prompt (character +
-environment + action + expression, all expressed as Danbooru tags). The
-`negative` field is the full per-scene negative prompt. Style-level tags
-are NOT included here — they live in `style_guide` and are composed in
-by the workflow itself (see § 7.2). See § 7.3.4 for the content
-requirements that this prompt must satisfy.
+environment + action + expression + companion if any, all expressed as
+Danbooru tags). The `negative` field is the full per-scene negative
+prompt. Style-level tags are NOT included here — they live in
+`style_guide` and are composed in by the workflow itself (see § 7.2).
+See § 7.3.4 and § 7.3.10 for the content requirements that this prompt
+must satisfy.
 
 #### Call 2 — `evaluate_image`
 
-**Input:** image (base64), `current_concept`, `style_guide`, `character_role`.
+**Input:** image (base64), `current_concept`, `style_guide`,
+`character_role`, and the illustration's `companion` (`{ description,
+interaction } | null`). The agent's checklist is companion-aware
+(§ 7.3.5 items 1a + 1b).
 
 **Output schema:**
 ```json
@@ -660,8 +729,11 @@ or
 
 #### Call 3 — `revise_prompts`
 
-**Input:** current `prompts`, last `verdict`, `current_concept`, `style_guide`,
-`character_role`.
+**Input:** current `prompts`, last `verdict`, `current_concept`,
+`style_guide`, `character_role`, and the illustration's `companion`
+(`{ description, interaction } | null`). When `companion` is non-null
+the same companion guidance applies as in Call 1 (§ 7.3.10 + the
+§ 7.3.6 conditional negative adjustments).
 
 **Output schema:** same as Call 1.
 
@@ -696,13 +768,22 @@ particular *moment* the paragraph crystallizes can change as needed.
 - `style_guide`, `character_role`, `character_display` — unchanged from
   before; used so the new concept and the new paragraph stay consistent
   with the global visual continuity and the cast vocabulary.
+- `current_companion` — the illustration's current companion
+  (`{ description, interaction } | null`).
+- `companions_pool` — the brief's full `companions` pool (list of
+  `{ description }` entries) so Agent 4 knows which companions, if any,
+  it may select from.
 
 **Output schema:**
 ```json
 {
   "concept": "string (a meaningfully different visual concept)",
   "paragraph_text": "string (the rewritten Slovak paragraph that replaces current_paragraph_text)",
-  "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)"
+  "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)",
+  "companion": {
+    "description": "string (must match an entry in companions_pool)",
+    "interaction": "string (concrete visual relationship in the new scene)"
+  } | null
 }
 ```
 
@@ -741,12 +822,39 @@ Hard rules enforced by the prompt and re-checked server-side:
    — it does not return a different `character_role`, does not invent
    new characters, does not propose changing the story title, and does
    not propose changes to other paragraphs. Its scope is exactly: one
-   paragraph, one concept, one excerpt.
+   paragraph, one concept, one excerpt, optionally one companion.
+6. **Companion-aware rethinking.** Agent 4 may keep, drop, or swap the
+   scene's companion when rewriting:
+   - Dropping (`companion: null`) is the natural choice when the
+     evaluator's failure mode was companion-related (e.g. "cat anatomy
+     fails").
+   - Swapping is the natural choice when the brief lists more than one
+     allowed companion and a different one fits the new beat better.
+   - Keeping (returning the same description / interaction) is fine
+     when the failure was unrelated to the companion.
+7. **Pool fidelity (same as Agent 0b).** Any non-null `companion`
+   returned by Agent 4 must reference an entry in the run's saved
+   `collected_brief.companions` pool (whitespace-tolerant,
+   case-insensitive substring or exact match). The persisted brief is
+   read from `sessions.collected_brief_json` via the
+   `runs.session_id` foreign key. The server re-checks this and
+   re-prompts on failure (same validator path used by Agent 0b
+   rule #8).
+8. **No invention.** Agent 4 must not introduce a companion type that
+   was not in the brief, even if it seems to help.
 
 If the validated response violates any rule above, the server treats
 that as a Claude failure and re-prompts up to `CLAUDE_JSON_RETRY` (= 2)
 times. After that the branch ends as if Agent 4 returned nothing useful
 — concept_attempt exhaustion behavior (§ 6 loop semantics) takes over.
+
+The orchestrator persists the returned companion (if any) into
+`illustrations.companion_description` and `illustrations.companion_interaction`
+at the same time it overwrites the paragraph text, scene excerpt, and
+current concept. When the new companion differs from the previous
+(including any change to/from null), the orchestrator additionally
+emits an `illustration_companion_updated` SSE event (§ 8.4). No event
+is emitted when the companion is unchanged.
 
 ### 7.2 RunPod ComfyUI Serverless
 
@@ -849,18 +957,27 @@ non-prompt code can also reference it. Trigger words and baseline visual
 descriptors for each character are loaded from configuration (see
 § 7.3.7).
 
-#### 7.3.3 Single-character scene constraint (MVP)
+#### 7.3.3 Scene composition constraint (MVP)
 
-Every illustration depicts exactly one of the three permitted character
-roles acting alone. Scenes with multiple characters present, group scenes,
-crowds, and scenes with no clear character focus must be excluded.
+Each illustration depicts exactly one of the three permitted human
+character roles, optionally accompanied by exactly one non-human,
+non-anthropomorphic companion drawn from the run's brief pool. Scenes
+with multiple human characters, group scenes, crowds, scenes with
+multiple non-human entities visible, and scenes with no clear
+character focus are excluded.
+
+A non-human companion has a body plan fundamentally different from
+humans — quadrupeds, winged creatures, serpents, mechanical entities
+without human form factor, etc. Anthropomorphic / humanoid beings
+(cat-girls, elf-like beings, humanoid androids with human faces, etc.)
+are treated as a *second human* and therefore forbidden.
 
 Because Agent 0b is **constructing** the story together with its scenes
 (rather than mining a pre-existing text), it is responsible for
-arranging the narrative so that every illustration point is a single-
-character moment. There is no "no suitable scenes" escape hatch at this
-stage — the brief was negotiated and confirmed before Agent 0b ran, so
-satisfying this constraint is part of Agent 0b's success criteria.
+arranging the narrative so that every illustration point satisfies this
+constraint. There is still no "no suitable scenes" escape hatch — the
+brief was negotiated and confirmed before Agent 0b ran, so satisfying
+this constraint is part of Agent 0b's success criteria.
 
 #### 7.3.4 Expression, gesture, and action — mandatory specificity
 
@@ -891,13 +1008,29 @@ Agent 2 evaluates this discipline as part of its checklist (see § 7.3.5).
 A correctly rendered character with a vague or ambiguous expression should
 be rejected with `problem="prompt"` and a suggestion to add specifics.
 
+When `companion` is present on the illustration, the mandatory
+specificity applies to both the human and the human-companion
+interaction. The `concept` field must still describe a concrete human
+expression / gesture / action, and the `interaction` field must
+independently describe a concrete spatial or behavioral relationship
+between the human and the companion.
+
 #### 7.3.5 Agent 2 evaluation checklist
 
 Agent 2 (`evaluate_image`) judges each rendered image against this
 checklist. The image is `ok` only when **all** of the following hold:
 
-1. **Exactly one character is visible.** Multiple visible characters →
-   `problem="prompt"`.
+1a. **Exactly one human character is visible.** Multiple visible humans
+    → `problem="prompt"`.
+1b. **Companion alignment.** If `companion` was specified for this
+    illustration, exactly one non-human entity matching the description
+    is visible, positioned consistently with the `interaction` field.
+    Missing companion → `problem="prompt"`. Multiple companions of the
+    same type appearing → `problem="prompt"`. Wrong type of companion
+    rendered → `problem="prompt"`. If `companion` was *not* specified
+    and a non-human entity nevertheless appears prominently → also
+    `problem="prompt"` (Agent 0b did not plan one). A small, peripheral
+    non-human element that does not distract is tolerated.
 2. **The character matches the expected role** (male, female, or mother)
    per § 7.3.2 — recognizable as the corresponding MHA character.
 3. **The character's expression, gesture, or action is clearly
@@ -937,6 +1070,28 @@ includes at minimum:
 
 The exact baseline string lives in `backend/app/constants.py` so it is
 reusable and consistent across agents 1 and 3.
+
+**Conditional adjustments when `companion` is present** (Agents 1 and 3
+apply these on top of the baseline above when the illustration carries
+a non-null `companion`):
+
+- **Do not include** `solo` in the *positive* prompt. The Danbooru `solo`
+  tag means "only one entity in the image" and conflicts with the
+  companion's presence.
+- **Keep the multi-character negatives** (`multiple characters`, `crowd`,
+  `two girls`, `two boys`, `2girls`, `2boys`, `group`) — they refer to
+  humans.
+- **Add anti-duplicate negatives for the companion type.** If the
+  companion is a cat, add `2cats, multiple cats` to negatives; if a
+  dragon, `2dragons, multiple dragons`; etc. Pattern: one extra clause
+  forbidding duplication of the *specific* companion present, derived
+  from the companion description.
+- **Do not include anti-creature tags.** Phrases like `no animals`,
+  `no creatures`, `no pets` must not appear in the negative when a
+  companion is present.
+- **Do not use "focus" tags** (`animal focus`, `cat focus`, etc.).
+  These tags suppress the human and push the non-human into the
+  primary subject role, which inverts the composition we want.
 
 #### 7.3.7 Character configuration
 
@@ -995,6 +1150,12 @@ Agent 0b's `style_guide` output covers global, illustration-wide concerns:
   (e.g., "All scenes share warm afternoon lighting and a storybook-like
   framing"). Agents 1 and 3 reference this when constructing prompts.
 
+The style LoRA applies globally to every visible entity in the frame,
+including any companion. This is the desired behavior (consistent look)
+but worth stating so reviewers do not flag it as a gap. See § 7.3.10
+for the "style LoRA caveat" describing the known limitation when the
+style LoRA dominates non-human rendering.
+
 #### 7.3.9 Story-design principles (Agent 0b)
 
 Because the story is being authored *for* the illustrator (not the other
@@ -1012,10 +1173,12 @@ that violate these rules).
    into the *inner emotional* world of a single character — not their
    imagination, but their feelings. Scenes are emotional snapshots, not
    action set-pieces. Quiet, charged moments are preferred over busy ones.
-2. **Single-character moments only.** Every illustration point is a beat
-   where one of the three permitted roles is alone on the page. Other
-   characters can be present in the prose between illustrations, but the
-   illustrated moments isolate one character.
+2. **Single-human moments, with optional non-human companion.** Every
+   illustration point is a beat where exactly one of the three permitted
+   human roles is on the page, optionally accompanied by exactly one
+   non-human companion from the brief's pool. Other characters can be
+   present in the prose between illustrations, but the illustrated
+   moments isolate the single human (plus, optionally, the companion).
 3. **Concrete depictability.** Every illustrated moment carries an
    explicit facial expression, gesture/posture, or action that can be
    rendered as a Danbooru tag (see § 7.3.4). Abstract or symbolic
@@ -1043,14 +1206,66 @@ that violate these rules).
    the constraints, Agent 0b silently reshapes it rather than asking
    again (the chat phase is over by the time Agent 0b runs). It must not
    produce a story that breaks the constraints to satisfy a wish.
+8. **Companions earn their presence.** A companion in a scene must add
+   emotional or compositional weight to that beat (the character pets
+   the cat for comfort; the dragon perches watchfully on the boy's
+   shoulder; the robot stands beside her as she decides). A companion
+   that is simply "in the room" for decoration is worse than no
+   companion — it dilutes the human's prominence without serving the
+   story. If a scene works without a companion, do not add one.
 
-These seven principles apply unchanged to **Agent 4** when it rewrites a
+These eight principles apply unchanged to **Agent 4** when it rewrites a
 paragraph at concept-restart time (§ 7.1 Call 4). Agent 4 receives the
 full current story so it can keep the substitute paragraph consistent
 with the arc, the cast, and the neighbouring scenes. The single
 additional constraint it has — and that Agent 0b does not — is that the
 shape of the story (number of paragraphs, number of illustrations,
 their ordering) is fixed at run creation and must not be altered.
+
+#### 7.3.10 Companion prompting guidance
+
+Generic principles that Agents 1 and 3 follow when the illustration's
+`companion` field is non-null. **These principles apply regardless of
+the kind of non-human entity** — there are no entity-specific code
+paths anywhere in the implementation. All non-human handling is driven
+by the free-text `description` and category reasoning inside the agent
+prompts.
+
+- **Numeric tagging.** Use Danbooru-style numeric tags for the companion
+  where applicable (`1cat`, `1dog`, `1dragon`, `1robot`). The human is
+  still tagged with its `1girl` / `1boy` form per role. Do not use
+  `solo` when a companion is present.
+- **Interaction tagging.** Translate the `interaction` field into
+  concrete Danbooru-style interaction tags. Examples of the *form*
+  expected (not prescribing specific entities): `holding X`,
+  `X on shoulder`, `X in lap`, `riding X`, `petting X`, `X beside her`,
+  `X behind him`, `X looking up at her`.
+- **Size and prominence.** If the companion should be a meaningful
+  visual element rather than peripheral background, include explicit
+  size or prominence tags (`large X`, `X fills frame`, `close-up on X
+  and her`, `full body shown`). Without these the model often renders
+  the companion small and in a corner. Conversely, if the companion is
+  supposed to be peripheral, no extra emphasis is needed.
+- **Non-human anatomy negatives.** Non-human anatomy is less reliably
+  rendered than human anatomy. The agent derives appropriate negatives
+  from the companion's body plan rather than from its specific
+  identity:
+  - For four-legged creatures: `extra legs, missing legs, malformed paws`.
+  - For winged creatures: `deformed wings, asymmetric wings, broken wings`.
+  - For mechanical entities: `bad mechanical design, malformed limbs,
+    asymmetric mechanical parts`.
+  - For serpentine creatures: `extra heads, broken body, segmented incorrectly`.
+
+  The Agent 1 / Agent 3 system prompts include this as guidance — the
+  agent decides which category applies based on the
+  `companion.description` text. This is generic reasoning, not a
+  hardcoded lookup table.
+- **Style LoRA caveat.** When companion rendering looks "off" (e.g.,
+  a cat with anime-girl-like eyes due to the style LoRA dominating),
+  the style LoRA may need to be slightly reduced for that illustration.
+  This is not auto-tuned by the agents in MVP — it is a known
+  limitation. A future iteration may add a per-illustration style
+  weight override; for MVP we accept the default.
 
 ### 7.4 Agent prompt files
 
@@ -1293,13 +1508,20 @@ Response 200:
       "state": "PENDING|...|COMPLETED|FAILED|CANCELLED",
       "concept_attempt": 1,
       "prompt_attempt": 1,
-      "image_url": "string|null"
+      "image_url": "string|null",
+      "companion": { "description": "string", "interaction": "string" } | null
     }
   ]
 }
 ```
 
 `image_url` is `null` until completed, then `/static/runs/<run_id>/scene_N.png`.
+
+`companion` reflects the current state of the illustration's
+`companion_description` + `companion_interaction` columns. It is `null`
+when the illustration has no companion; otherwise it carries both
+fields. Like `scene_excerpt` and `story_blocks`, this value reflects
+the latest state after any Agent 4 rewrites have been persisted.
 
 `run.story_blocks` and `illustration.scene_excerpt` always reflect the
 **current** content — i.e. the latest state after any Agent 4 paragraph
@@ -1336,6 +1558,7 @@ SSE event types (`event:` field) and JSON payloads:
 | `snapshot`                  | `{ "run": {...}, "illustrations": [...] }`                              |
 | `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept", "scene_excerpt" }` |
 | `paragraph_updated`         | `{ "paragraph_index", "text" }`                                         |
+| `illustration_companion_updated` | `{ "illustration_id", "scene_index", "companion": { "description", "interaction" } \| null }` |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
 | `run_completed`             | `{ "completed": N, "failed": M }`                                       |
@@ -1376,6 +1599,14 @@ field-level, this re-renders the matching `StoryParagraph` component
 without disturbing siblings. The order of paragraph blocks (and of all
 blocks generally) is fixed and never broadcast (§ 5.3).
 
+`illustration_companion_updated` is a new event emitted at most once
+per successful Agent 4 invocation, **only when the companion actually
+changed** (including any change to/from null). When Agent 4 returns the
+same companion as before, no event is emitted. Subscribers replace the
+matched illustration's `companion` field in place on the existing
+reactive object; like the other in-place mutations, this triggers a
+field-level re-render of the `IllustrationCard` without remount.
+
 Per-Agent-4 ordering guarantee (one branch, one rethink cycle):
 
 1. `illustration_state` — `state="RETHINKING_CONCEPT"`, fields still
@@ -1383,7 +1614,9 @@ Per-Agent-4 ordering guarantee (one branch, one rethink cycle):
    hasn't happened yet on the server when this event is emitted).
 2. `paragraph_updated` — the rewritten paragraph text, after server
    persistence.
-3. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
+3. `illustration_companion_updated` — emitted *only when* the
+   companion changed, after server persistence.
+4. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
    the *new* `current_concept` and `scene_excerpt`.
 
 The stream closes after `run_completed`, `run_failed`, or `run_cancelled`.
@@ -1485,6 +1718,15 @@ input control is the chat composer at the bottom of the chat thread.
    underneath the composer: "Ak súhlasíš so zhrnutím, odpovedz napríklad
    'áno' alebo 'do toho'." There is no separate confirm button — the
    user types their answer like any other reply.
+
+   The chat experience also covers the optional companion topic
+   (§ 7.1 Call 0a rules #6–#9). Agent 0a is expected to surface the
+   companion question naturally — e.g. *"Bude v príbehu okrem hlavných
+   postáv aj nejaké zviera, robot, alebo iná podobná bytosť?"* — but
+   only once the human cast is settled, only if the user has not
+   already volunteered an answer, and without insisting if the user
+   declines. The verbatim phrasing lives in `chat.md`; this clause
+   captures the intent.
 
    **No "Spustiť ilustrácie" / "Generate illustrations" button exists
    anywhere in the UI.** The pipeline must start automatically when
@@ -1664,9 +1906,19 @@ keyboard focus, not only on hover.
   `RETHINKING_CONCEPT`.
 - The **info-icon popover** (right of header) carrying the current
   concept text and the scene excerpt (replaces the old in-body concept
-  text and excerpt-preview tooltip).
+  text and excerpt-preview tooltip). When `illustration.companion` is
+  non-null, the popover additionally shows the `interaction` text on a
+  separate line.
 - The **image slot** in the card body — skeleton (aspect 1:1) until
   `COMPLETED`, then the actual thumbnail (click to open original).
+- **Companion subtitle** (only when `illustration.companion` is
+  non-null): a small line below the existing scene info reading
+  `"V scéne je tiež: {description}"`. When `companion` is null, the
+  line is omitted entirely. The subtitle is reactive — when the
+  `illustration_companion_updated` SSE event mutates the companion in
+  place, the subtitle re-renders without remount; when the companion
+  transitions to null, the subtitle disappears; when it transitions
+  from null to non-null, it appears.
 - On `FAILED`: a short error message (no retry button in MVP).
 - On `CANCELLED`: greyed-out card with label "Zrušené".
 
@@ -1810,6 +2062,12 @@ SSE handlers:
   object — both would force every `StoryParagraph` to remount and
   break the skeleton-to-text crossfade. A reference-identity assertion
   in the tests verifies this (§ 11.3).
+- `illustration_companion_updated` → finds the illustration by
+  `illustration_id` and assigns `illustration.companion = event.companion`
+  on the existing reactive object (replacement of the whole companion
+  field is fine — its inner fields are not bound separately, since the
+  whole object can transition to/from null). The IllustrationCard's
+  companion subtitle re-renders without remount.
 - `illustration_completed`, `illustration_failed`, `run_completed`,
   `run_failed`, `run_cancelled`, `heartbeat` — as previously specified.
 
@@ -2016,11 +2274,32 @@ to chase 100 % line coverage.
       appears verbatim in the joined paragraph text (whitespace-
       tolerant), rejects otherwise.
 - **Claude IO schema — Call 4 (`rethink_concept`):**
-  - Accepts a valid response `{ concept, paragraph_text, scene_excerpt }`.
+  - Accepts a valid response
+    `{ concept, paragraph_text, scene_excerpt, companion: null }`.
+  - Accepts a valid response with a non-null `companion`.
   - Rejects responses missing any of the three required fields.
   - Server-side validator rejects responses where `scene_excerpt` is
     not a verbatim substring of `paragraph_text` (whitespace-tolerant),
     matching the Agent 0b excerpt rule (§ 7.1 Call 0b rule #3).
+- **Companion schema rules (across Calls 0a / 0b / 4):**
+  - Call 0a's `collected_brief.companions` accepts an empty array, a
+    1-entry array, and a 2-entry array; rejects 3+ entries.
+  - Call 0b's per-illustration `companion` accepts both `null` and a
+    fully populated `{ description, interaction }`; rejects entries
+    that set only `description` or only `interaction`.
+  - Call 4's `companion` field has the same accept/reject behavior as
+    Call 0b's.
+- **Companion pool fidelity validators (server-side, beyond Pydantic):**
+  - Agent 0b output post-validation: an illustration whose
+    `companion.description` does not match (whitespace-tolerant,
+    case-insensitive substring or exact) any entry in
+    `collected_brief.companions` is rejected and re-prompted up to
+    `CLAUDE_JSON_RETRY` times; ultimate failure surfaces as
+    `STORY_BUILD_FAILED`.
+  - Agent 4 output post-validation: same rule against the run's saved
+    `collected_brief.companions` pool; ultimate failure causes the
+    branch to behave as if Agent 4 returned nothing useful, per § 6
+    loop semantics.
 - **Branch state machine** (`orchestrator/branch.py`):
   - Existing scenarios (happy path, prompt revision, concept restart,
     all attempts exhausted, cancellation, correct character_config
@@ -2047,6 +2326,31 @@ to chase 100 % line coverage.
     `CLAUDE_JSON_RETRY + 1` times in a row; the branch exhausts the
     concept attempt and continues per § 6 loop semantics (no DB
     mutation occurs from invalid responses).
+  - **Companion happy-path (new):** the illustration starts with a
+    non-null `companion` (set by Agent 0b at run creation). The branch
+    runs through to `COMPLETED`. Calls 1 / 2 / 3 receive the companion
+    in their input (verified by intercepting the outgoing Claude
+    request payload). `companion_description` and
+    `companion_interaction` columns remain set on the row.
+  - **Agent 4 drops the companion (new):** the branch fails its first
+    concept and triggers Agent 4. Mock Agent 4 to return
+    `companion: null`. The branch persists `companion_description=NULL`
+    and `companion_interaction=NULL` on the illustration row, emits
+    `illustration_companion_updated{companion: null}` after
+    `paragraph_updated`, then proceeds.
+  - **Agent 4 swaps the companion (new):** the brief lists two
+    companion entries. Mock Agent 4 to return a companion whose
+    `description` matches the *other* brief entry. The branch persists
+    the new description and interaction and emits
+    `illustration_companion_updated` carrying the new companion.
+  - **Agent 4 unchanged companion (new):** Mock Agent 4 to return the
+    same companion as the current one. The branch does NOT emit
+    `illustration_companion_updated` (no spurious event).
+  - **Agent 4 companion not in pool (new):** Mock Agent 4 to return a
+    companion whose `description` is not in the brief's pool
+    `CLAUDE_JSON_RETRY + 1` times. The branch treats this as failure
+    and continues per § 6 loop semantics; no DB mutation occurs from
+    invalid responses.
 - **Pipeline / run creation** (`orchestrator/pipeline.py`):
   - Runs created with N=3 illustrations spawn 3 branches.
   - Runs created with N=5 succeed end-to-end (mocked clients).
@@ -2095,6 +2399,10 @@ to chase 100 % line coverage.
   - Events broadcast to multiple subscribers.
   - Stream closes on terminal run states.
   - `run_failed` payload includes both `error_code` and `error_message`.
+  - `illustration_companion_updated` is broadcast to all current
+    subscribers after Agent 4 returns a *different* companion
+    (including the transition to/from null). Multiple subscribers each
+    observe the same payload.
 - **RunPod client** (`services/runpod.py`): unchanged from previous
   spec.
 - **Alembic / models in sync** (new test file,
@@ -2140,6 +2448,22 @@ as described in § 5.0.
   after the first branch transitions to `RENDERING`, verify final
   status `CANCELLED` and that branches transitioned to `CANCELLED`
   rather than continuing.
+- **Companion end-to-end (new):** the chat phase produces a brief with
+  one `companions` entry. Agent 0b returns 5 illustrations with
+  `companion` non-null on scenes 0, 2, 4 and `null` on scenes 1, 3.
+  Run completes via mocked Agents 1–3. Assertions:
+  - All 5 branches run.
+  - The Claude requests for scenes 0/2/4 include the companion in
+    their input JSON payload (verified via respx); scenes 1/3 do not.
+  - `GET /api/runs/{id}` returns the companion field non-null on
+    scenes 0/2/4 and null on scenes 1/3.
+- **Agent 4 drops companion end-to-end (new):** with a brief that
+  contains one companion and Agent 0b assigning the companion to
+  scene 0, Agent 2 mocked to return `problem="concept"` on the first
+  attempt for scene 0, Agent 4 mocked to return `companion: null`.
+  Assert the SSE stream contains the `illustration_companion_updated`
+  event with `companion: null` for scene 0; assert a subsequent
+  `GET /api/runs/{id}` returns `companion: null` on scene 0 (persisted).
 - **Agent 4 paragraph rewrite end-to-end:** run the pipeline with
   Agent 2 mocked to return `problem="concept"` on the first attempt
   for one branch, and Agent 4 mocked to return a valid
@@ -2210,6 +2534,28 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
   - Reconciliation preserves array order (assertion: the index of the
     user message in `messages` is identical before and after the
     server response lands).
+- **IllustrationCard companion subtitle (new):**
+  - When mounted with an illustration whose `companion` is non-null,
+    the card renders a Slovak subtitle `"V scéne je tiež: {description}"`.
+  - When `companion` is `null`, the subtitle is not present in the DOM.
+  - When the store mutates `illustration.companion` from non-null to
+    null in place (simulating `illustration_companion_updated`), the
+    subtitle disappears without remounting the card.
+  - When the store mutates `illustration.companion` from null to a
+    populated object in place, the subtitle appears without
+    remounting the card.
+  - When the companion's `description` changes in place, the subtitle
+    text updates in place.
+- **runStore (new event handler):**
+  - `illustration_companion_updated` with a non-null companion writes
+    that companion onto the existing illustration object (reference
+    survival assertion on the illustration object itself; the
+    `companion` field is replaced as a whole).
+  - `illustration_companion_updated` with `companion: null` clears the
+    field on the existing illustration object.
+- **sessionStore (new):**
+  - The store correctly parses `collected_brief.companions` from
+    Agent 0a's reply payloads (empty, 1-entry, 2-entry).
 - **IllustrationCard reactive concept text + popover** (revised):
   - The card no longer renders `current_concept` as an inline body
     text element. The concept text is reachable only via the
@@ -2356,6 +2702,12 @@ presets) are not.
 - Mid-flight cancellation of an already-dispatched ComfyUI job.
 - Hot reload of agent prompt `.md` files.
 - Streaming Agent 0a / Agent 0b responses to the UI token-by-token.
+- Two or more human characters in a single illustration.
+- Anthropomorphic / humanoid non-human companions (treated as a second
+  human for scope purposes).
+- Multiple non-human companions in a single illustration.
+- Companion types not present in the brief's agreed pool.
+- Auto-tuned per-illustration LoRA strengths for companion rendering.
 
 ---
 
@@ -2435,3 +2787,17 @@ The MVP is considered complete when:
     `/runs/:id` without page reload; a subsequent `GET /api/runs/:id`
     snapshot returns `story_blocks` carrying the rewritten paragraph
     text (i.e. the change is persisted, not merely visual).
+12. **Optional companion, end-to-end.** With a brief whose
+    `companions` array contains at least one entry, Agent 0b assigns
+    that companion to at least one scene, and the resulting
+    `GET /api/runs/:id` returns the `companion` field set on the
+    matching illustration(s) and `null` on the others. The
+    `IllustrationCard` for those illustrations renders the
+    `"V scéne je tiež: …"` subtitle. With a brief whose `companions`
+    array is empty, every illustration has `companion: null` and no
+    card subtitle is rendered — the rest of the app behaves
+    identically to the no-companion baseline (backward compatibility).
+    Forcing Agent 4 to drop a companion mid-run emits an SSE
+    `illustration_companion_updated{companion: null}` event,
+    persists the columns as NULL, and the card subtitle disappears
+    reactively without a page reload.
