@@ -1,4 +1,4 @@
-"""Anthropic API client wrapper for the 6 distinct Claude calls.
+"""Anthropic API client wrapper for the 7 distinct Claude calls.
 
 Agent system prompts are loaded from Markdown files under ``app/agents``.
 """
@@ -27,6 +27,7 @@ from app.schemas.claude import (
     RethinkConceptResponse,
     RevisePromptsResponse,
     StyleGuide,
+    TranslateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ AGENT_FILES = {
     "evaluate_image": "evaluate_image.md",
     "revise_prompts": "revise_prompts.md",
     "rethink_concept": "rethink_concept.md",
+    "translate": "translate.md",
 }
 
 
@@ -344,5 +346,29 @@ class ClaudeClient:
             response_model=RethinkConceptResponse,
             system=self._prompts["rethink_concept"],
             max_tokens=2048,
+        )
+        return result  # type: ignore[return-value]
+
+    async def translate(
+        self,
+        target_language: str,
+        items: list[dict],
+    ) -> TranslateResponse:
+        """Call Agent 5 to translate a list of polymorphic items.
+
+        Args:
+            target_language: One of "sk", "cs", "en"
+            items: List of dicts with keys: kind, paragraph_index?, scene_index?, source_text
+        """
+        user_text = (
+            f"target_language: {target_language}\n\n"
+            f"items: {json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+            "Respond with the JSON array specified in your instructions."
+        )
+        result = await self._call_with_retry(
+            messages=[{"role": "user", "content": user_text}],
+            response_model=TranslateResponse,
+            system=self._prompts["translate"],
+            max_tokens=4096,
         )
         return result  # type: ignore[return-value]

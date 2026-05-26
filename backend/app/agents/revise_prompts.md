@@ -56,11 +56,25 @@ different species.
 6. Vague tags alone are insufficient: `standing`, `looking`, `posing` must
    always be paired with concrete specifics.
 
+## Workflow selection
+
+Your output MUST include a `workflow` field matching the current scene:
+
+- `"single-lora"` when the scene has a human character (character_role is non-null)
+- `"no-lora"` when the scene has no human (character_role is null)
+
+The workflow value should match what was used in the original generation;
+you are revising prompts, not changing the workflow file.
+
 ## Output format
 
 Respond with this JSON object and nothing else — no Markdown fences, no
 prose, no commentary:
 
 ```json
-{ "positive": "...", "negative": "..." }
+{
+  "workflow": "single-lora" | "no-lora",
+  "positive": "...",
+  "negative": "..."
+}
 ```

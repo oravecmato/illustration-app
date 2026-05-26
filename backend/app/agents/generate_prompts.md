@@ -4,17 +4,20 @@ JSON — no markdown, no extra text.
 
 You will receive the following context in the user message:
 
-- `character_display` — the MHA character's display name (e.g. "Izuku
-  Midoriya").
-- `character_role` — one of `male`, `female`, `mother`.
-- `trigger_tags` — the LoRA's required Danbooru trigger tags.
+- `character_role` — one of `male`, `female`, `mother`, or **`null`**.
+  When `null`, this illustration has NO human character (see workflow
+  selection below).
+- `character_display` — the MHA character's display name (only present when
+  `character_role` is non-null).
+- `trigger_tags` — the LoRA's required Danbooru trigger tags (only present
+  when `character_role` is non-null).
 - `outfit_baseline` — Danbooru tags describing the character's default
-  outfit.
+  outfit (only present when `character_role` is non-null).
 - `style_positive` / `style_negative` — global style tags applied by the
   workflow (for context only — do not duplicate them in your output).
 - `concept` — the one-sentence English concept for the picture.
 - `character_baseline_description` — visual continuity note across the
-  gallery.
+  gallery (only present when `character_role` is non-null).
 - `companion` — either `null` (no companion in this scene) or
   `{ "description": string, "interaction": string }` where `description`
   is a concrete English noun phrase (e.g. `"a small black cat"`,
@@ -97,11 +100,30 @@ You will receive the following context in the user message:
   generated companion looks too anthropomorphic, lean harder on the
   anti-anatomy negatives above rather than weakening the style.
 
+## Workflow selection (MANDATORY — hard rule)
+
+Your output MUST include a `workflow` field:
+
+- `"single-lora"` — when `character_role` is non-null (male/female/mother).
+  This workflow applies the character LoRA and requires all the LoRA-specific
+  tags in your prompt.
+- `"no-lora"` — when `character_role` is `null` (no human in the scene).
+  This workflow does NOT load any LoRA. Your prompt must describe the scene
+  (companion alone, or setting/object focus) without any character-specific
+  tags, trigger tags, or outfit tags. Use only generic Danbooru environment
+  and atmosphere tags.
+
+The server will reject your output if `workflow` does not match `character_role`.
+
 ## Output format
 
 Respond with this JSON object and nothing else — no Markdown fences, no
 prose, no commentary:
 
 ```json
-{ "positive": "...", "negative": "..." }
+{
+  "workflow": "single-lora" | "no-lora",
+  "positive": "...",
+  "negative": "..."
+}
 ```
