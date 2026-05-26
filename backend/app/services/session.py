@@ -7,7 +7,7 @@ data into the ``sessions`` and ``runs`` tables.
 import logging
 from dataclasses import dataclass
 
-from app.constants import CONFIRMED_ACK_SK, SESSION_MAX_MESSAGES, SESSION_MESSAGE_MAX_CHARS
+from app.constants import CONFIRMED_ACK, SESSION_MAX_MESSAGES, SESSION_MESSAGE_MAX_CHARS, SUPPORTED_LANGUAGES
 from app.db.models import MessageRole, Session, SessionState
 from app.db.repositories import RunRepository, SessionRepository
 from app.schemas.claude import (
@@ -21,11 +21,7 @@ from app.services.claude import ClaudeClient, ClaudeError
 logger = logging.getLogger(__name__)
 
 
-WELCOME_MESSAGE = (
-    "Ahoj! Som tvoj asistent pre Anime Illustrator. Spolu vymyslíme krátky "
-    "ilustrovaný príbeh. Povedz mi, o kom a o čom by mal byť — kto je hlavná "
-    "postava (chlapec, dievča, prípadne mama) a aká téma ťa zaujíma?"
-)
+# Welcome message is now frontend-only via i18n.t('chat.welcome')
 
 
 class SessionError(Exception):
@@ -59,9 +55,8 @@ class SessionService:
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def create_session(self) -> Session:
-        s = await self.repo.create_session()
-        await self.repo.add_message(s.id, MessageRole.ASSISTANT, WELCOME_MESSAGE)
-        return s
+        # No welcome message — frontend renders it via i18n.t('chat.welcome')
+        return await self.repo.create_session()
 
     async def get_session_with_messages(self, session_id: str) -> tuple[Session, list]:
         s = await self.repo.get_session(session_id)
@@ -116,13 +111,21 @@ class SessionService:
             )
             raise SessionError("CHAT_FAILED", str(e)) from e
 
+        # Persist detected language on first detection
+        if reply.language and s.source_language is None:
+            if reply.language in SUPPORTED_LANGUAGES:
+                await self.repo.update_session(s, source_language=reply.language)
+
         # Normalise the confirmation acknowledgement so the frontend can
         # match it deterministically and so localisation / model drift in
         # the agent's prose cannot break the chat→pipeline handoff.
+        normalized_reply = reply.reply
         if reply.phase == "confirmed":
-            reply = reply.model_copy(update={"reply": CONFIRMED_ACK_SK})
+            detected_lang = reply.language or s.source_language or "en"
+            normalized_reply = CONFIRMED_ACK.get(detected_lang, CONFIRMED_ACK["en"])
+            reply = reply.model_copy(update={"reply": normalized_reply})
 
-        await self.repo.add_message(session_id, MessageRole.ASSISTANT, reply.reply)
+        await self.repo.add_message(session_id, MessageRole.ASSISTANT, normalized_reply)
 
         new_state = {
             "gathering": SessionState.CHATTING,
@@ -133,6 +136,8 @@ class SessionService:
         update_kwargs: dict = {"state": new_state}
         if reply.collected_brief is not None:
             update_kwargs["collected_brief_json"] = reply.collected_brief.model_dump_json()
+        if reply.topic_short:
+            update_kwargs["topic_short"] = reply.topic_short
         await self.repo.update_session(s, **update_kwargs)
 
         return reply
