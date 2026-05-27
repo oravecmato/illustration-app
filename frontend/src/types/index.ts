@@ -1,5 +1,9 @@
 // ── Chat & sessions ────────────────────────────────────────────────────────
 
+export type Language = "sk" | "cs" | "en";
+
+export type TranslationState = "source" | "fresh" | "stale" | "missing";
+
 export type CharacterRole = "male" | "female" | "mother";
 
 export type ChatPhase = "gathering" | "awaiting_confirmation" | "confirmed";
@@ -47,6 +51,9 @@ export interface SessionMessage {
 export interface Session {
   id: string;
   state: SessionState;
+  source_language: string | null;
+  detected_language: string | null;
+  topic_short: string | null;
   collected_brief: CollectedBrief | null;
   run_id: string | null;
   error_code: string | null;
@@ -59,6 +66,13 @@ export interface Session {
 export interface PostMessageResponse {
   session: Session;
   phase: ChatPhase;
+  detected_language?: string;
+  topic_short?: string;
+  /** Pre-allocated run id, returned only when phase === "confirmed".
+   *  The frontend uses it to navigate to /runs/:id immediately, while
+   *  Agent 0b is still running in a background task on the backend.
+   *  The RunView loader stays on screen until SSE delivers the snapshot. */
+  run_id?: string | null;
 }
 
 // ── Runs ───────────────────────────────────────────────────────────────────
@@ -84,14 +98,20 @@ export interface StyleGuide {
 }
 
 export type StoryBlock =
-  | { type: "paragraph"; text: string }
+  | { type: "paragraph"; index?: number; text: string; translation_state?: TranslationState }
   | { type: "illustration"; scene_index: number };
 
 export interface Run {
   id: string;
   session_id: string;
   status: RunStatus;
+  source_language: string;
+  language: string;
+  topic_short: string;
   story_title: string;
+  story_title_translation_state?: TranslationState;
+  story_topic_description: string;
+  story_topic_description_translation_state?: TranslationState;
   story_blocks: StoryBlock[];
   style_guide: StyleGuide;
   illustration_count: number;
@@ -112,9 +132,12 @@ export interface Illustration {
   id: string;
   scene_index: number;
   scene_excerpt: string;
+  scene_excerpt_translation_state?: TranslationState;
   paragraph_index: number;
-  character_role: CharacterRole;
+  character_role: CharacterRole | null;
+  current_workflow: string | null;
   current_concept: string;
+  current_concept_translation_state?: TranslationState;
   state: IllustrationState;
   concept_attempt: number;
   prompt_attempt: number;
@@ -161,6 +184,30 @@ export interface IllustrationCompanionUpdatedEvent {
   companion: Companion | null;
 }
 
+export interface IllustrationRoleUpdatedEvent {
+  illustration_id: string;
+  scene_index: number;
+  character_role: CharacterRole | null;
+}
+
+export interface TranslationItem {
+  kind:
+    | "story_title"
+    | "story_topic_description"
+    | "paragraph"
+    | "illustration_concept"
+    | "scene_excerpt";
+  paragraph_index?: number;
+  scene_index?: number;
+  text: string;
+  source_hash: string;
+}
+
+export interface TranslationsRefreshedEvent {
+  language: string;
+  items: TranslationItem[];
+}
+
 export interface RunCompletedEvent {
   completed: number;
   failed: number;
@@ -177,6 +224,8 @@ export type SseEvent =
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
   | { type: "illustration_companion_updated"; data: IllustrationCompanionUpdatedEvent }
+  | { type: "illustration_role_updated"; data: IllustrationRoleUpdatedEvent }
+  | { type: "translations_refreshed"; data: TranslationsRefreshedEvent }
   | { type: "paragraph_updated"; data: ParagraphUpdatedEvent }
   | { type: "run_completed"; data: RunCompletedEvent }
   | { type: "run_failed"; data: RunFailedEvent }

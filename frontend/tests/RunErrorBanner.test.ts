@@ -55,13 +55,13 @@ describe("RunErrorBanner", () => {
     expect(wrapper.find(".run-error-banner").exists()).toBe(true);
   });
 
-  it("shows the STORY_BUILD_FAILED guidance message for that error code", () => {
+  it("shows the TRANSLATE_FAILED guidance message for that error code", () => {
     const wrapper = mount(RunErrorBanner, {
       props: {
-        run: makeRun({ status: "FAILED", error_code: "STORY_BUILD_FAILED" }),
+        run: makeRun({ status: "FAILED", error_code: "TRANSLATE_FAILED" }),
       },
     });
-    expect(wrapper.text()).toContain("Tvorba príbehu");
+    expect(wrapper.text()).toContain("Preklad ilustrácií");
   });
 
   it("falls back to INTERNAL_ERROR message for unknown error_code", () => {

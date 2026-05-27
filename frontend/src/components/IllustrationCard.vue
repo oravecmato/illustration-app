@@ -8,9 +8,9 @@
     }"
   >
     <div class="card-header">
-      <span class="scene-number">Ilustrácia {{ illustration.scene_index + 1 }}</span>
+      <span class="scene-number">{{ t('story.illustration_n', { n: illustration.scene_index + 1 }) }}</span>
       <span class="state-label">{{ stateLabel }}</span>
-      <span v-if="isNonTerminal" class="spinner" aria-label="Načítava sa" />
+      <span v-if="isNonTerminal" class="spinner" :aria-label="t('a11y.loading')" />
       <span class="header-spacer" />
       <ConceptPopover
         v-if="illustration.current_concept"
@@ -19,15 +19,11 @@
     </div>
 
     <div v-if="showAttemptCounter" class="attempt-counter">
-      pokus {{ attemptNumber }}/3
-    </div>
-
-    <div class="scene-excerpt">
-      {{ truncatedExcerpt }}
+      {{ t('illustration.attempt', { current: attemptNumber, max: 3 }) }}
     </div>
 
     <div v-if="illustration.companion" class="companion-subtitle">
-      V scéne je tiež: {{ illustration.companion.description }}
+      {{ t('illustration.companion_subtitle', { description: illustration.companion.description }) }}
     </div>
 
     <div class="image-slot">
@@ -39,7 +35,7 @@
       >
         <img
           :src="illustration.image_url"
-          :alt="`Ilustrácia ${illustration.scene_index + 1}`"
+          :alt="t('story.illustration_n', { n: illustration.scene_index + 1 })"
           class="illustration-image"
         />
       </a>
@@ -48,7 +44,7 @@
         class="image-failed"
       >
         <span class="sad-face">:(</span>
-        Túto ilustráciu sa nepodarilo vytvoriť.
+        {{ t('story.illustration_failed') }}
       </div>
       <SkeletonBlock v-else shape="rect" aspect-ratio="1 / 1" />
     </div>
@@ -57,32 +53,23 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type { Illustration, IllustrationState } from "@/types";
 import ConceptPopover from "./ConceptPopover.vue";
 import SkeletonBlock from "./SkeletonBlock.vue";
 
 const props = defineProps<{ illustration: Illustration }>();
 
-const STATE_LABELS: Record<IllustrationState, string> = {
-  PENDING: "Čaká",
-  GENERATING_PROMPTS: "Pripravujem prompty",
-  RENDERING: "Kreslím (pokus",
-  EVALUATING: "Vyhodnocujem výsledok",
-  REVISING_PROMPTS: "Upravujem prompty",
-  RETHINKING_CONCEPT: "Premýšľam koncept",
-  COMPLETED: "Hotovo",
-  FAILED: "Nepodarilo sa",
-  CANCELLED: "Zrušené",
-};
+const { t } = useI18n();
 
 const TERMINAL_STATES: IllustrationState[] = ["COMPLETED", "FAILED", "CANCELLED"];
 
 const ATTEMPT_STATES: IllustrationState[] = ["RENDERING", "REVISING_PROMPTS", "RETHINKING_CONCEPT"];
 
 const stateLabel = computed(() => {
-  const base = STATE_LABELS[props.illustration.state];
+  const base = t(`illustration.state.${props.illustration.state}`);
   if (props.illustration.state === "RENDERING") {
-    return `${base} ${props.illustration.prompt_attempt}/3)`;
+    return `${base} (${t("illustration.attempt", { current: props.illustration.prompt_attempt, max: 3 })})`;
   }
   return base;
 });
@@ -96,11 +83,6 @@ const attemptNumber = computed(() => {
     return props.illustration.concept_attempt;
   }
   return props.illustration.prompt_attempt;
-});
-
-const truncatedExcerpt = computed(() => {
-  const excerpt = props.illustration.scene_excerpt;
-  return excerpt.length > 200 ? excerpt.slice(0, 200) + "…" : excerpt;
 });
 </script>
 
@@ -169,19 +151,9 @@ const truncatedExcerpt = computed(() => {
   margin-bottom: 6px;
 }
 
-.scene-excerpt {
-  font-size: 0.85em;
-  color: #555;
-  font-style: italic;
-  margin-bottom: 12px;
-  line-height: 1.4;
-  font-family: var(--font-body);
-}
-
 .companion-subtitle {
   font-size: 0.8em;
   color: #777;
-  margin-top: -6px;
   margin-bottom: 12px;
   font-family: var(--font-body);
 }

@@ -45,17 +45,11 @@ export async function postSessionMessage(
   return jsonOrThrow<PostMessageResponse>(res);
 }
 
-export async function finalizeSession(sessionId: string): Promise<{ run_id: string }> {
-  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/finalize`, {
-    method: "POST",
-  });
-  return jsonOrThrow<{ run_id: string }>(res);
-}
-
 // ── Runs ───────────────────────────────────────────────────────────────────
 
-export async function getRun(runId: string): Promise<RunDetailResponse> {
-  const res = await fetch(`${API_BASE}/api/runs/${runId}`);
+export async function getRun(runId: string, lang?: string): Promise<RunDetailResponse> {
+  const url = lang ? `${API_BASE}/api/runs/${runId}?lang=${lang}` : `${API_BASE}/api/runs/${runId}`;
+  const res = await fetch(url);
   return jsonOrThrow<RunDetailResponse>(res);
 }
 
@@ -72,9 +66,13 @@ export async function cancelRun(runId: string): Promise<void> {
 export function openSseStream(
   runId: string,
   onEvent: (event: SseEvent) => void,
-  onError?: (err: Event) => void
+  onError?: (err: Event) => void,
+  lang?: string
 ): EventSource {
-  const es = new EventSource(`${API_BASE}/api/runs/${runId}/events`);
+  const url = lang
+    ? `${API_BASE}/api/runs/${runId}/events?lang=${lang}`
+    : `${API_BASE}/api/runs/${runId}/events`;
+  const es = new EventSource(url);
 
   const eventTypes: SseEvent["type"][] = [
     "snapshot",
@@ -82,6 +80,8 @@ export function openSseStream(
     "illustration_completed",
     "illustration_failed",
     "illustration_companion_updated",
+    "illustration_role_updated",
+    "translations_refreshed",
     "paragraph_updated",
     "run_completed",
     "run_failed",
@@ -105,4 +105,42 @@ export function openSseStream(
   }
 
   return es;
+}
+
+export interface TranslateRunRequest {
+  language: string;
+  items: Array<{
+    kind: "story_title" | "story_topic_description" | "paragraph" | "illustration_concept" | "scene_excerpt";
+    paragraph_index?: number;
+    scene_index?: number;
+  }>;
+}
+
+export interface TranslateRunResponse {
+  items: Array<{
+    kind: "story_title" | "story_topic_description" | "paragraph" | "illustration_concept" | "scene_excerpt";
+    paragraph_index?: number;
+    scene_index?: number;
+    text: string;
+    source_hash: string;
+  }>;
+}
+
+export async function translateRun(
+  runId: string,
+  language: string,
+  items: Array<{
+    kind: "story_title" | "story_topic_description" | "paragraph" | "illustration_concept" | "scene_excerpt";
+    paragraph_index?: number;
+    scene_index?: number;
+    text: string;
+    source_hash: string;
+  }>
+): Promise<TranslateRunResponse> {
+  const res = await fetch(`${API_BASE}/api/runs/${runId}/translations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language, items }),
+  });
+  return jsonOrThrow<TranslateRunResponse>(res);
 }

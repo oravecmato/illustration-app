@@ -123,6 +123,7 @@ def _build_story_payload(
 ) -> dict:
     return {
         "story_title": "Krátky príbeh",
+        "story_topic_description": "Krátky príbeh o dobrodružstve",
         "story_blocks": blocks,
         "style_guide": VALID_STYLE_GUIDE,
         "illustrations": illustrations,
@@ -239,6 +240,7 @@ def test_build_story_rejects_excerpt_not_in_paragraph():
 # ---- GeneratePromptsResponse ----
 
 VALID_GENERATE_PROMPTS = {
+    "workflow": "single-lora",
     "positive": "brave knight, armor, enchanted forest, magical",
     "negative": "blurry, deformed",
 }
@@ -332,7 +334,10 @@ def test_revise_prompts_rejects_missing():
 
 def test_rethink_concept_accepts_valid():
     resp = RethinkConceptResponse(
+        workflow="single-lora",
         concept="A completely new approach to the scene",
+        concept_localized="A completely new approach to the scene",
+        character_role="male",
         paragraph_text="Stál pri okne a hľadel von. Pršalo a on plakal.",
         scene_excerpt="Pršalo a on plakal.",
     )
@@ -429,7 +434,10 @@ def test_build_story_accepts_all_illustrations_without_companion():
 
 def test_rethink_concept_accepts_companion_null():
     resp = RethinkConceptResponse(
+        workflow="single-lora",
         concept="A new concept",
+        concept_localized="A new concept",
+        character_role="male",
         paragraph_text="Pršalo a on plakal.",
         scene_excerpt="Pršalo a on plakal.",
         companion=None,
@@ -439,7 +447,10 @@ def test_rethink_concept_accepts_companion_null():
 
 def test_rethink_concept_accepts_companion_populated():
     resp = RethinkConceptResponse(
+        workflow="single-lora",
         concept="A new concept",
+        concept_localized="A new concept",
+        character_role="female",
         paragraph_text="Sedela pri okne. Mačka sa jej krčila na kolenách.",
         scene_excerpt="Sedela pri okne.",
         companion={

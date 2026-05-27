@@ -9,7 +9,7 @@
         :pending="m.pending"
       />
       <div v-if="isSending" class="typing-indicator" aria-live="polite">
-        Asistent píše…
+        {{ $t("chat.assistant_typing") }}
       </div>
     </div>
 
@@ -32,7 +32,7 @@
         <div class="composer-actions">
           <button type="submit" class="send-btn" :disabled="!canSend">
             <span v-if="isSending" class="btn-spinner" />
-            Odoslať
+            {{ $t("chat.send") }}
           </button>
         </div>
       </div>
@@ -42,14 +42,16 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import ChatMessage from "@/components/ChatMessage.vue";
 import type { ChatPhase, SessionMessage } from "@/types";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   messages: SessionMessage[];
   phase: ChatPhase;
   isSending: boolean;
-  isFinalizing: boolean;
   errorMessage: string | null;
   // Set by the parent (HomeView) when sendMessage rejects, so the
   // composer can restore the user's text and let them retry/edit.
@@ -65,22 +67,23 @@ const MAX_LEN = 4000;
 const draft = ref("");
 const scrollEl = ref<HTMLElement | null>(null);
 
-// While `isFinalizing` is true the input becomes read-only — but during
-// the user's normal send the input is cleared optimistically and the
-// only progress indicator is the typing indicator below, so the field
-// itself remains enabled (allowing them to start composing the next
-// message immediately).
-const inputDisabled = computed(() => props.isFinalizing);
+// During the user's normal send the input is cleared optimistically and
+// the only progress indicator is the typing indicator below, so the
+// field itself remains enabled (allowing them to start composing the
+// next message immediately). On the "confirmed" turn HomeView navigates
+// away to /runs/:id, so the composer's disabled-state during finalize
+// is no longer a concern here.
+const inputDisabled = computed(() => false);
 
 const canSend = computed(
-  () => draft.value.trim().length > 0 && draft.value.length <= MAX_LEN && !props.isFinalizing,
+  () => draft.value.trim().length > 0 && draft.value.length <= MAX_LEN,
 );
 
 const placeholder = computed(() => {
   if (props.phase === "awaiting_confirmation") {
-    return "Napíš „áno“ pre potvrdenie alebo navrhni zmenu…";
+    return t("chat.confirmation_placeholder");
   }
-  return "Napíš odpoveď…";
+  return t("chat.message_placeholder");
 });
 
 watch(

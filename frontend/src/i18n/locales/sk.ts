@@ -1,15 +1,24 @@
 export default {
+  app: {
+    title: 'Anime ilustrátor',
+    intro: 'Spolu s asistentom vymyslite krátky ilustrovaný príbeh.',
+    new_story: '← Nový príbeh',
+  },
   chat: {
     welcome:
-      'Ahoj! Pomôžem ti vytvoriť krátky ilustrovaný anime príbeh. Povedz mi, o čom má byť a aké #postavy# v ňom vystúpia.',
+      'Ahoj! Pomôžem ti vytvoriť krátky ilustrovaný anime príbeh. Povedz mi, o čom má byť a aké postavy v ňom vystúpia.',
     assistant_typing: 'Asistent píše…',
     send: 'Odoslať',
     message_placeholder: 'Napíš správu…',
+    confirmation_placeholder: 'Napíš „áno" pre potvrdenie alebo navrhni zmenu…',
     char_limit: 'znakov',
   },
   story: {
     illustration_n: 'Ilustrácia {n}',
-    building: 'Vytváram príbeh na tému: {topic}…',
+    illustration_failed: 'Túto ilustráciu sa nepodarilo vytvoriť.',
+    illustration_not_ready: 'Ilustrácia ešte nie je pripravená…',
+    building: 'Generujem príbeh…',
+    building_progress_label: 'Pripravujem ilustrácie…',
     try_again: 'Skúsiť znova',
   },
   illustration: {
@@ -34,9 +43,14 @@ export default {
       COMPLETED: 'Hotovo',
       FAILED: 'Zlyhalo',
       CANCELLED: 'Zrušené',
+      translating: 'Prekladá sa do slovenčiny',
     },
     progress: 'Hotové: {completed} z {total}',
+    progress_unknown: 'Hotové: {completed} z —',
     cancel: 'Zrušiť',
+    confirm_cancel: 'Naozaj zrušiť?',
+    yes: 'Áno',
+    no: 'Nie',
   },
   nav: {
     change_language: 'Zmeniť jazyk',
@@ -45,6 +59,10 @@ export default {
     sk: 'Slovenčina',
     cs: 'Čeština',
     en: 'English',
+  },
+  a11y: {
+    loading: 'Načítava sa',
+    show_concept: 'Zobraziť koncept ilustrácie',
   },
   errors: {
     session: {
@@ -58,6 +76,7 @@ export default {
       internal_error:
         'Vyskytla sa neočakávaná chyba pri generovaní ilustrácií. Skontroluj log servera pre detaily.',
       translate_failed: 'Preklad ilustrácií sa nepodarilo dokončiť.',
+      sse_disconnected: 'Spojenie prerušené',
     },
   },
   toast: {

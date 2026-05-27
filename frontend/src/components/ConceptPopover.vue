@@ -7,7 +7,7 @@
     <button
       type="button"
       class="info-trigger"
-      aria-label="Zobraziť koncept ilustrácie"
+      :aria-label="$t('a11y.show_concept')"
       data-testid="concept-popover-trigger"
     >
       <svg
@@ -30,7 +30,7 @@
     </button>
     <template #popper>
       <div class="concept-popover-body" data-testid="concept-popover-body">
-        <div class="concept-label">Koncept</div>
+        <div class="concept-label">{{ $t('illustration.currentConcept') }}</div>
         <div class="concept-text">{{ concept }}</div>
       </div>
     </template>

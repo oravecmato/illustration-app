@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 
 from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
 from app.db.models import Illustration, IllustrationState
@@ -29,6 +30,7 @@ async def run_branch(
     cancel_flag: asyncio.Event,
     character_config: dict | None = None,
     story_title: str = "",
+    source_language: str = "sk",
     story_blocks: list[dict] | None = None,
     story_lock: asyncio.Lock | None = None,
     companions_pool: list[str] | None = None,
@@ -86,6 +88,7 @@ async def run_branch(
             prev_companion = _current_companion()
             try:
                 rethink_result = await claude.rethink_concept(
+                    source_language=source_language,
                     current_concept=illustration.current_concept,
                     verdict=_load_last_verdict(illustration),
                     current_scene_excerpt=illustration.scene_excerpt,
@@ -103,6 +106,20 @@ async def run_branch(
                     error_message=f"Concept rethink failed: {e}",
                 )
                 return
+
+            # Check if character_role changed (e.g., human scene → companion-alone)
+            role_changed = rethink_result.character_role != character_role
+            if role_changed:
+                # Update local character_role and emit event
+                character_role = rethink_result.character_role
+                await event_bus.publish(
+                    "illustration_role_updated",
+                    {
+                        "illustration_id": illustration.id,
+                        "scene_index": illustration.scene_index,
+                        "character_role": character_role,
+                    },
+                )
 
             # Server-side pool fidelity: Agent 4 may only set a companion
             # whose description is present in the agreed pool. If the pool
@@ -143,7 +160,9 @@ async def run_branch(
                     )
             await repo.update_illustration(
                 illustration,
-                current_concept=rethink_result.concept,
+                character_role=rethink_result.character_role,
+                current_workflow=f"{rethink_result.workflow}.json",
+                current_concept=rethink_result.concept_localized,
                 scene_excerpt=rethink_result.scene_excerpt,
                 companion_description=(
                     new_companion.description if new_companion is not None else None
@@ -202,6 +221,11 @@ async def run_branch(
                 character_config=char_config,
                 companion=_current_companion(),
             )
+            # Persist workflow to illustration (Agent 1 response)
+            illustration = await repo.update_illustration(
+                illustration,
+                current_workflow=f"{prompts.workflow}.json",
+            )
         except Exception as e:
             logger.error("generate_prompts failed: %s", e)
             await transition(
@@ -226,6 +250,25 @@ async def run_branch(
             # CHARACTER_LORA comes from character_config per-illustration (§ 7.3.7)
             char_lora = char_config.get(character_role, {}).get("lora_filename", "")
 
+            # Load workflow file based on illustration.current_workflow
+            # Fall back to workflow_template if current_workflow not set (for tests)
+            if illustration.current_workflow:
+                workflow_filename = illustration.current_workflow
+                workflow_path = os.path.join(
+                    os.path.dirname(__file__), "..", "workflows", workflow_filename
+                )
+                try:
+                    with open(workflow_path) as f:
+                        workflow_template_to_use = json.load(f)
+                except FileNotFoundError:
+                    logger.warning(
+                        "Workflow file %s not found, falling back to default",
+                        workflow_path,
+                    )
+                    workflow_template_to_use = workflow_template
+            else:
+                workflow_template_to_use = workflow_template
+
             # Build workflow with current prompts + style guide
             replacements = {
                 "POSITIVE_PROMPT": prompts.positive,
@@ -234,7 +277,7 @@ async def run_branch(
                 "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
                 "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
             }
-            workflow, _ = replace_placeholders(workflow_template, replacements)
+            workflow, _ = replace_placeholders(workflow_template_to_use, replacements)
 
             try:
                 image_bytes = await runpod.run_workflow(workflow)

@@ -23,13 +23,13 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
 
 const STATE_LABELS: Record<string, string> = {
   PENDING: "Čaká",
-  GENERATING_PROMPTS: "Pripravujem prompty",
-  RENDERING: "Kreslím (pokus",
-  EVALUATING: "Vyhodnocujem výsledok",
-  REVISING_PROMPTS: "Upravujem prompty",
-  RETHINKING_CONCEPT: "Premýšľam koncept",
+  GENERATING_PROMPTS: "Vytváranie promptov",
+  RENDERING: "Vytváranie obrázka (pokus",
+  EVALUATING: "Hodnotenie",
+  REVISING_PROMPTS: "Úprava promptov",
+  RETHINKING_CONCEPT: "Prepracovanie konceptu",
   COMPLETED: "Hotovo",
-  FAILED: "Nepodarilo sa",
+  FAILED: "Zlyhalo",
   CANCELLED: "Zrušené",
 };
 

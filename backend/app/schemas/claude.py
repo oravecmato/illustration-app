@@ -248,7 +248,13 @@ class RethinkConceptResponse(BaseModel):
 
 
 class TranslationItem(BaseModel):
-    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    kind: Literal[
+        "story_title",
+        "story_topic_description",
+        "paragraph",
+        "illustration_concept",
+        "scene_excerpt",
+    ]
     paragraph_index: int | None = None
     scene_index: int | None = None
     translated_text: str

@@ -39,10 +39,13 @@ class PostMessageResponse(BaseModel):
     phase: Literal["gathering", "awaiting_confirmation", "confirmed"]
     language: str | None = None
     detected_language: str | None = None
-
-
-class FinalizeResponse(BaseModel):
-    topic_short: str
+    topic_short: str | None = None
+    # Pre-allocated run id, returned only when phase == "confirmed". The
+    # backend persists it on the session and schedules Agent 0b + the
+    # pipeline as a background task. The frontend uses it to navigate
+    # immediately so the building-state loader is visible while Agent 0b
+    # is still working.
+    run_id: str | None = None
 
 
 # ── Runs ─────────────────────────────────────────────────────────────────────
@@ -58,7 +61,9 @@ class RunResponse(BaseModel):
     story_title: str
     story_title_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
     story_topic_description: str
-    story_topic_description_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
+    story_topic_description_translation_state: (
+        Literal["source", "fresh", "stale", "missing"] | None
+    ) = None
     story_blocks: list[dict[str, Any]]
     style_guide: StyleGuide
     illustration_count: int
@@ -74,6 +79,7 @@ class IllustrationResponse(BaseModel):
     id: str
     scene_index: int
     scene_excerpt: str
+    scene_excerpt_translation_state: Literal["source", "fresh", "stale", "missing"] | None = None
     paragraph_index: int
     character_role: str | None
     current_workflow: str | None
@@ -95,13 +101,25 @@ class RunDetailResponse(BaseModel):
 
 
 class TranslationItemRequest(BaseModel):
-    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    kind: Literal[
+        "story_title",
+        "story_topic_description",
+        "paragraph",
+        "illustration_concept",
+        "scene_excerpt",
+    ]
     paragraph_index: int | None = None
     scene_index: int | None = None
 
 
 class TranslationItemResponse(BaseModel):
-    kind: Literal["story_title", "story_topic_description", "paragraph", "illustration_concept"]
+    kind: Literal[
+        "story_title",
+        "story_topic_description",
+        "paragraph",
+        "illustration_concept",
+        "scene_excerpt",
+    ]
     paragraph_index: int | None = None
     scene_index: int | None = None
     text: str

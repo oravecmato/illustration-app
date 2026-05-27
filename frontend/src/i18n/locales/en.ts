@@ -1,15 +1,24 @@
 export default {
+  app: {
+    title: 'Anime Illustrator',
+    intro: 'Together with the assistant, create a short illustrated story.',
+    new_story: '← New story',
+  },
   chat: {
     welcome:
-      'Hi! I'll help you create a short illustrated anime story. Tell me what it should be about and which #characters# should appear in it.',
+      "Hi! I'll help you create a short illustrated anime story. Tell me what it should be about and which characters should appear in it.",
     assistant_typing: 'Assistant is typing…',
     send: 'Send',
     message_placeholder: 'Type a message…',
+    confirmation_placeholder: 'Write "yes" to confirm or suggest a change…',
     char_limit: 'characters',
   },
   story: {
     illustration_n: 'Illustration {n}',
-    building: 'Building the story on the topic: {topic}…',
+    illustration_failed: 'This illustration could not be created.',
+    illustration_not_ready: 'Illustration is not ready yet…',
+    building: 'Generating story…',
+    building_progress_label: 'Preparing your illustrations…',
     try_again: 'Try again',
   },
   illustration: {
@@ -34,9 +43,14 @@ export default {
       COMPLETED: 'Completed',
       FAILED: 'Failed',
       CANCELLED: 'Cancelled',
+      translating: 'Translating into English',
     },
     progress: 'Completed: {completed} of {total}',
+    progress_unknown: 'Completed: {completed} of —',
     cancel: 'Cancel',
+    confirm_cancel: 'Really cancel?',
+    yes: 'Yes',
+    no: 'No',
   },
   nav: {
     change_language: 'Change language',
@@ -45,6 +59,10 @@ export default {
     sk: 'Slovenčina',
     cs: 'Čeština',
     en: 'English',
+  },
+  a11y: {
+    loading: 'Loading',
+    show_concept: 'Show illustration concept',
   },
   errors: {
     session: {
@@ -58,6 +76,7 @@ export default {
       internal_error:
         'An unexpected error occurred while generating illustrations. Check the server log for details.',
       translate_failed: 'Translation of illustrations could not be completed.',
+      sse_disconnected: 'Connection lost',
     },
   },
   toast: {

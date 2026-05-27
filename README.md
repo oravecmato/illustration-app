@@ -1,9 +1,9 @@
-# Fairy Tale Illustrator
+# Anime Illustrator
 
-A locally-hosted web application that takes a children's fairy tale text as input,
-identifies suitable scenes to illustrate, and produces up to 5 visually consistent
-illustrations using Claude (Anthropic API) for reasoning and a RunPod Serverless
-ComfyUI endpoint for image rendering.
+A locally-hosted web application that creates short illustrated anime stories through
+an interactive chat. Uses Claude (Anthropic API) for story development and character
+planning, and a RunPod Serverless ComfyUI endpoint with Illustrious XL + My Hero
+Academia character LoRAs for anime-style illustration generation.
 
 ---
 
@@ -21,6 +21,7 @@ ComfyUI endpoint for image rendering.
 ```bash
 cd backend
 python3.11 -m venv .venv
+# Activate venv for installation:
 source .venv/bin/activate
 pip install -e ".[dev]"
 pip install ruff
@@ -71,9 +72,10 @@ cp .env.example .env  # already filled with http://localhost:8000
 
 ```bash
 cd backend
-source .venv/bin/activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+./start.sh
 ```
+
+The `start.sh` script automatically runs database migrations and starts uvicorn with auto-reload enabled. It doesn't require activating the virtual environment first.
 
 ### Frontend
 
@@ -88,7 +90,7 @@ Then open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ## Running Tests
 
-### Backend
+### Backend (requires venv activation)
 
 ```bash
 cd backend

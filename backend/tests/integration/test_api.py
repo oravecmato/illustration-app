@@ -17,7 +17,7 @@ from httpx import AsyncClient
 
 from app.api import runs as runs_api
 from app.config import Settings
-from app.constants import CONFIRMED_ACK_SK
+from app.constants import CONFIRMED_ACK
 from app.db.migrations import upgrade_to_head_async
 from app.db.session import init_db
 from app.main import create_app
@@ -60,6 +60,7 @@ STORY_BLOCKS = [
 
 BUILD_STORY_RESULT = {
     "story_title": "Prvý krok na pódium",
+    "story_topic_description": "Príbeh o prekonaní trému",
     "story_blocks": STORY_BLOCKS,
     "style_guide": {
         "overall_style_positive": "anime, mha style, soft shading",
@@ -224,6 +225,7 @@ def _install_anthropic_router(chat_responses: list[dict], build_story_response: 
                 200,
                 json=_wrap(
                     {
+                        "workflow": "single-lora",
                         "positive": "1girl, jirou kyouka, school uniform, determined, indoors",
                         "negative": "nsfw, bad anatomy, multiple characters",
                     }
@@ -267,18 +269,21 @@ async def _wait_terminal(client: AsyncClient, run_id: str) -> dict:
 @pytest.mark.asyncio
 @respx.mock
 async def test_end_to_end_happy_path(app_client):
-    """Session → chat (awaiting → confirmed) → finalize → pipeline COMPLETED."""
+    """Session → chat (awaiting → confirmed) → messages returns run_id → pipeline COMPLETED."""
     client, _ = app_client
 
     chat_responses = [
         {
             "reply": "Skvele. Súhlasíš s týmto plánom?",
             "phase": "awaiting_confirmation",
+            "language": "sk",
             "collected_brief": BRIEF,
         },
         {
             "reply": "Pripravujem príbeh a ilustrácie...",
             "phase": "confirmed",
+            "language": "sk",
+            "topic_short": "Prekonanie trému",
             "collected_brief": BRIEF,
         },
     ]
@@ -299,14 +304,13 @@ async def test_end_to_end_happy_path(app_client):
         )
     )
 
-    # 1. Create session — welcome message present, state CHATTING
+    # 1. Create session — no messages initially (welcome is frontend-only), state CHATTING
     resp = await client.post("/api/sessions")
     assert resp.status_code == 201
     session = resp.json()
     session_id = session["id"]
     assert session["state"] == "CHATTING"
-    assert len(session["messages"]) == 1
-    assert session["messages"][0]["role"] == "assistant"
+    assert len(session["messages"]) == 0  # Welcome message is frontend-only for i18n
 
     # 2. Post first user message → Claude chat returns awaiting_confirmation
     resp = await client.post(
@@ -330,12 +334,14 @@ async def test_end_to_end_happy_path(app_client):
     assert body["phase"] == "confirmed"
     last_msg = body["session"]["messages"][-1]
     assert last_msg["role"] == "assistant"
-    assert last_msg["content"] == CONFIRMED_ACK_SK
+    assert last_msg["content"] == CONFIRMED_ACK["sk"]
 
-    # 4. Finalize
-    resp = await client.post(f"/api/sessions/{session_id}/finalize")
-    assert resp.status_code == 201, resp.text
-    run_id = resp.json()["run_id"]
+    # 4. The messages endpoint pre-allocated a run_id and scheduled
+    #    Agent 0b + the pipeline as a background task. No separate
+    #    finalize call.
+    run_id = body["run_id"]
+    assert run_id is not None
+    assert body["session"]["run_id"] == run_id
 
     # 5. Pipeline runs to completion
     data = await _wait_terminal(client, run_id)
@@ -380,16 +386,6 @@ async def test_get_run_returns_404_for_unknown(app_client):
 
 
 @pytest.mark.asyncio
-async def test_finalize_returns_409_when_not_ready(app_client):
-    client, _ = app_client
-    resp = await client.post("/api/sessions")
-    session_id = resp.json()["id"]
-
-    resp = await client.post(f"/api/sessions/{session_id}/finalize")
-    assert resp.status_code == 409
-
-
-@pytest.mark.asyncio
 @respx.mock
 async def test_cancel_active_run(app_client):
     """Cancel a run that's still RUNNING returns 200."""
@@ -400,6 +396,12 @@ async def test_cancel_active_run(app_client):
             "reply": "Súhlasíš?",
             "phase": "awaiting_confirmation",
             "collected_brief": BRIEF,
+        },
+        {
+            "reply": "Pripravujem...",
+            "phase": "confirmed",
+            "collected_brief": BRIEF,
+            "topic_short": "Príbeh",
         },
     ]
     _install_anthropic_router(chat_responses, BUILD_STORY_RESULT)
@@ -417,8 +419,19 @@ async def test_cancel_active_run(app_client):
     await client.post(
         f"/api/sessions/{session_id}/messages", json={"content": "Príbeh o dievčati."}
     )
-    resp = await client.post(f"/api/sessions/{session_id}/finalize")
-    run_id = resp.json()["run_id"]
+    resp = await client.post(f"/api/sessions/{session_id}/messages", json={"content": "áno"})
+    body = resp.json()
+    assert body["phase"] == "confirmed"
+    run_id = body["run_id"]
+    assert run_id is not None
+
+    # Wait briefly for the background task to create the run row so cancel
+    # can find it. The pipeline polls RunPod which keeps the run RUNNING.
+    for _ in range(50):
+        get_resp = await client.get(f"/api/runs/{run_id}")
+        if get_resp.status_code == 200:
+            break
+        await asyncio.sleep(0.05)
 
     cancel_resp = await client.post(f"/api/runs/{run_id}/cancel")
     assert cancel_resp.status_code in (200, 409)

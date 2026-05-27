@@ -7,7 +7,12 @@ data into the ``sessions`` and ``runs`` tables.
 import logging
 from dataclasses import dataclass
 
-from app.constants import CONFIRMED_ACK, SESSION_MAX_MESSAGES, SESSION_MESSAGE_MAX_CHARS, SUPPORTED_LANGUAGES
+from app.constants import (
+    CONFIRMED_ACK,
+    SESSION_MAX_MESSAGES,
+    SESSION_MESSAGE_MAX_CHARS,
+    SUPPORTED_LANGUAGES,
+)
 from app.db.models import MessageRole, Session, SessionState
 from app.db.repositories import RunRepository, SessionRepository
 from app.schemas.claude import (
@@ -36,7 +41,10 @@ class SessionError(Exception):
 @dataclass
 class FinalizeResult:
     run_id: str
+    source_language: str
+    topic_short: str
     story_title: str
+    story_topic_description: str
     story_blocks: list[dict]
     style_guide: dict
     illustrations: list[dict]
@@ -148,37 +156,72 @@ class SessionService:
         self,
         session_id: str,
         run_repo: RunRepository,
+        run_id: str | None = None,
     ) -> FinalizeResult:
         """Build the story and create the run + illustration records.
 
         The caller is responsible for kicking off the pipeline once this
         returns, using the returned ``run_id``.
+
+        When ``run_id`` is passed in, the messages endpoint has already
+        pre-allocated it and persisted it on the session — Agent 0b's run
+        row will be created with that explicit id so the frontend can
+        navigate before Agent 0b finishes. In that path, the session is
+        already in FINALIZING and ``s.run_id`` already equals ``run_id``;
+        the usual "not yet finalized" guards are relaxed accordingly.
         """
         s = await self.repo.get_session(session_id)
         if s is None:
             raise SessionError("SESSION_NOT_FOUND", "Session not found")
-        if s.state != SessionState.AWAITING_CONFIRMATION:
-            raise SessionError(
-                "NOT_READY_TO_FINALIZE",
-                "Session is not awaiting confirmation; finalize is only allowed in that state",
-            )
-        if s.collected_brief_json is None:
-            raise SessionError(
-                "NO_BRIEF",
-                "Session has no collected brief; finalize is impossible",
-            )
-        if s.run_id is not None:
-            raise SessionError(
-                "ALREADY_FINALIZED",
-                "Session has already been finalized",
-            )
 
-        await self.repo.update_session(s, state=SessionState.FINALIZING)
+        preallocated = run_id is not None
+        if preallocated:
+            # post_message has already validated the brief, set state to
+            # FINALIZING, and stored run_id on the session. Re-validate the
+            # brief still exists; everything else is the caller's contract.
+            if s.collected_brief_json is None:
+                raise SessionError("NO_BRIEF", "Session has no collected brief")
+            if s.run_id != run_id:
+                raise SessionError(
+                    "ALREADY_FINALIZED",
+                    "Session run_id does not match the pre-allocated id",
+                )
+        else:
+            if s.state != SessionState.AWAITING_CONFIRMATION:
+                raise SessionError(
+                    "NOT_READY_TO_FINALIZE",
+                    "Session is not awaiting confirmation; finalize is only allowed in that state",
+                )
+            if s.collected_brief_json is None:
+                raise SessionError(
+                    "NO_BRIEF",
+                    "Session has no collected brief; finalize is impossible",
+                )
+            if s.run_id is not None:
+                raise SessionError(
+                    "ALREADY_FINALIZED",
+                    "Session has already been finalized",
+                )
+            await self.repo.update_session(s, state=SessionState.FINALIZING)
 
         brief = CollectedBrief.model_validate_json(s.collected_brief_json)
 
+        # Get source_language from session (default to 'en' if not set)
+        source_language = s.source_language or "en"
+        topic_short = s.topic_short or ""
+
+        # Build input dict for Agent 0b
+        build_input = {
+            "source_language": source_language,
+            "topic_short": topic_short,
+            "characters": brief.characters,
+            "companions": brief.companions,
+            "topic": brief.topic,
+            "notes": brief.notes,
+        }
+
         try:
-            story: BuildStoryResponse = await self.claude.build_story(brief)
+            story: BuildStoryResponse = await self.claude.build_story_i18n(build_input)
         except ClaudeError as e:
             await self.repo.update_session(
                 s,
@@ -226,12 +269,16 @@ class SessionService:
 
         run = await run_repo.create_run(
             session_id=session_id,
+            source_language=source_language,
+            topic_short=topic_short,
             story_title=story.story_title,
+            story_topic_description=story.story_topic_description,
             story_blocks_json=_json.dumps(
                 [b.model_dump() for b in story.story_blocks], ensure_ascii=False
             ),
             style_guide_json=story.style_guide.model_dump_json(),
             illustration_count=len(story.illustrations),
+            id=run_id,
         )
 
         illustrations: list[dict] = []
@@ -241,7 +288,7 @@ class SessionService:
                 scene_index=ill.scene_index,
                 scene_excerpt=ill.scene_excerpt,
                 paragraph_index=paragraph_index_by_scene[ill.scene_index],
-                concept=ill.concept,
+                concept=ill.concept_localized if ill.concept_localized else ill.concept,
                 character_role=ill.character_role,
                 companion_description=(
                     ill.companion.description if ill.companion is not None else None
@@ -273,11 +320,15 @@ class SessionService:
                 }
             )
 
+        # When run_id was pre-allocated, s.run_id is already correct.
         await self.repo.update_session(s, state=SessionState.FINALIZED, run_id=run.id)
 
         return FinalizeResult(
             run_id=run.id,
+            source_language=source_language,
+            topic_short=topic_short,
             story_title=story.story_title,
+            story_topic_description=story.story_topic_description,
             story_blocks=[b.model_dump() for b in story.story_blocks],
             style_guide=story.style_guide.model_dump(),
             illustrations=illustrations,

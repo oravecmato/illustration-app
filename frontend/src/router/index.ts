@@ -48,12 +48,24 @@ const router = createRouter({
   ],
 });
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const lang = to.params.lang as string;
   if (lang && SUPPORTED_LANGUAGES.includes(lang as Language)) {
-    i18n.global.locale.value = lang as Language;
-    document.documentElement.lang = lang;
-    localStorage.setItem("illustration-app:language", lang);
+    const targetLang = lang as Language;
+
+    // Update i18n
+    i18n.global.locale.value = targetLang;
+    document.documentElement.lang = targetLang;
+    localStorage.setItem("illustration-app:language", targetLang);
+
+    // Dynamically import and update locale store to avoid circular dependency
+    const { useLocaleStore } = await import('@/stores/locale');
+    const localeStore = useLocaleStore();
+
+    // Update store if language changed (avoid triggering setLanguage's URL update)
+    if (localeStore.currentLanguage !== targetLang) {
+      localeStore.$patch({ currentLanguage: targetLang });
+    }
   }
 });
 

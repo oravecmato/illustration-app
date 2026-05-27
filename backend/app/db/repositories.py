@@ -54,18 +54,28 @@ class RunRepository:
         self,
         *,
         session_id: str,
+        source_language: str,
+        topic_short: str,
         story_title: str,
+        story_topic_description: str,
         story_blocks_json: str,
         style_guide_json: str,
         illustration_count: int,
+        id: str | None = None,
     ) -> Run:
-        run = Run(
+        kwargs: dict = dict(
             session_id=session_id,
+            source_language=source_language,
+            topic_short=topic_short,
             story_title=story_title,
+            story_topic_description=story_topic_description,
             story_blocks_json=story_blocks_json,
             style_guide_json=style_guide_json,
             illustration_count=illustration_count,
         )
+        if id is not None:
+            kwargs["id"] = id
+        run = Run(**kwargs)
         self.session.add(run)
         await self.session.commit()
         await self.session.refresh(run)
@@ -91,7 +101,7 @@ class RunRepository:
         scene_excerpt: str,
         paragraph_index: int,
         concept: str,
-        character_role: str,
+        character_role: str | None,
         companion_description: str | None = None,
         companion_interaction: str | None = None,
     ) -> Illustration:
@@ -101,6 +111,7 @@ class RunRepository:
             scene_excerpt=scene_excerpt,
             paragraph_index=paragraph_index,
             character_role=character_role,
+            current_workflow=None,  # Will be set by Agent 1
             initial_concept=concept,
             current_concept=concept,
             companion_description=companion_description,

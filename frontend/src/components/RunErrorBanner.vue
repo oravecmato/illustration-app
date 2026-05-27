@@ -6,12 +6,17 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type { Run } from "@/types";
-import { getRunErrorMessage } from "@/i18n/runErrors";
+import { runErrorKey } from "@/i18n/runErrors";
 
+const { t } = useI18n();
 const props = defineProps<{ run: Run | null }>();
 
-const message = computed(() => getRunErrorMessage(props.run?.error_code));
+const message = computed(() => {
+  const key = runErrorKey(props.run?.error_code);
+  return key ? t(key) : '';
+});
 </script>
 
 <style scoped lang="scss">

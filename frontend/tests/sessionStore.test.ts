@@ -7,12 +7,10 @@ vi.mock("../src/services/api", () => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   postSessionMessage: vi.fn(),
-  finalizeSession: vi.fn(),
 }));
 
 import {
   createSession,
-  finalizeSession,
   getSession,
   postSessionMessage,
 } from "../src/services/api";
@@ -20,12 +18,14 @@ import {
 const createSessionMock = vi.mocked(createSession);
 const getSessionMock = vi.mocked(getSession);
 const postSessionMessageMock = vi.mocked(postSessionMessage);
-const finalizeSessionMock = vi.mocked(finalizeSession);
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: "sess-1",
     state: "CHATTING",
+    source_language: null,
+    detected_language: null,
+    topic_short: null,
     collected_brief: null,
     run_id: null,
     error_code: null,
@@ -70,7 +70,10 @@ describe("sessionStore", () => {
 
     expect(createSessionMock).toHaveBeenCalledOnce();
     expect(store.session?.id).toBe("sess-1");
-    expect(store.messages).toHaveLength(1);
+    // start() prepends a synthetic welcome message in front of the
+    // server's transcript, so the total is server-messages + 1.
+    expect(store.messages).toHaveLength(2);
+    expect(store.messages[0].id).toBe("welcome");
     expect(store.phase).toBe("gathering");
     expect(store.errorMessage).toBeNull();
   });
@@ -97,15 +100,15 @@ describe("sessionStore", () => {
     expect(store.messages).toHaveLength(3);
     expect(store.phase).toBe("awaiting_confirmation");
     expect(runId).toBeNull();
-    expect(finalizeSessionMock).not.toHaveBeenCalled();
   });
 
-  it("sendMessage() auto-finalizes when phase becomes confirmed", async () => {
+  it("sendMessage() returns pre-allocated run_id when phase becomes confirmed", async () => {
     createSessionMock.mockResolvedValue(
       makeSession({ state: "AWAITING_CONFIRMATION", collected_brief: makeBrief() }),
     );
     const confirmed = makeSession({
-      state: "AWAITING_CONFIRMATION",
+      state: "FINALIZING",
+      run_id: "run-99",
       collected_brief: makeBrief(),
       messages: [
         { id: "m-1", role: "assistant", content: "Ahoj!", created_at: "t0" },
@@ -118,16 +121,17 @@ describe("sessionStore", () => {
         },
       ],
     });
-    postSessionMessageMock.mockResolvedValue({ session: confirmed, phase: "confirmed" });
-    finalizeSessionMock.mockResolvedValue({ run_id: "run-99" });
+    postSessionMessageMock.mockResolvedValue({
+      session: confirmed,
+      phase: "confirmed",
+      run_id: "run-99",
+    });
 
     const store = useSessionStore();
     await store.start();
     const runId = await store.sendMessage("áno");
 
     expect(runId).toBe("run-99");
-    expect(finalizeSessionMock).toHaveBeenCalledWith("sess-1");
-    expect(store.isFinalizing).toBe(false);
     expect(store.phase).toBe("confirmed");
   });
 
@@ -144,14 +148,15 @@ describe("sessionStore", () => {
 
     const store = useSessionStore();
     await store.start();
-    expect(store.messages).toHaveLength(1);
+    // welcome + the mocked session's "Ahoj!" assistant message
+    expect(store.messages).toHaveLength(2);
 
     // Don't await yet — we want to inspect the optimistic state mid-flight.
     const pending = store.sendMessage("hello");
 
     // Optimistic row is present, pending=true, and at the end of the list.
-    expect(store.messages).toHaveLength(2);
-    const optimistic = store.messages[1];
+    expect(store.messages).toHaveLength(3);
+    const optimistic = store.messages[2];
     expect(optimistic.role).toBe("user");
     expect(optimistic.content).toBe("hello");
     expect(optimistic.pending).toBe(true);
@@ -184,12 +189,13 @@ describe("sessionStore", () => {
 
     const store = useSessionStore();
     await store.start();
-    expect(store.messages).toHaveLength(1);
+    // welcome + the mocked session's "Ahoj!" assistant message
+    expect(store.messages).toHaveLength(2);
 
     await expect(store.sendMessage("hi")).rejects.toThrow("network down");
 
-    // Optimistic row removed; only the original welcome remains.
-    expect(store.messages).toHaveLength(1);
+    // Optimistic row removed; welcome + server message remain.
+    expect(store.messages).toHaveLength(2);
     expect(store.errorMessage).toBe("network down");
     expect(store.lastFailedDraft).toBe("hi");
     expect(store.isSending).toBe(false);
@@ -207,31 +213,6 @@ describe("sessionStore", () => {
 
     store.clearFailedDraft();
     expect(store.lastFailedDraft).toBeNull();
-  });
-
-  it("finalize() returns run_id from the API", async () => {
-    createSessionMock.mockResolvedValue(makeSession({ state: "AWAITING_CONFIRMATION" }));
-    finalizeSessionMock.mockResolvedValue({ run_id: "run-42" });
-
-    const store = useSessionStore();
-    await store.start();
-    const runId = await store.finalize();
-
-    expect(runId).toBe("run-42");
-    expect(finalizeSessionMock).toHaveBeenCalledWith("sess-1");
-    expect(store.isFinalizing).toBe(false);
-  });
-
-  it("finalize() sets errorMessage and re-throws on failure", async () => {
-    createSessionMock.mockResolvedValue(makeSession({ state: "AWAITING_CONFIRMATION" }));
-    finalizeSessionMock.mockRejectedValue(new Error("conflict"));
-
-    const store = useSessionStore();
-    await store.start();
-
-    await expect(store.finalize()).rejects.toThrow("conflict");
-    expect(store.errorMessage).toBe("conflict");
-    expect(store.isFinalizing).toBe(false);
   });
 
   it("refresh() loads session from server", async () => {

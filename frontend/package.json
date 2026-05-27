@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "country-flag-icons": "^1.6.17",
     "floating-vue": "^5.2.2",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",

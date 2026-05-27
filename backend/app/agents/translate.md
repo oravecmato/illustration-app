@@ -10,6 +10,9 @@ these kinds:
 - **`story_title`** — the title of the story.
 - **`story_topic_description`** — a one-sentence summary of the story topic.
 - **`paragraph`** — narrative prose (one paragraph from the story body).
+- **`scene_excerpt`** — a short literary quote (a sentence or two) drawn from
+  one of the paragraphs, displayed as the caption under an illustration.
+  Translate it as literary prose (same register as the rest of the story).
 - **`illustration_concept`** — a visual description for image generation (English
   technical prose; examples: `"A young boy standing on a hill, looking at the
   stars"`, `"A girl in a library, reading a glowing book"`).
@@ -54,19 +57,27 @@ Notice `"medium shot"` stays English.
 
 ## Output format
 
-Return a JSON array with the same length and order as the input. Each element:
+Return a JSON object with a `translations` array. The array must have the same
+length and order as the input. Each element:
 
 ```json
 {
-  "kind": "story_title" | "story_topic_description" | "paragraph" | "illustration_concept",
-  "paragraph_index": <int> | null,
-  "scene_index": <int> | null,
-  "translated_text": "<your translation>"
+  "translations": [
+    {
+      "kind": "story_title" | "story_topic_description" | "paragraph" | "scene_excerpt" | "illustration_concept",
+      "paragraph_index": <int> | null,
+      "scene_index": <int> | null,
+      "translated_text": "<your translation>"
+    },
+    ...
+  ]
 }
 ```
 
 - `paragraph_index` is `null` for everything except `"paragraph"`.
-- `scene_index` is `null` for everything except `"illustration_concept"`.
+- `scene_index` is `null` for everything except `"illustration_concept"` and
+  `"scene_excerpt"`.
 - `translated_text` is the translated text.
 
 Do NOT include the source text in your output. Do NOT include commentary.
+Respond with the JSON object only, no markdown fences, no preamble.

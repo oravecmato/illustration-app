@@ -1,17 +1,15 @@
 <template>
   <div class="home-view">
-    <h1 class="app-title">Anime ilustrátor</h1>
+    <h1 class="app-title">{{ $t('app.title') }}</h1>
 
     <p class="intro-text">
-      Spolu s asistentom vymyslite krátky ilustrovaný príbeh.
-      Asistent sa ťa pýta v slovenčine.
+      {{ $t('app.intro') }}
     </p>
 
     <ChatPanel
       :messages="store.messages"
       :phase="store.phase"
       :is-sending="store.isSending"
-      :is-finalizing="store.isFinalizing"
       :error-message="store.errorMessage"
       :restore-draft="store.lastFailedDraft"
       @send="handleSend"
@@ -39,7 +37,9 @@ async function handleSend(content: string) {
   try {
     // sendMessage returns a run_id when the assistant replies with
     // phase === "confirmed" (auto-finalize). Navigate the moment that
-    // happens — there is no manual "Spustiť ilustrácie" button.
+    // happens — there is no manual "Spustiť ilustrácie" button. The
+    // building skeleton lives entirely in RunView so the URL carries
+    // the run_id from the very start (refresh-resilient).
     const runId = await store.sendMessage(content);
     if (runId) {
       await router.push(`/runs/${runId}`);
@@ -61,7 +61,7 @@ async function handleSend(content: string) {
 .app-title {
   font-size: 2rem;
   font-weight: 700;
-  margin-bottom: 8px;
+  margin: 0 0 8px;
   color: #1a1a1a;
 }
 

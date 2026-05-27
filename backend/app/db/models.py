@@ -56,6 +56,7 @@ class Session(Base):
     )
     state: Mapped[str] = mapped_column(String, default=SessionState.CHATTING)
     source_language: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    detected_language: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     topic_short: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     collected_brief_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     run_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
@@ -171,14 +172,28 @@ class StoryBlockTranslation(Base):
 
 
 class IllustrationConceptTranslation(Base):
-    """Stores translated concept_localized per language."""
+    """Per-illustration, per-language translations.
+
+    Stores both the translated concept (technical visual description) and the
+    translated scene_excerpt (a short literary quote from the paragraph).
+    Either field may be missing if only one has been translated so far, so
+    both are nullable.
+    """
 
     __tablename__ = "illustration_concept_translations"
 
-    illustration_id: Mapped[str] = mapped_column(String, ForeignKey("illustrations.id"), primary_key=True)
+    illustration_id: Mapped[str] = mapped_column(
+        String, ForeignKey("illustrations.id"), primary_key=True
+    )
     language: Mapped[str] = mapped_column(String, primary_key=True)
-    concept_localized: Mapped[str] = mapped_column(Text)
-    concept_localized_source_hash: Mapped[str] = mapped_column(String)
+    concept_localized: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    concept_localized_source_hash: Mapped[str | None] = mapped_column(
+        String, nullable=True, default=None
+    )
+    scene_excerpt_localized: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    scene_excerpt_localized_source_hash: Mapped[str | None] = mapped_column(
+        String, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

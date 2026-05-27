@@ -1,6 +1,11 @@
 <template>
   <div class="story-paragraph">
-    <SkeletonBlock v-if="isRegenerating" shape="text" :lines="3" />
+    <SkeletonBlock
+      v-if="isRegenerating || isTranslating"
+      shape="text"
+      :lines="3"
+      data-testid="paragraph-skeleton"
+    />
     <p v-else class="paragraph-text" data-testid="story-paragraph">
       {{ text }}
     </p>
@@ -19,6 +24,13 @@ const runStore = useRunStore();
 const text = computed(() => runStore.paragraphAt(props.paragraphIndex));
 const isRegenerating = computed(() =>
   runStore.isParagraphRegenerating(props.paragraphIndex),
+);
+// True while Agent 5 is translating this specific paragraph (only the
+// paragraphs included in the in-flight translateRun request, not those
+// already cached in Pinia / DB). Source-language paragraphs are never
+// translated and so never flip this flag.
+const isTranslating = computed(() =>
+  runStore.isParagraphTranslating(props.paragraphIndex),
 );
 </script>
 

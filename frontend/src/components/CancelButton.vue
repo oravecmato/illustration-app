@@ -1,12 +1,12 @@
 <template>
   <div v-if="runStatus === 'RUNNING'" class="cancel-button-wrapper">
     <template v-if="!confirming">
-      <button class="cancel-btn" @click="confirming = true">Zrušiť beh</button>
+      <button class="cancel-btn" @click="confirming = true">{{ $t("run.cancel") }}</button>
     </template>
     <template v-else>
-      <span class="confirm-text">Naozaj zrušiť?</span>
-      <button class="confirm-yes" @click="onConfirm">Áno</button>
-      <button class="confirm-no" @click="confirming = false">Nie</button>
+      <span class="confirm-text">{{ $t("run.confirm_cancel") }}</span>
+      <button class="confirm-yes" @click="onConfirm">{{ $t("run.yes") }}</button>
+      <button class="confirm-no" @click="confirming = false">{{ $t("run.no") }}</button>
     </template>
   </div>
 </template>

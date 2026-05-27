@@ -5,7 +5,7 @@
     :style="blockStyle"
     role="status"
     aria-busy="true"
-    aria-label="Načítava sa"
+    :aria-label="$t('a11y.loading')"
   >
     <template v-if="shape === 'text'">
       <div

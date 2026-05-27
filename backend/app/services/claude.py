@@ -20,7 +20,6 @@ from app.constants import (
 from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
-    CollectedBrief,
     Companion,
     EvaluateImageResponse,
     GeneratePromptsResponse,
@@ -133,21 +132,33 @@ class ClaudeClient:
 
     # ── Agent 0b: build_story ────────────────────────────────────────────────
 
-    async def build_story(self, brief: CollectedBrief) -> BuildStoryResponse:
+    async def build_story_i18n(self, input_dict: dict) -> BuildStoryResponse:
+        """
+        Build story with i18n support.
+
+        Args:
+            input_dict: Dict containing:
+                - source_language: str (e.g., 'sk', 'cs', 'en')
+                - topic_short: str (brief topic for skeleton UI)
+                - characters: list of Character dicts
+                - companions: list of Companion dicts
+                - topic: str (full topic description)
+                - notes: str (optional notes)
+        """
         characters_json = json.dumps(
-            [c.model_dump() for c in brief.characters], ensure_ascii=False, indent=2
+            [c.model_dump() for c in input_dict["characters"]], ensure_ascii=False, indent=2
         )
         companions_json = json.dumps(
-            [c.model_dump() for c in brief.companions], ensure_ascii=False, indent=2
+            [c.model_dump() for c in input_dict["companions"]], ensure_ascii=False, indent=2
         )
         user_text = (
-            "Construct the Slovak story and the illustration scenes for the brief below, "
-            "obeying every rule in your instructions.\n\n"
+            f"source_language: {input_dict['source_language']}\n"
+            f"topic_short: {input_dict['topic_short']}\n\n"
             f"characters:\n{characters_json}\n\n"
             f"companions:\n{companions_json}\n\n"
-            f"topic: {brief.topic}\n\n"
-            f"notes: {brief.notes or '(none)'}\n\n"
-            "Respond with the JSON object specified in your instructions and nothing else."
+            f"topic: {input_dict['topic']}\n\n"
+            f"notes: {input_dict.get('notes') or '(none)'}\n\n"
+            "Respond with the JSON object specified in your instructions."
         )
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
@@ -163,30 +174,49 @@ class ClaudeClient:
         self,
         current_concept: str,
         style_guide: StyleGuide,
-        character_role: str,
+        character_role: str | None,
         character_config: dict,
         companion: Companion | None = None,
     ) -> GeneratePromptsResponse:
-        char_entry = character_config[character_role]
-        char_display = CHARACTER_ROLE_MAP[character_role]
+        """Generate prompts for illustration.
+
+        When character_role is None (companion-alone scenes), workflow will be 'no-lora'.
+        """
         companion_line = (
             f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
             if companion is not None
             else "companion: null"
         )
-        user_text = (
-            f"character_display: {char_display}\n"
-            f"character_role: {character_role}\n"
-            f"trigger_tags: {char_entry['trigger_tags']}\n"
-            f"outfit_baseline: {char_entry['outfit_baseline']}\n"
-            f"style_positive: {style_guide.overall_style_positive}\n"
-            f"style_negative: {style_guide.overall_style_negative}\n"
-            f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
-            f"concept: {current_concept}\n"
-            f"{companion_line}\n\n"
-            f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
-            'Respond with JSON: {"positive": "...", "negative": "..."}'
-        )
+
+        if character_role:
+            char_entry = character_config[character_role]
+            char_display = CHARACTER_ROLE_MAP[character_role]
+            user_text = (
+                f"character_display: {char_display}\n"
+                f"character_role: {character_role}\n"
+                f"trigger_tags: {char_entry['trigger_tags']}\n"
+                f"outfit_baseline: {char_entry['outfit_baseline']}\n"
+                f"style_positive: {style_guide.overall_style_positive}\n"
+                f"style_negative: {style_guide.overall_style_negative}\n"
+                f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
+                f"concept: {current_concept}\n"
+                f"{companion_line}\n\n"
+                f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+                'Respond with JSON: {"workflow": "single-lora", '
+                '"positive": "...", "negative": "..."}'
+            )
+        else:
+            # Companion-alone scene (no character)
+            user_text = (
+                f"character_role: null\n"
+                f"style_positive: {style_guide.overall_style_positive}\n"
+                f"style_negative: {style_guide.overall_style_negative}\n\n"
+                f"concept: {current_concept}\n"
+                f"{companion_line}\n\n"
+                f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+                'Respond with JSON: {"workflow": "no-lora", "positive": "...", "negative": "..."}'
+            )
+
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=GeneratePromptsResponse,
@@ -295,17 +325,31 @@ class ClaudeClient:
 
     async def rethink_concept(
         self,
+        source_language: str,
         current_concept: str,
         verdict: EvaluateImageResponse,
         current_scene_excerpt: str,
         story_title: str,
         story_blocks: list[dict],
         current_paragraph_index: int,
-        character_role: str,
+        character_role: str | None,
         current_companion: Companion | None = None,
         companions_pool: list[str] | None = None,
     ) -> RethinkConceptResponse:
-        char_display = CHARACTER_ROLE_MAP[character_role]
+        """Rethink concept with Agent 4.
+
+        Args:
+            source_language: Language of the story (sk, cs, en)
+            current_concept: The failed concept
+            verdict: Evaluation verdict from Agent 2
+            current_scene_excerpt: Current scene excerpt
+            story_title: Story title
+            story_blocks: All story blocks
+            current_paragraph_index: Index of paragraph for this illustration
+            character_role: Character role (nullable for companion-alone scenes)
+            current_companion: Current companion (if any)
+            companions_pool: Pool of allowed companions
+        """
         pool = companions_pool or []
         # Render the full story for the agent: paragraph texts inline,
         # illustration blocks as numbered markers so the agent can see where
@@ -326,21 +370,44 @@ class ClaudeClient:
             else "null"
         )
         companions_pool_json = json.dumps(pool, ensure_ascii=False)
-        user_text = (
-            f"character_display: {char_display}\n"
-            f"character_role: {character_role}\n\n"
-            f"story_title: {story_title}\n\n"
-            f"full_story:\n{full_story}\n\n"
-            f"current_paragraph_index: {current_paragraph_index}\n"
-            f"current_paragraph_text: {current_paragraph_text}\n"
-            f"current_scene_excerpt: {current_scene_excerpt}\n"
-            f"failed_concept: {current_concept}\n"
-            f"current_companion: {current_companion_json}\n"
-            f"companions_pool: {companions_pool_json}\n"
-            f"verdict_reasoning: {verdict.reasoning}\n"
-            f"verdict_suggestion: {verdict.suggestion}\n\n"
-            "Respond with the JSON object specified in your instructions."
-        )
+
+        # Build user text with optional character fields
+        if character_role:
+            char_display = CHARACTER_ROLE_MAP[character_role]
+            user_text = (
+                f"source_language: {source_language}\n"
+                f"character_display: {char_display}\n"
+                f"character_role: {character_role}\n\n"
+                f"story_title: {story_title}\n\n"
+                f"full_story:\n{full_story}\n\n"
+                f"current_paragraph_index: {current_paragraph_index}\n"
+                f"current_paragraph_text: {current_paragraph_text}\n"
+                f"current_scene_excerpt: {current_scene_excerpt}\n"
+                f"failed_concept: {current_concept}\n"
+                f"current_companion: {current_companion_json}\n"
+                f"companions_pool: {companions_pool_json}\n"
+                f"verdict_reasoning: {verdict.reasoning}\n"
+                f"verdict_suggestion: {verdict.suggestion}\n\n"
+                "Respond with the JSON object specified in your instructions."
+            )
+        else:
+            # Companion-alone scene
+            user_text = (
+                f"source_language: {source_language}\n"
+                f"character_role: null\n\n"
+                f"story_title: {story_title}\n\n"
+                f"full_story:\n{full_story}\n\n"
+                f"current_paragraph_index: {current_paragraph_index}\n"
+                f"current_paragraph_text: {current_paragraph_text}\n"
+                f"current_scene_excerpt: {current_scene_excerpt}\n"
+                f"failed_concept: {current_concept}\n"
+                f"current_companion: {current_companion_json}\n"
+                f"companions_pool: {companions_pool_json}\n"
+                f"verdict_reasoning: {verdict.reasoning}\n"
+                f"verdict_suggestion: {verdict.suggestion}\n\n"
+                "Respond with the JSON object specified in your instructions."
+            )
+
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=RethinkConceptResponse,
@@ -363,7 +430,8 @@ class ClaudeClient:
         user_text = (
             f"target_language: {target_language}\n\n"
             f"items: {json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
-            "Respond with the JSON array specified in your instructions."
+            "Respond with the JSON object (with 'translations' array) "
+            "specified in your instructions."
         )
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],

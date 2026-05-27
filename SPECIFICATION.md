@@ -2420,10 +2420,11 @@ input control is the chat composer at the bottom of the chat thread.
 **Elements (top to bottom):**
 
 1. **Header:** the app title (`i18n.t('app.title')`) and a short
-   subtitle (`i18n.t('app.subtitle')`). The header row also hosts the
-   `LanguageSwitcher` in its **top-right** slot, anchored to the
-   centered app container; the switcher is sized so it never overlaps
-   the title or the subtitle at any supported viewport width (§ 9.8).
+   subtitle (`i18n.t('app.subtitle')`). The `LanguageSwitcher` is **not**
+   rendered by this view — it is mounted once in `App.vue` and floats in
+   the top-right of the centered app container on every screen (§ 9.8).
+   The view is responsible only for reserving enough top whitespace so
+   the switcher never overlaps the title at any supported viewport width.
 2. **Chat thread** (`ChatThread`): a vertically scrolling list of
    `ChatMessage` items. Assistant messages are aligned left with the
    assistant's avatar; user messages are aligned right. The very first
@@ -2558,10 +2559,11 @@ illustrations, or the final state of a completed run.
 **Elements (top to bottom):**
 
 1. **Header:** A back link (`i18n.t('runs.newStory')`) on the left
-   and the `LanguageSwitcher` in the top-right slot (§ 9.8). The
-   switcher is positioned so it never overlaps the story title even
-   when titles are unusually long (multi-line title still keeps a
-   right gutter for the switcher).
+   followed by the story title. The `LanguageSwitcher` is mounted once
+   by `App.vue` in the top-right of the centered container (§ 9.8) — it
+   is **not** part of this view's template. The header reserves top
+   whitespace so the floating switcher never overlaps the story title
+   even when titles are unusually long.
 2. **Run status pill:** "Beží" (with spinner) / "Hotovo" / "Zlyhalo" /
    "Zrušené".
 3. **Run-level error banner** (`RunErrorBanner`): visible when
@@ -2821,13 +2823,25 @@ State:
   language switches inside `/runs/:run_id` so the user can switch
   back and forth without re-fetching. Cleared on `loadRun()` for a
   new run.
-- `currentLanguage: 'sk' | 'cs' | 'en'` — the language the runStore
-  is currently presenting. Bound to the locale store (§ 9.6) but
-  treated as the source of truth for "which language was the
-  snapshot fetched in" purposes.
+- `currentLanguage: 'sk' | 'cs' | 'en'` — the language of the
+  translation snapshot currently materialized into `run` /
+  `illustrations`. This is an **internal cache-key**, not a UI
+  binding: the language switcher reads from
+  `localeStore.currentLanguage` exclusively (§ 9.8). The two values
+  are kept in sync by `localeStore.setLanguage` (switcher path) and
+  by `RunView`'s `route.params.lang` watcher (URL path); see § 9.6.5.
 - `pendingTranslationLanguages: Set<Language>` — languages currently
   being refreshed via § 8.9; used to de-duplicate concurrent
   switches.
+- `pendingParagraphTranslations: Set<number>` — `paragraph_index`es
+  currently included in an in-flight § 8.9 translation request.
+  Populated by `ensureTranslations` immediately before the POST and
+  cleared in its `finally` block. Only paragraphs actually being
+  translated (i.e. those whose translation in the target language is
+  `missing` or `stale`) are listed — already-cached paragraphs and
+  source-language paragraphs are NOT included, so the per-paragraph
+  skeleton only appears for text that genuinely cannot be served from
+  Pinia or the DB yet. Drives `isParagraphTranslating(paragraphIndex)`.
 - `isConnecting: boolean`
 - `sseError: string | null`
 
@@ -2850,12 +2864,20 @@ Actions:
      an array of `{ kind, paragraph_index?, scene_index? }` and
      issue `POST /api/runs/:run_id/translations` (§ 8.9) for that
      subset. The cached `stale` values stay visible during the
-     in-flight call. When the response arrives, write each item
-     into `translations[language]` (and into the live `run` /
-     `illustrations` view if the active language still matches).
-  3. While the call is in flight, `pendingTranslationLanguages.add(language)`.
-     The store ignores duplicate concurrent `switchLanguage(language)`
-     calls for the same language. Clears the entry on response.
+     in-flight call. **`missing` paragraphs** instead swap to a
+     per-paragraph skeleton (`StoryParagraph` reads
+     `isParagraphTranslating`) so the user sees the text being
+     fetched rather than a stale or empty paragraph. When the
+     response arrives, write each item into `translations[language]`
+     (and into the live `run` / `illustrations` view if the active
+     language still matches).
+  3. While the call is in flight, `pendingTranslationLanguages.add(language)`
+     AND each in-flight paragraph index is added to
+     `pendingParagraphTranslations`. The store ignores duplicate
+     concurrent `switchLanguage(language)` calls for the same
+     language. Both sets are cleared in the `finally` block, so the
+     skeletons resolve into translated text in the same tick as the
+     cache update.
   4. Also reopens the EventSource with `?lang={newLanguage}` so
      subsequent live events arrive pre-translated and so other tabs'
      `translations_refreshed` events are observed.
@@ -2869,6 +2891,26 @@ Derived getters:
   least one illustration whose `paragraph_index === paragraphIndex` is
   currently in state `"RETHINKING_CONCEPT"`. Drives the skeleton state
   on `StoryParagraph` (§ 9.1 Screen B).
+- `isParagraphTranslating(paragraphIndex): boolean` — `true` iff
+  `paragraphIndex` is in `pendingParagraphTranslations`. Drives the
+  same `StoryParagraph` skeleton (logical OR with
+  `isParagraphRegenerating`) for the duration of an Agent 5 call. The
+  skeleton is per-paragraph and only covers the paragraphs whose
+  translation is being fetched — paragraphs already present in the
+  Pinia cache (or in the DB-backed snapshot) keep showing their text
+  through the switch.
+- `completedCount: number` — derived from
+  `illustrations.filter(i => i.state === 'COMPLETED').length`. Used
+  by `ProgressCounter` instead of `run.completed_count` because the
+  backend pipeline only persists `runs.completed_count` to the DB at
+  run termination (see § 7); any mid-run snapshot fetched via
+  GET `/api/runs/:id` or rebuilt by the SSE endpoint therefore carries
+  `0`. Deriving from the illustrations array (whose `state` IS updated
+  per-illustration both in DB and via SSE) means the progress
+  indicator stays consistent across language switches and SSE
+  re-subscriptions during an active run.
+- `failedCount: number` — derived analogously
+  (`i.state === 'FAILED'`).
 - `paragraphAt(paragraphIndex): ParagraphBlock | undefined` — returns
   the paragraph block at the given index in the paragraph subset of
   `run.story_blocks`. Used by `StoryParagraph` to read its `text`
@@ -2936,8 +2978,14 @@ SSE handlers:
   illustration concept_localized) using the same field-level
   assignment rules as the dedicated handlers above — no array or
   object replacement, so no remounts.
-- `illustration_completed`, `illustration_failed`, `run_completed`,
-  `run_failed`, `run_cancelled`, `heartbeat` — as previously specified.
+- `illustration_completed`, `illustration_failed` → flip the matching
+  illustration's `state` (and `image_url` on completion). Progress
+  counters are NOT incremented manually; they are derived from
+  `illustrations[].state` via the `completedCount` / `failedCount`
+  computed getters above, so the state flip is sufficient.
+- `run_completed`, `run_failed`, `run_cancelled`, `heartbeat` — as
+  previously specified. `run_completed` only flips `run.status`; the
+  final completed/failed totals come from the derived getters.
 
 The `paragraph_updated` and `illustration_state` events arrive in the
 order specified in § 8.4: the paragraph text is replaced *before* the
@@ -3199,6 +3247,24 @@ A Pinia store with:
      user/Claude messages in the source language as originally
      produced.
 
+`setLanguage` is invoked only from in-app code paths: the language
+switcher (§ 9.8) and the chat auto-switch (§ 9.6.6). For URL-driven
+language changes — a direct visit to `/cs/runs/:id`, a bookmark, or
+a browser back/forward step — the locale store is updated by the
+router guard (`beforeEach`) and does **not** go through
+`setLanguage`. The run store therefore has to be synced separately
+on those paths:
+
+- On initial mount, `RunView` reads `route.params.lang` and passes
+  it as the `language` argument to `runStore.loadRun()` and
+  `runStore.subscribe()` so the very first snapshot and SSE stream
+  are fetched in the URL language.
+- A watcher in `RunView` observes `route.params.lang` and calls
+  `runStore.switchLanguage(newLang)` whenever it changes. This is a
+  no-op when the change was triggered by the switcher (the value is
+  already in sync at that point), and it handles back/forward and
+  direct deep links uniformly.
+
 #### 9.6.6 Auto-switch on chat detection
 
 Agent 0a emits `language: 'sk' | 'cs' | 'en' | 'other'` per § 7.1
@@ -3230,7 +3296,9 @@ banners outside the inline error banners, etc.) is introduced.
 Setup:
 
 - `<Toaster />` is rendered once at the top of `App.vue` with
-  props `position="top-center"` and `rich-colors` enabled.
+  props `position="bottom-left"` and `rich-colors` enabled.
+  The library's stylesheet (`vue-sonner/style.css`) is imported
+  once in `main.ts` so toasts render with their built-in styling.
 - A thin wrapper `src/composables/useToast.ts` exposes
   `{ info, success, error }` functions that call `sonner`'s API
   with the app's default options (5 s duration, dismissable).
@@ -3250,9 +3318,19 @@ corresponding `toast.*` keys in every locale.
 
 ### 9.8 Language switcher (`LanguageSwitcher.vue`)
 
-A small component rendered in the top-right of the centered page
-container on every screen. Implementation rules:
+A small component **mounted exactly once in `App.vue`** and rendered
+in the top-right of the centered page container on every screen
+(no view re-renders the switcher inline). Implementation rules:
 
+- **Single source of truth:** the switcher's displayed/active language
+  is read from `localeStore.currentLanguage` **only**. It must NOT
+  branch on `route.name` or read from the `runStore` for display
+  purposes. The `runStore` exposes its own `currentLanguage` solely
+  as a cache-key for "which translation snapshot is currently loaded"
+  (§ 9.2.2) — that is an internal concern, not a UI binding. The two
+  are kept in sync by `localeStore.setLanguage` (for switcher clicks)
+  and by `RunView`'s route watcher (for direct URL navigation and
+  browser back/forward), see § 9.6.5.
 - Trigger: a button showing the active language as its ISO code
   (`SK` / `CS` / `EN`) plus a small chevron. No flag emoji — flags
   are politically loaded and don't map cleanly to languages (e.g.
@@ -3263,7 +3341,9 @@ container on every screen. Implementation rules:
   `i18n.t('language.${code}')` so it changes with the active
   locale). The active language row is marked with a check glyph.
 - Click handler invokes `localeStore.setLanguage(code, { silent:
-  true })` and closes the menu.
+  true })` and closes the menu. The locale store is responsible for
+  rewriting the URL, persisting to `localStorage`, and (when the
+  active route is `/runs/:run_id`) cascading to `runStore.switchLanguage`.
 - Manual selection sets `localeStore.languageLockedByUser = true`
   (§ 9.6.6).
 
@@ -3834,6 +3914,11 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
 - **LanguageSwitcher.vue:**
   - Renders three menu items in the order `sk`, `cs`, `en` with the
     endonym labels resolved from `i18n.t('language.${code}')`.
+  - The "active" row (check glyph and active styling) is driven by
+    `localeStore.currentLanguage` on every route — mounting the
+    switcher on `/cs/runs/:id` while the runStore is empty (or while
+    its internal `currentLanguage` is still `sk`) still shows `cs`
+    as active.
   - Clicking a non-active item invokes `localeStore.setLanguage(code,
     { silent: true })` exactly once and closes the menu.
   - Clicking the active item is a no-op (the menu still closes).
@@ -3841,6 +3926,8 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     `localeStore.languageLockedByUser = true`.
   - The trigger button has the accessibility attributes specified
     in § 9.8 (`aria-haspopup`, `aria-expanded`, `aria-label`).
+  - The switcher is mounted exactly once (in `App.vue`); no view
+    template imports or renders it directly.
 - **localeStore (`stores/locale.ts`):**
   - `setLanguage('cs')` from `'sk'` calls `router.replace` with the
     `lang` path segment rewritten to `'cs'` and writes `'cs'` into
@@ -3905,6 +3992,17 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     (reference-survival assertion).
   - `illustration_state` event with a new `current_workflow` value
     mutates that field in place.
+- **RunView URL-lang sync (§ 9.6.5):**
+  - Mounting `RunView` at `/cs/runs/:id` calls `runStore.loadRun(id,
+    'cs')` and `runStore.subscribe(id, 'cs')` exactly once (the `cs`
+    argument is taken from `route.params.lang`, not from any store
+    default).
+  - Changing `route.params.lang` from `cs` to `sk` (without going
+    through the switcher — e.g. simulated `router.replace`) invokes
+    `runStore.switchLanguage('sk')` exactly once.
+  - A switcher click on `/cs/runs/:id` results in exactly one
+    `runStore.switchLanguage` call (the route-watcher path is a
+    no-op after the locale store has already cascaded).
 
 ### 11.4 What is NOT required (out of scope for MVP)
 
