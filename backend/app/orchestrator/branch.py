@@ -9,7 +9,13 @@ from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
 from app.db.models import Illustration, IllustrationState
 from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
-from app.schemas.claude import Companion, StyleGuide, companion_in_pool
+from app.schemas.claude import (
+    Companion,
+    Environment,
+    StyleGuide,
+    _normalize_env_label,
+    companion_in_pool,
+)
 from app.services.claude import ClaudeClient
 from app.services.images import save_image
 from app.services.manual import ManualService
@@ -74,12 +80,33 @@ async def run_branch(
         await transition(IllustrationState.CANCELLED)
         return
 
-    for concept_attempt in range(1, MAX_CONCEPT_ATTEMPTS + 1):
+    # Environment-rethink bookkeeping (§ 11 Agent 4b):
+    # - env_rethink_used: True once Agent 4b has fired for this slot.
+    #   Only one environment swap is allowed per branch.
+    # - skip_concept_rethink_once: when set, the next outer iteration
+    #   bypasses Agent 4 (rethink_concept) because Agent 4b already wrote
+    #   a fresh concept + paragraph as part of the swap.
+    # The "+1 budget" edge case: when env_rethink_used flips True, the
+    # outer loop is allowed one extra concept_attempt iteration. We
+    # express this by NOT incrementing concept_attempt on the iteration
+    # in which A4b ran (the env swap is "free").
+    env_rethink_used = False
+    skip_concept_rethink_once = False
+    concept_attempt = 1
+    while concept_attempt <= MAX_CONCEPT_ATTEMPTS + (1 if env_rethink_used else 0):
         if cancel_flag.is_set():
             await transition(IllustrationState.CANCELLED)
             return
 
-        if concept_attempt > 1:
+        # Consume the skip flag at the top of each iteration. A4b sets it
+        # in the inner loop; the *next* outer iteration reads it once to
+        # bypass A4 (rethink_concept) — because A4b has already rewritten
+        # the concept + paragraph as part of the env swap — and then
+        # clears it so subsequent iterations behave normally.
+        skip_concept_rethink_this_iter = skip_concept_rethink_once
+        skip_concept_rethink_once = False
+
+        if concept_attempt > 1 and not skip_concept_rethink_this_iter:
             # Rethink concept
             await transition(
                 IllustrationState.RETHINKING_CONCEPT,
@@ -345,6 +372,34 @@ async def run_branch(
                 concept_succeeded = True
                 return
 
+            if verdict.problem == "environment" and not env_rethink_used:
+                # Fast-path to Agent 4b: the locked environment itself is
+                # the renderer blocker. Swap it once (only one swap per
+                # branch) and restart the concept with the new environment.
+                await _do_environment_rethink(
+                    illustration=illustration,
+                    blocks=blocks,
+                    lock=lock,
+                    repo=repo,
+                    event_bus=event_bus,
+                    claude=claude,
+                    source_language=source_language,
+                    story_title=story_title,
+                    style_guide=style_guide,
+                    character_role=character_role,
+                    verdict=verdict,
+                    pool=pool,
+                    transition=transition,
+                    concept_attempt=concept_attempt,
+                )
+                # Refresh local character_role + companion from the row
+                # (A4b may have changed them).
+                character_role = illustration.character_role
+                env_rethink_used = True
+                skip_concept_rethink_once = True
+                break  # break prompt loop; outer iteration ends without
+                # incrementing concept_attempt (the "+1 budget" effect).
+
             if verdict.problem == "concept":
                 # Break inner loop, go to next concept
                 break
@@ -377,6 +432,8 @@ async def run_branch(
         if concept_succeeded:
             return
 
+        concept_attempt += 1
+
     # All automatic attempts exhausted — enter the § 6A manual chat
     # fallback instead of going straight to FAILED. The branch task ends
     # here; the rest of the manual flow runs synchronously inside the
@@ -394,6 +451,181 @@ async def run_branch(
         character_config=char_config,
     )
     await manual_service.open_manual_flow(illustration, source_language=source_language)
+
+
+async def _do_environment_rethink(
+    *,
+    illustration: Illustration,
+    blocks: list[dict],
+    lock: asyncio.Lock,
+    repo: RunRepository,
+    event_bus: EventBus,
+    claude: ClaudeClient,
+    source_language: str,
+    story_title: str,
+    style_guide: StyleGuide,
+    character_role: str | None,
+    verdict,
+    pool: list[str],
+    transition,
+    concept_attempt: int,
+) -> None:
+    """Run Agent 4b for this illustration: swap the locked environment.
+
+    Reads the run-level context (full environment list, reserved
+    entities, main character role) from the DB, calls Agent 4b, then
+    persists the resulting changes to the run + illustration + shared
+    story_blocks. Publishes the same event sequence Agent 4 publishes
+    so the frontend reactively re-renders.
+    """
+    await transition(
+        IllustrationState.RETHINKING_ENVIRONMENT,
+        concept_attempt=concept_attempt,
+        prompt_attempt=1,
+    )
+
+    run_obj = await repo.get_run(illustration.run_id)
+    if run_obj is None:
+        # Should never happen — the branch was created from this run.
+        raise RuntimeError("run row vanished mid-branch")
+
+    environments_raw = json.loads(run_obj.environments_json or "[]")
+    reserved_raw = json.loads(run_obj.reserved_entities_json or "[]")
+    main_character_role = run_obj.main_character_role or ""
+
+    if not environments_raw or illustration.scene_index >= len(environments_raw):
+        raise RuntimeError(
+            f"run {run_obj.id} has no locked environment for scene_index={illustration.scene_index}"
+        )
+    current_env_dict = environments_raw[illustration.scene_index]
+    current_env = Environment(**current_env_dict)
+
+    # Labels of every OTHER slot, normalised. The new env must avoid these.
+    used_environments = [
+        _normalize_env_label(env["label"])
+        for idx, env in enumerate(environments_raw)
+        if idx != illustration.scene_index
+    ]
+
+    prev_companion = None
+    if illustration.companion_description and illustration.companion_interaction:
+        prev_companion = Companion(
+            description=illustration.companion_description,
+            interaction=illustration.companion_interaction,
+        )
+
+    try:
+        result = await claude.rethink_environment(
+            source_language=source_language,
+            current_concept=illustration.current_concept,
+            verdict=verdict,
+            current_scene_excerpt=illustration.scene_excerpt,
+            story_title=story_title,
+            story_blocks=blocks,
+            current_paragraph_index=illustration.paragraph_index,
+            character_role=character_role,
+            main_character_role=main_character_role,
+            current_environment=current_env,
+            used_environments=used_environments,
+            current_companion=prev_companion,
+            companions_pool=pool,
+            reserved_entities=reserved_raw,
+        )
+    except Exception as e:
+        logger.error("rethink_environment failed: %s", e)
+        await repo.update_illustration(
+            illustration,
+            state=IllustrationState.FAILED,
+            error_message=f"Environment rethink failed: {e}",
+        )
+        raise
+
+    # Reject env labels that collide with another slot's normalised label
+    # (defence in depth: the prompt forbids it but the agent might still
+    # produce a clash).
+    new_norm = _normalize_env_label(result.environment.label)
+    if new_norm in used_environments:
+        msg = (
+            f"Agent 4b proposed environment label "
+            f"'{result.environment.label}' which collides with another "
+            "slot — rejecting."
+        )
+        logger.error(msg)
+        await repo.update_illustration(
+            illustration,
+            state=IllustrationState.FAILED,
+            error_message=msg,
+        )
+        raise RuntimeError(msg)
+
+    # Pool fidelity for the (optional) companion.
+    new_companion: Companion | None = result.companion
+    if new_companion is not None and not companion_in_pool(new_companion.description, pool):
+        msg = (
+            f"Agent 4b proposed companion '{new_companion.description}' "
+            f"not in the agreed pool {pool}."
+        )
+        logger.error(msg)
+        await repo.update_illustration(
+            illustration,
+            state=IllustrationState.FAILED,
+            error_message=msg,
+        )
+        raise RuntimeError(msg)
+
+    # Persist: replace the environment at scene_index in the run-level
+    # array, write back environments_json + story_blocks_json under the
+    # shared lock.
+    paragraph_index = illustration.paragraph_index
+    async with lock:
+        environments_raw[illustration.scene_index] = result.environment.model_dump()
+        if 0 <= paragraph_index < len(blocks):
+            blocks[paragraph_index] = {
+                "type": "paragraph",
+                "text": result.paragraph_text,
+            }
+        run_obj_locked = await repo.get_run(illustration.run_id)
+        if run_obj_locked is not None:
+            await repo.update_run(
+                run_obj_locked,
+                environments_json=json.dumps(environments_raw, ensure_ascii=False),
+                story_blocks_json=json.dumps(blocks, ensure_ascii=False),
+            )
+
+    role_changed = result.character_role != character_role
+    await repo.update_illustration(
+        illustration,
+        character_role=result.character_role,
+        current_workflow=f"{result.workflow}.json",
+        current_concept=result.concept_localized,
+        scene_excerpt=result.scene_excerpt,
+        companion_description=(new_companion.description if new_companion is not None else None),
+        companion_interaction=(new_companion.interaction if new_companion is not None else None),
+        environment_label=result.environment.label,
+        environment_aspect=result.environment.aspect,
+    )
+
+    await event_bus.publish(
+        "paragraph_updated",
+        {"paragraph_index": paragraph_index, "text": result.paragraph_text},
+    )
+    if role_changed:
+        await event_bus.publish(
+            "illustration_role_updated",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "character_role": result.character_role,
+            },
+        )
+    await event_bus.publish(
+        "illustration_environment_updated",
+        {
+            "illustration_id": illustration.id,
+            "scene_index": illustration.scene_index,
+            "environment": result.environment.model_dump(),
+        },
+    )
 
 
 def _load_last_verdict(illustration: Illustration):

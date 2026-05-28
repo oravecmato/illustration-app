@@ -21,11 +21,13 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     Companion,
+    Environment,
     EvaluateImageResponse,
     GeneratePromptsResponse,
     ManualConceptResponse,
     ManualRevisePromptsResponse,
     RethinkConceptResponse,
+    RethinkEnvironmentResponse,
     RevisePromptsResponse,
     StyleGuide,
     TranslateResponse,
@@ -68,6 +70,7 @@ AGENT_FILES = {
     "evaluate_image": "evaluate_image.md",
     "revise_prompts": "revise_prompts.md",
     "rethink_concept": "rethink_concept.md",
+    "rethink_environment": "rethink_environment.md",
     "translate": "translate.md",
     "manual_concept": "manual_concept.md",
     "manual_revise_prompts": "manual_revise_prompts.md",
@@ -459,6 +462,98 @@ class ClaudeClient:
             messages=[{"role": "user", "content": user_text}],
             response_model=RethinkConceptResponse,
             system=self._prompts["rethink_concept"],
+            max_tokens=2048,
+        )
+        return result  # type: ignore[return-value]
+
+    async def rethink_environment(
+        self,
+        *,
+        source_language: str,
+        current_concept: str,
+        verdict: EvaluateImageResponse,
+        current_scene_excerpt: str,
+        story_title: str,
+        story_blocks: list[dict],
+        current_paragraph_index: int,
+        character_role: str | None,
+        main_character_role: str,
+        current_environment: Environment,
+        used_environments: list[str],
+        current_companion: Companion | None = None,
+        companions_pool: list[str] | None = None,
+        reserved_entities: list[dict] | None = None,
+    ) -> RethinkEnvironmentResponse:
+        """Call Agent 4b to swap the locked environment for a slot.
+
+        Only invoked when Agent 2 emits ``problem='environment'``.
+        """
+        pool = companions_pool or []
+        reserved = reserved_entities or []
+
+        rendered_blocks: list[str] = []
+        for idx, block in enumerate(story_blocks):
+            if block["type"] == "paragraph":
+                tag = " (this paragraph)" if idx == current_paragraph_index else ""
+                rendered_blocks.append(f"[BLOCK {idx} PARAGRAPH{tag}]\n{block['text']}")
+            else:
+                rendered_blocks.append(f"[BLOCK {idx} ILLUSTRATION {block['scene_index']}]")
+        full_story = "\n\n".join(rendered_blocks)
+        current_paragraph_text = story_blocks[current_paragraph_index]["text"]
+
+        # Locate the prev / next paragraph blocks around this illustration.
+        prev_paragraph_text = ""
+        next_paragraph_text = ""
+        for idx in range(current_paragraph_index - 1, -1, -1):
+            if story_blocks[idx]["type"] == "paragraph":
+                prev_paragraph_text = story_blocks[idx]["text"]
+                break
+        for idx in range(current_paragraph_index + 1, len(story_blocks)):
+            if story_blocks[idx]["type"] == "paragraph":
+                next_paragraph_text = story_blocks[idx]["text"]
+                break
+
+        current_companion_json = (
+            json.dumps(current_companion.model_dump(), ensure_ascii=False)
+            if current_companion is not None
+            else "null"
+        )
+        companions_pool_json = json.dumps(pool, ensure_ascii=False)
+        reserved_json = json.dumps(reserved, ensure_ascii=False)
+        used_envs_json = json.dumps(used_environments, ensure_ascii=False)
+        current_env_json = json.dumps(current_environment.model_dump(), ensure_ascii=False)
+
+        char_display_line = ""
+        if character_role:
+            char_display_line = f"character_display: {CHARACTER_ROLE_MAP[character_role]}\n"
+
+        user_text = (
+            f"source_language: {source_language}\n"
+            f"{char_display_line}"
+            f"character_role: {character_role if character_role else 'null'}\n"
+            f"main_character_role: {main_character_role}\n\n"
+            f"story_title: {story_title}\n\n"
+            f"full_story:\n{full_story}\n\n"
+            f"current_paragraph_index: {current_paragraph_index}\n"
+            f"current_paragraph_text: {current_paragraph_text}\n"
+            f"previous_paragraph_text: {prev_paragraph_text}\n"
+            f"next_paragraph_text: {next_paragraph_text}\n"
+            f"current_environment: {current_env_json}\n"
+            f"used_environments: {used_envs_json}\n"
+            f"current_scene_excerpt: {current_scene_excerpt}\n"
+            f"failed_concept: {current_concept}\n"
+            f"current_companion: {current_companion_json}\n"
+            f"companions_pool: {companions_pool_json}\n"
+            f"reserved_entities: {reserved_json}\n"
+            f"verdict_reasoning: {verdict.reasoning}\n"
+            f"verdict_suggestion: {verdict.suggestion}\n\n"
+            "Respond with the JSON object specified in your instructions."
+        )
+
+        result = await self._call_with_retry(
+            messages=[{"role": "user", "content": user_text}],
+            response_model=RethinkEnvironmentResponse,
+            system=self._prompts["rethink_environment"],
             max_tokens=2048,
         )
         return result  # type: ignore[return-value]
