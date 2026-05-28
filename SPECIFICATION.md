@@ -588,8 +588,11 @@ needed to render run X in language L".
 | `EVALUATING`           | "Vyhodnocujem výsledok"      | Claude inspects the image                      |
 | `REVISING_PROMPTS`     | "Upravujem prompty"          | Claude revises prompts after a bad image       |
 | `RETHINKING_CONCEPT`   | "Premýšľam koncept"          | Claude proposes a new concept for the scene    |
-| `COMPLETED`            | "Hotovo"                     | Image accepted                                 |
-| `FAILED`               | "Nepodarilo sa"              | All attempts exhausted, or unrecoverable error |
+| `COMPLETED`            | "Hotovo"                     | Image accepted (auto pipeline OR manual flow — § 6A) |
+| `MANUAL_CHATTING`      | "Spoločná tvorba"            | Auto pipeline exhausted; user is chatting with Agent 6 to design a feasible concept manually (§ 6A) |
+| `MANUAL_GENERATING_PROMPTS` | "Pripravujem prompty (manuál)" | Agent 1 is translating the agreed manual concept into Danbooru prompts (§ 6A) |
+| `MANUAL_RENDERING`     | "Kreslím (manuál, pokus K/5)" | ComfyUI job in flight for a manual attempt (§ 6A)   |
+| `FAILED`               | "Nepodarilo sa"              | All automatic attempts exhausted AND the manual flow either was abandoned by the user OR exhausted its own attempt budget (§ 6A) |
 | `CANCELLED`            | "Zrušené"                    | Run cancelled while this branch was active     |
 
 ### Loop semantics (worst case: 3 × 3 = 9 ComfyUI jobs)
@@ -649,9 +652,1084 @@ Each state transition writes to DB and emits one SSE event.
 
 ---
 
+## 6A. Semi-automatic image generation (manual chat fallback)
+
+### 6A.1 Motivation and high-level behavior
+
+When the fully automatic pipeline (§ 6) exhausts its 3 × 3 attempt
+budget for an illustration, the branch does **not** transition straight
+to `FAILED` anymore. Instead, the failing illustration's card on
+Screen B (§ 9.1) transforms into an interactive chat with a new
+**Agent 6 ("the co-illustrator")**. The user and Agent 6 then
+collaborate on a concept that is technically feasible on the simple
+ComfyUI workflow, and re-trigger RunPod manually until either
+(a) the user confirms a result, or (b) the manual attempt budget
+(`MAX_MANUAL_ATTEMPTS = 5`) is exhausted. Only then does the
+illustration land in `FAILED`.
+
+The feature is a *fallback*, never an entry point: the user reaches
+it exclusively through an auto-pipeline failure. The card is the only
+surface for the manual flow — there is no separate page, modal, or
+route.
+
+### 6A.2 Design philosophy (binding on Agent 6's prompt)
+
+Agent 6's persona is explicitly **assertive, confident, gently
+manipulative, and never technically pedantic**. The product premise of
+"the app feels limitless" must hold for as long as possible. Concretely
+the prompt enforces:
+
+1. **Never enumerate technical limits up front.** Agent 6 must not say
+   "we cannot do inpainting", "we cannot do regional prompting",
+   "we cannot keep a consistent environment", "only one humanoid
+   allowed", etc. Such constraints exist (see § 6A.5) but are *never*
+   surfaced unless the user proposes something that violates them, and
+   even then Agent 6 explains in **generic, non-technical terms** ("that
+   kind of scene is unusually hard for me — let's lean a bit closer to
+   something I'm great at").
+2. **Never preemptively forbid.** Agent 6 must not pre-empt a user's
+   idea with "you cannot ask for X". It only pushes back when the user
+   has actually proposed X.
+3. **Subtly steer to feasibility.** When a proposal is borderline,
+   Agent 6 leads the user toward the nearest feasible concept by
+   suggesting concrete alternatives that *sound at least as good*. It
+   never lowers ambition openly; it reframes.
+4. **Never reduce success probability.** Agent 6 must NEVER propose
+   adding elements that demonstrably lower success probability (extra
+   humanoids, complex multi-character interaction, abstract metaphors
+   without a concrete depictable scene, etc.).
+5. **Technical detail on demand only.** If the user explicitly asks
+   *why* an idea is hard, Agent 6 may give a short, friendly
+   explanation in human terms (≤ 2 sentences). Otherwise: zero
+   technical jargon.
+6. **No static explainer text in the UI.** The chat is the entire
+   surface; the welcome message (§ 6A.7 step 1) is the user's only
+   introduction to the flow.
+7. **Verbatim concept handoff (binding invariant).** When Agent 6
+   asks the user to confirm a concept (phase
+   `awaiting_concept_confirmation`, § 7.1 Call 6), the `reply` must
+   contain the **exact English concept text** that will be sent to
+   Agent 1 — character for character — embedded inside the summary
+   bubble (typically delimited by a quoted block, e.g. surrounded by
+   straight double quotes or a Markdown blockquote). The model
+   chooses the final wording **before** asking for confirmation, not
+   after. On `phase=concept_confirmed` the server uses
+   `concept_candidate` byte-for-byte as both `illustrations.current_concept`
+   *and* as Agent 1's input — without rewriting, re-translating, or
+   abbreviating it. Implementation MUST also assert at this seam that
+   `concept_candidate` equals the previous turn's `concept_candidate`
+   verbatim (no last-second edit during `concept_confirmed`); a
+   mismatch is treated as a Claude failure and re-prompted. Stated
+   plainly: **what the user sees in the chat history immediately
+   before a rendered image equals, byte-for-byte, the source concept
+   used to generate that image.**
+8. **User drives feedback after each image.** Unlike the auto pipeline
+   (where Agent 2 *sees* the image), Agent 6 does **not** see the
+   rendered images. Its post-image job is therefore to **elicit
+   detailed feedback from the user**, not to propose new concepts on
+   its own. The default post-image phase is `gathering_feedback`
+   (§ 7.1 Call 6), in which Agent 6:
+   - reminds the user — in the very first post-image turn — that it
+     cannot see the image and that the user is its eyes (the i18n
+     framing string in § 6A.7 step 5 says this explicitly; the agent
+     may echo the same idea in subsequent turns when relevant);
+   - asks the user to describe what is good and what is wrong in the
+     image, in concrete visual terms;
+   - actively probes for the user's reaction to the **key, strategic,
+     or technically-fragile elements of the agreed concept** — the
+     elements Agent 6 estimates are most likely to be misrendered by
+     a simple ComfyUI workflow. Example: *"We agreed the cat would
+     be perched on her shoulder. Is it actually there, on her
+     shoulder?"* The agent does NOT probe every element of the
+     concept; only the ones it judges most load-bearing or most
+     prone to failure.
+   - waits for the user to volunteer feedback on those key elements
+     first, and only asks if the user has not addressed them.
+9. **No feedback summarization.** Agent 6 does not produce a
+   structured summary of the gathered feedback at the end of the
+   feedback phase. Once it judges the conversation has covered the
+   key elements, it asks a single short closing question — *"Have
+   you said everything you wanted to say about the image? If yes,
+   we can go for another attempt."* — and on user confirmation
+   transitions to `phase=feedback_confirmed`. The server passes the
+   raw post-image user-message slice to Agent 7 (§ 7.1 Call 7); it
+   does not ask Agent 6 to paraphrase it.
+10. **Drift detection.** If during `gathering_feedback` the user's
+    feedback starts to drift *off-concept* — i.e. the user is no
+    longer talking about elements that are missing from / wrong in /
+    excessive over the agreed concept, but about entirely new ideas
+    that are not part of the agreed concept — Agent 6 must flag this
+    explicitly and ask the user to choose: (a) keep iterating the
+    current agreed concept (in which case the new ideas are dropped
+    and the feedback phase continues), or (b) discard the current
+    agreed concept and **design a fresh one together**. Choice (b)
+    is signalled by phase `restart_concept` (§ 7.1 Call 6); on it
+    the server resets the manual session into the concept-design
+    sub-phase and Agent 6 returns to `gathering` on the next turn.
+11. **Polite refusal of impossible / unethical requests.** If at any
+    point the user asks for an image that violates the shared
+    cross-agent constraints (e.g. two humans on the canvas, see
+    § 6A.5 and § 7.3.6) or that is ethically out of bounds
+    (sexualized minors, hateful imagery, graphic gore, real
+    identifiable persons, etc.), Agent 6 politely declines that
+    specific request, briefly explains the limit in generic
+    non-technical terms, and offers a feasible alternative that
+    captures the same emotional beat. The refusal does **not** end
+    the manual session — the agent stays in its current sub-phase
+    and continues collaborating.
+12. **Maintain cumulative prompt-engineering notes.** Across the
+    manual session, Agent 6 incrementally curates a short
+    **English-only** memo — `prompting_notes` — that captures
+    *prompt-level* lessons distilled from the running feedback:
+    things this particular renderer (Illustrious XL + MHA LoRA,
+    simple single-pass workflow) has demonstrably struggled with
+    on this illustration, plus the prompt-level workarounds that
+    helped. Concretely the memo records *renderer weaknesses and
+    countermeasures* — e.g. "the robot keeps rendering as mist /
+    ghostly figure; needs explicit `mecha, metallic plating,
+    glowing eyes, hard edges` tags and `humanoid, person, ghost,
+    mist, ethereal` in the negative" — **not** user preferences,
+    not aesthetic taste, not concept-level edits (those belong
+    in the concept text itself). The memo is updated by Agent 6
+    via the optional `prompting_notes_update` output field
+    (§ 7.1 Call 6) on any turn where the latest exchange yielded
+    a useful prompt-level lesson; when present, it **fully
+    overwrites** the previous notes (Agent 6 is responsible for
+    folding old lessons into the new memo when relevant — the
+    server does not merge). The notes are passed forward as an
+    optional input to Agent 1 on the *next* `concept_confirmed`
+    dispatch and to Agent 7 on every `feedback_confirmed`
+    dispatch, so both prompt-authoring agents see the same
+    accumulated knowledge of what works for this illustration.
+    The notes **persist across `phase=restart_concept`**
+    (rule #10) — switching to a fresh concept does not erase
+    what we learned about the renderer's blind spots on this
+    illustration, because those blind spots typically transfer
+    (LoRA-character anatomy quirks, environment-tag failure
+    modes, etc.). The notes are not shown in the UI; they live
+    only on `manual_illustration_sessions.prompting_notes`
+    (§ 6A.6) and in the agent payloads.
+
+### 6A.3 Entry condition
+
+The orchestrator initiates the manual flow when **all of** the
+following hold for an illustration:
+
+- The auto loop in § 6 has exhausted both
+  `MAX_CONCEPT_ATTEMPTS` (3) and the inner
+  `MAX_PROMPT_ATTEMPTS_PER_CONCEPT` (3) without an accepted image,
+  **and** the branch was not cancelled.
+- The run is still in `RUNNING` (it has not been cancelled and the
+  run-level orchestrator has not aborted via § 8.8).
+- `illustrations.manual_attempts` is `0` (the manual flow has never
+  been entered for this illustration before).
+
+When all three hold, the orchestrator:
+
+1. Persists `illustrations.state = MANUAL_CHATTING`.
+2. Creates the `manual_illustration_sessions` row for this
+   illustration (§ 6A.6).
+3. Emits one SSE `illustration_state` event with the new state and
+   one `illustration_manual_started` event (§ 8.4 amendment) carrying
+   the localized welcome message (§ 6A.7 step 1) so the frontend can
+   immediately render it as the first chat bubble.
+4. Stops touching this illustration from the auto-orchestrator side —
+   subsequent transitions are driven by the new endpoints in § 8.10.
+
+The completion-count accounting on the run (`runs.completed_count`,
+`runs.failed_count`) does **not** advance while an illustration is in
+any `MANUAL_*` state. The run remains in `RUNNING` until every branch
+either reaches `COMPLETED` or `FAILED`, including via the manual flow.
+This means the global progress bar (§ 9.1 Screen B) can stay at "N-1
+of N done" indefinitely while the user takes their time in the manual
+chat; that is intentional and matches the user-first philosophy of
+the feature.
+
+If the orchestrator itself errors during the entry transition (DB
+failure etc.), the branch falls through to `FAILED` with
+`error_message` set, exactly as it would have without this feature.
+
+### 6A.4 Per-illustration manual loop
+
+Numbered steps below run inside one illustration's manual flow.
+`manual_attempts` starts at `0` and is incremented exactly when a
+ComfyUI manual render *starts*. The loop has two distinct
+sub-phases — **concept design** and **post-image feedback
+gathering** — separated by a render. Agent 6 (§ 7.1 Call 6) is
+invoked on every user turn in either sub-phase. The `phase` field
+of Agent 6's reply identifies the current step:
+
+| `phase`                          | Sub-phase           | Meaning                                                                                                  |
+|----------------------------------|---------------------|----------------------------------------------------------------------------------------------------------|
+| `gathering`                      | concept design      | Concept negotiation continues. `concept_candidate` is null.                                              |
+| `awaiting_concept_confirmation`  | concept design      | Agent 6 has finalized a concept verbatim (§ 6A.2 rule #7); `reply` quotes it in English; `concept_candidate` carries the same string. |
+| `concept_confirmed`              | concept design      | User confirmed the just-quoted concept. Server dispatches Agent 1 + render.                              |
+| `gathering_feedback`             | feedback gathering  | Image was rendered; user is describing what works / doesn't. `concept_candidate` and `user_feedback` are null. |
+| `awaiting_feedback_confirmation` | feedback gathering  | Agent 6 thinks feedback is complete; asks the user to confirm "did you say everything?".                 |
+| `feedback_confirmed`             | feedback gathering  | User confirmed feedback is complete. Server dispatches Agent 7 + render with revised prompts.            |
+| `restart_concept`                | drift escape hatch  | User chose to redesign the concept rather than iterate prompts (§ 6A.2 rule #10). Server resets to concept design. |
+| `accepted`                       | terminal            | User accepted the most recent rendered image as the canonical illustration.                              |
+
+#### 6A.4.1 Concept-design sub-phase
+
+1. **Open.** State is `MANUAL_CHATTING`. The frontend renders the
+   chat surface (§ 9.1 amendment) seeded with Agent 6's localized
+   welcome message (the message text is computed by the **backend**
+   in the run's `source_language` so it persists in
+   `manual_messages` like every other assistant turn, and so all
+   future SSE subscribers see the same first bubble; see § 6A.7).
+   On open the active sub-phase is **concept design**.
+2. **User sends a message.** The frontend POSTs to § 8.10.1. The
+   backend appends it to `manual_messages`, then invokes Agent 6
+   with the running transcript (§ 7.1 Call 6) and the current
+   sub-phase. In the concept-design sub-phase Agent 6 replies with
+   one of:
+   - `gathering` — still negotiating the concept; `reply` is the
+     next assistant turn. No state change. SSE
+     `manual_message_appended` (assistant role).
+   - `awaiting_concept_confirmation` — Agent 6 has finalized a
+     candidate concept that satisfies § 6A.5. `reply` quotes the
+     verbatim English concept text inline (per § 6A.2 rule #7) and
+     explicitly asks for confirmation in the user's
+     `source_language`. `concept_candidate` carries the **exact
+     same** English string the user sees quoted in `reply`. No
+     state change yet. SSE `manual_message_appended`.
+   - `concept_confirmed` — Agent 6 detected the user's most recent
+     message as approval of the previously-quoted candidate.
+     `concept_candidate` is the carried-forward English string,
+     **byte-for-byte identical** to the prior turn's value (server
+     asserts this; mismatch → treated as Claude failure and
+     re-prompted). The backend behavior on this phase is governed
+     by step 3.
+
+   Like Agent 0a, the model is forbidden from jumping directly from
+   `gathering` to `concept_confirmed` — a `concept_confirmed` turn
+   must be preceded by an `awaiting_concept_confirmation` turn in
+   the same manual session, and a server-side guard demotes any
+   orphan `concept_confirmed` reply back to
+   `awaiting_concept_confirmation`.
+
+3. **On `phase=concept_confirmed`:** server enforces the
+   manual-attempt budget *before* dispatching anything. If
+   `manual_attempts >= MAX_MANUAL_ATTEMPTS` (= 5) the budget is
+   already exhausted by prior attempts; this should not happen
+   because the budget check in step 8 already triggered the
+   apology turn. Otherwise:
+   1. Set `illustrations.current_concept = concept_candidate`
+      (overwriting whatever value the auto loop left), update its
+      English source-of-truth column and (if `source_language !=
+      'en'`) update the source-language row in
+      `illustration_concept_translations`. **Stale rows in other
+      languages are NOT eagerly retranslated** — the existing
+      "show stale + refetch in background" path (§ 5.5) handles
+      them when a user with a non-source language visits the run.
+   2. Transition state to `MANUAL_GENERATING_PROMPTS`. Emit
+      `illustration_state`.
+   3. Call Agent 1 (`generate_prompts`, § 7.1 Call 1) with the
+      manual concept (verbatim, no edits), the **existing**
+      `style_guide` from the run, the existing `character_role`
+      / character config (§ 7.3.7), and the current
+      `manual_illustration_sessions.prompting_notes` value as the
+      optional `prompting_notes` input (NULL if the manual session
+      has not accumulated any yet). Agent 1's auto-pipeline
+      contract is unchanged — when invoked from the auto loop the
+      `prompting_notes` input is always NULL and Agent 1 has no
+      idea this is a manual cycle. When invoked here with non-NULL
+      notes, Agent 1 treats them as authoritative prompt-level
+      hints (see § 7.1 Call 1 and § 6A.2 rule #12).
+   4. Persist `current_prompts_json` and `current_workflow` (§ 5
+      `illustrations` columns).
+   5. Increment `manual_attempts` by 1. Transition state to
+      `MANUAL_RENDERING`. Emit `illustration_state`.
+   6. Dispatch one ComfyUI job (§ 7.2). Use the exact same workflow,
+      LoRA, and characters as the auto loop.
+   7. On RunPod success: store the image to
+      `OUTPUT_DIR/runs/<run_id>/manual_<scene_index>_<manual_attempts>.png`.
+      Do **NOT** overwrite `illustrations.image_path` yet — the
+      manual loop only writes to `image_path` on user confirmation
+      (step 7 below). Persist the new image's path on the
+      `manual_illustration_sessions` row as
+      `last_manual_image_path`, and persist
+      `last_agreed_concept` = the verbatim concept the user just
+      confirmed (so a later prompt-revision cycle in step 5 can
+      reference it without re-deriving it from the transcript).
+   8. Transition state back to `MANUAL_CHATTING`, **now in the
+      feedback-gathering sub-phase** (the server marks the
+      `manual_illustration_sessions` row's `phase` column
+      accordingly — see § 6A.6). Emit `illustration_state`. Emit
+      `manual_image_rendered` (§ 8.4 amendment) with `image_url`,
+      `manual_attempts`, and the static, backend-inserted "please
+      review" message i18n key (§ 6A.7 step 5) so the frontend can
+      render the image and the review prompt as two new bubbles in
+      the chat in the correct order.
+   9. **No Agent 2 evaluation runs.** The image is presented to
+      the user as-is. Agent 6 does not see it either — the user is
+      the only viewer (§ 6A.2 rule #8).
+   10. On RunPod failure (timeout / non-200 / corrupted image): treat
+       as a *consumed* manual attempt (do not retry implicitly).
+       Append an assistant chat bubble in the user's language
+       informing them the render failed and inviting them to
+       describe a different angle, then re-enter the
+       **concept-design** sub-phase of `MANUAL_CHATTING`. Emit
+       `illustration_state` and `manual_message_appended`. The
+       user retains `MAX_MANUAL_ATTEMPTS - manual_attempts`
+       remaining tries.
+
+#### 6A.4.2 Feedback-gathering sub-phase
+
+4. **User reviews the image and replies.** The sub-phase is now
+   `gathering_feedback`. The user's message is appended to
+   `manual_messages` and Agent 6 is invoked. In this sub-phase
+   Agent 6 replies with one of:
+   - `gathering_feedback` — feedback collection continues. The
+     model asks one focused question, probes for the user's
+     reaction to a key concept element if the user has not yet
+     mentioned it, and otherwise mirrors the user's observations
+     (§ 6A.2 rule #8). `concept_candidate` and `user_feedback` are
+     `null`. No state change. SSE `manual_message_appended`.
+   - `awaiting_feedback_confirmation` — Agent 6 judges the
+     conversation has covered the key elements (the user has
+     mentioned, or been asked about and replied on, the
+     load-bearing parts of the agreed concept) and asks a single
+     short closing question — *"Have you said everything you
+     wanted to say about the image? If yes, we can go for another
+     attempt."* (§ 6A.2 rule #9). `concept_candidate` and
+     `user_feedback` are `null`. No state change. SSE
+     `manual_message_appended`.
+   - `feedback_confirmed` — the user has affirmed feedback is
+     complete. `concept_candidate` and `user_feedback` are `null`
+     (the agent does not summarize the feedback; the server slices
+     it from the transcript — see step 5). The backend behavior on
+     this phase is governed by step 5.
+   - `restart_concept` — Agent 6 detected feedback drift
+     (§ 6A.2 rule #10) AND the user, on being asked, chose to
+     redesign rather than iterate. The backend behavior on this
+     phase is governed by step 6.
+   - `accepted` — the user is happy with the current image and
+     wants to keep it. See step 7.
+
+   Server-side guards (mirroring step 2):
+   - A `feedback_confirmed` reply must be immediately preceded by
+     an `awaiting_feedback_confirmation` reply from Agent 6 in the
+     same manual session, with at least one user turn in between
+     (the user's confirmation). Orphan `feedback_confirmed` is
+     demoted to `gathering_feedback`.
+   - An `accepted` reply must be preceded by at least one `image`
+     row in the manual transcript (you can't accept what hasn't
+     been shown). Otherwise it is demoted to `gathering_feedback`.
+   - A `concept_confirmed` reply received in the feedback sub-phase
+     is treated as a model bug and demoted to `gathering_feedback`
+     (the model must transition through `restart_concept` to leave
+     this sub-phase).
+
+5. **On `phase=feedback_confirmed`:** server dispatches a prompt
+   revision via the new Agent 7 (`manual_revise_prompts`, § 7.1
+   Call 7) instead of routing back through Agent 1. The exact
+   sequence:
+   1. Re-run the budget pre-check from step 3 (same semantics).
+   2. Slice the post-image user-message turns from
+      `manual_messages` — every `role='user'` row created **after**
+      the most recent `role='image'` row — and concatenate their
+      `content` fields into a single `user_feedback_text` blob
+      (with newline separators preserved). This is the raw
+      feedback handed to Agent 7; no agent paraphrasing happens
+      in between.
+   3. Transition state to `MANUAL_GENERATING_PROMPTS`. Emit
+      `illustration_state`.
+   4. Call Agent 7 (`manual_revise_prompts`, § 7.1 Call 7) with:
+      - `last_agreed_concept` —
+        `manual_illustration_sessions.last_agreed_concept` (the
+        verbatim concept the user confirmed before the most recent
+        image, see step 3.7).
+      - `user_feedback` — the `user_feedback_text` blob computed
+        in step 5.2.
+      - `last_positive_prompt` / `last_negative_prompt` — the
+        positive and negative prompts that produced the most recent
+        manual image (read from `current_prompts_json`).
+      - `prompting_notes` —
+        `manual_illustration_sessions.prompting_notes` (the
+        cumulative English memo curated by Agent 6 across this
+        manual session, § 6A.2 rule #12). NULL if Agent 6 has not
+        produced any notes yet. Agent 7 treats these as
+        authoritative prompt-level hints alongside the immediate
+        `user_feedback` (see § 7.1 Call 7).
+      - `style_guide`, `character_role`, character config — same
+        sources as Agent 1.
+   5. Persist Agent 7's revised prompts into
+      `current_prompts_json` (overwriting). The `workflow` field
+      is **not** re-decided here — Agent 7 reuses the same
+      `current_workflow` value (it cannot toggle between
+      `single-lora` and `no-lora`, because the cast shape is
+      fixed for this illustration).
+   6. Increment `manual_attempts` by 1. Transition state to
+      `MANUAL_RENDERING`. Emit `illustration_state`.
+   7. Dispatch one ComfyUI job (§ 7.2) with the revised prompts.
+   8. From here on follow steps 3.7 → 3.10 of the concept-design
+      sub-phase. On RunPod success, the sub-phase resets to
+      `gathering_feedback` (post-image) again, anchored on the
+      *same* `last_agreed_concept` — i.e. the concept does not
+      change; subsequent iterations of step 5 will pass the
+      **most recently used** positive+negative prompts to Agent 7
+      (not the originals), so each revision builds on the previous
+      attempt's prompts. On RunPod failure the sub-phase resets to
+      `gathering_feedback` and Agent 6 invites further iteration.
+
+6. **On `phase=restart_concept`:** server resets the manual session
+   to the concept-design sub-phase. No render is dispatched and
+   no Agent 7 call happens; `manual_attempts` is **not**
+   incremented (the drift exit is free).
+   1. Clear `last_agreed_concept` and `last_manual_image_path` on
+      `manual_illustration_sessions` (the previous concept and
+      its image are no longer the working baseline; they remain in
+      `manual_messages` for the transcript but are no longer the
+      thing being iterated on). **Do NOT clear `prompting_notes`**
+      — the cumulative prompt-engineering memo persists across a
+      concept restart on purpose (§ 6A.2 rule #12), because the
+      renderer's blind spots typically transfer to the fresh
+      concept (LoRA-character anatomy quirks, environment-tag
+      failure modes, etc.).
+   2. Persist Agent 6's reply (which is the natural-language
+      acknowledgement, "OK, let's design a fresh idea together")
+      as an assistant row. Emit `manual_message_appended`.
+   3. Mark the `manual_illustration_sessions` row's sub-phase as
+      `concept_design`. State stays at `MANUAL_CHATTING` (the
+      sub-phase is internal — there is no separate
+      `MANUAL_CONCEPT_DESIGN` state).
+   4. The next user turn re-enters step 2 of this section
+      (concept-design `gathering`).
+
+7. **On `phase=accepted`:** server promotes the last manual image to
+   the canonical illustration image.
+   1. Copy / rename `last_manual_image_path` to the canonical
+      `runs/<run_id>/scene_<scene_index>.png` (overwriting any
+      previous canonical file if one existed from an earlier auto
+      attempt). Set `illustrations.image_path` accordingly.
+   2. Transition `illustrations.state = COMPLETED`. Increment
+      `runs.completed_count` like a normal completion.
+   3. Emit `illustration_state` (COMPLETED), then
+      `illustration_completed` (carrying the canonical `image_url`)
+      — same payloads the auto loop would emit. The frontend's
+      existing logic replaces the chat overlay with the standard
+      completed card automatically (§ 9.1 amendment).
+   4. The `manual_illustration_sessions` row is retained
+      (read-only) for audit / debugging; no further writes happen
+      to it after `accepted`. The frontend hides the chat from
+      future views of this illustration.
+
+8. **Budget check on every Agent 6 turn.** Independently of the
+   `phase`, after each Agent 6 reply is persisted the server checks
+   `manual_attempts`. When `manual_attempts >= MAX_MANUAL_ATTEMPTS`
+   (i.e. all 5 attempts have been *consumed*) AND the latest reply
+   is not `accepted`:
+   1. Append a final assistant chat bubble containing the localized
+      apology message (§ 6A.7 step 6).
+   2. Transition `illustrations.state = FAILED` with
+      `error_message = "Manual attempts exhausted"` (English
+      sentinel; the UI does not render this — see § 8.6 below).
+   3. Increment `runs.failed_count`.
+   4. Emit `illustration_state` (FAILED), then
+      `illustration_failed`, then `illustration_manual_ended`
+      (§ 8.4) so the frontend knows to collapse the chat overlay
+      and re-render the standard FAILED card (the existing
+      "Túto ilustráciu sa nepodarilo vytvoriť." block, § 9.1).
+   5. POSTs to § 8.10 endpoints for this illustration now return
+      `409 Conflict`.
+9. **Cancellation.** Run cancellation (§ 8.5) checks the manual
+   path too: any illustration in a `MANUAL_*` state transitions
+   straight to `CANCELLED` on the next cancellation observation
+   point (we don't have a long-running async loop here, but the
+   POST handlers in § 8.10 each check the run's cancellation flag
+   before doing real work and return 409 if set).
+10. **User abandonment.** If the user navigates away from the run
+    while the illustration is `MANUAL_CHATTING`, nothing happens —
+    the state is durable. Returning to the page restores the chat
+    exactly via the snapshot (§ 8.4) and the user can continue or
+    ignore it. There is no idle timeout in MVP.
+
+### 6A.5 Feasibility envelope enforced by Agent 6
+
+Agent 6's prompt (`agents/manual_concept.md`) explicitly tells the
+model that any concept it confirms must satisfy ALL of the following.
+These bounds are the same envelope the simple ComfyUI workflow
+(§ 7.2) and the auto pipeline already obey; the manual flow does not
+introduce any *new* technical capabilities.
+
+- **No inpainting, no regional prompting.** Concepts must describe
+  a whole-canvas single scene, not "this corner has X and that corner
+  has Y".
+- **At most one humanoid.** Zero or one character (from the same
+  per-role LoRA set the run already uses — § 7.3.7), and no
+  background humans, no crowds, no secondary humanoids. If the user
+  proposes a second person, Agent 6 reframes to a single-character
+  scene.
+- **Companions are non-humanoid only.** Same rule as Agent 0a
+  (§ 7.1 Call 0a rule #8). The manual concept may keep the existing
+  companion, drop it, or substitute another non-humanoid one from
+  the brief's `companions` pool. It must not invent new companions
+  outside the pool.
+- **No consistent-environment promises.** The model must not commit
+  to a setting that depends on continuity with other illustrations
+  in the run (e.g. "the same kitchen as in scene 2"). Each manual
+  illustration is treated as an isolated scene.
+- **Single moment, depictable.** The concept must be a single
+  frozen action / pose / expression, mirroring § 7.3.4. No
+  "throughout the day" or "starts angry then smiles" composites.
+
+These rules are checked first by Agent 6's prompt (the model is
+expected to self-police) and additionally re-checked by the
+backend on every `awaiting_concept_confirmation` reply via a
+lightweight heuristic over `concept_candidate` text (counts of
+humanoid words, presence of "and then", presence of multiple
+distinct settings, etc.). On heuristic failure the server demotes
+the reply to `gathering`, replaces `reply` with a localized gentle
+nudge ("That's a fun direction — can we narrow it to a single
+moment with our hero and the cat?"), and lets the conversation
+continue. The heuristic is intentionally conservative: false
+positives are tolerable, false negatives would push infeasible
+concepts to ComfyUI and waste budget.
+
+**Application to Agent 7.** The same envelope applies to **Agent 7
+(`manual_revise_prompts`, § 7.1 Call 7)**. Even when the user's
+feedback nudges in an out-of-envelope direction ("can you add
+another character beside her?"), Agent 7 must refuse to translate
+that instruction into prompts and instead keep the revised
+prompts within envelope. Agent 7 cannot be used as a side channel
+to bypass the constraints Agent 6 already enforces upstream — the
+two agents share the same § 6A.5 envelope and the same § 7.3.6
+negative-prompt baseline. If a piece of user feedback can be
+honored within envelope, Agent 7 honors it; if not, Agent 7
+silently drops or reframes it while staying faithful to the
+agreed concept. (The user never directly sees Agent 7's reasoning;
+the next rendered image is the only feedback channel back to the
+user.)
+
+**Ethics envelope.** Independently of the technical envelope above,
+Agent 6 must politely decline — per § 6A.2 rule #11 — any request
+to depict imagery that is ethically out of bounds (sexualized
+minors, non-consensual sexual imagery, hateful content,
+identifiable real people in defamatory contexts, gore involving
+real-world tragedies, etc.). The list is non-exhaustive; the
+prompt instructs the model to use judgement and err on the side
+of refusal when in doubt. A refusal stays in the current
+sub-phase (concept design → `gathering`; feedback gathering →
+`gathering_feedback`) and offers a feasible alternative that
+preserves the user's underlying emotional intent. Agent 7 is also
+prompted to refuse any prompt-revision request that would
+encode such content, even if it slipped past Agent 6 upstream.
+
+### 6A.6 Data model additions
+
+#### `illustrations` (amended)
+
+Two new columns:
+
+| Column              | Type    | Notes                                                                          |
+|---------------------|---------|--------------------------------------------------------------------------------|
+| `manual_attempts`   | INTEGER | `DEFAULT 0`. Incremented each time a manual ComfyUI render starts.             |
+| `manual_state_json` | TEXT    | NULL until the manual flow is entered. Reserved for future per-flow metadata; in MVP the column is created but only stores `{}` so the migration is forward-compatible. |
+
+No other columns change. The existing `image_path` column continues
+to hold the canonical scene image; the manual loop only writes to
+it on `phase=accepted`.
+
+#### `manual_illustration_sessions` (new table)
+
+One row per illustration that has ever entered the manual flow.
+
+| Column                  | Type         | Notes                                                                                 |
+|-------------------------|--------------|---------------------------------------------------------------------------------------|
+| `id`                    | TEXT (UUID4) | Primary key.                                                                          |
+| `illustration_id`       | TEXT FK      | → `illustrations.id`, UNIQUE (1:1 with the illustration).                             |
+| `sub_phase`             | TEXT         | One of `concept_design` / `feedback_gathering`. `concept_design` on creation; flipped to `feedback_gathering` immediately after a successful manual render (§ 6A.4 step 3.8); flipped back to `concept_design` on `phase=restart_concept` (§ 6A.4 step 6) or on RunPod failure during a `concept_confirmed` dispatch. Used by § 8.10.1 to know which Agent 6 phase enum subset is valid for the next turn and by snapshots to restore the right UI affordances on reconnect. |
+| `last_manual_image_path`| TEXT NULL    | Relative path under `OUTPUT_DIR` of the most recent manual render that has not yet been promoted to the canonical `image_path`. NULL before the first render. Cleared on `phase=restart_concept`. |
+| `last_concept_candidate`| TEXT NULL    | The most recent `concept_candidate` returned by Agent 6 with `phase=awaiting_concept_confirmation`. Used by the server to assert verbatim handoff at `concept_confirmed` (§ 6A.2 rule #7). Reset to NULL after each `concept_confirmed` transition so a stale candidate cannot be re-confirmed. |
+| `last_agreed_concept`   | TEXT NULL    | The verbatim English concept the user most recently confirmed (i.e. the same string the next image was rendered from). Persisted on `concept_confirmed`; consumed as Agent 7's `last_agreed_concept` input during a subsequent `feedback_confirmed` dispatch. Cleared on `phase=restart_concept`. |
+| `prompting_notes`       | TEXT NULL    | Cumulative **English-only** prompt-engineering memo curated by Agent 6 across this manual session (§ 6A.2 rule #12). NULL until Agent 6 emits its first non-null `prompting_notes_update` (§ 7.1 Call 6). On every subsequent non-null update from Agent 6 the column is **fully overwritten** with the new value (no server-side merging). Consumed by Agent 1 on `concept_confirmed` dispatches and by Agent 7 on `feedback_confirmed` dispatches, as an optional `prompting_notes` input. **Persists across `phase=restart_concept`** (not cleared with `last_agreed_concept` / `last_manual_image_path`). Not surfaced in the UI. |
+| `created_at`            | DATETIME     |                                                                                       |
+| `updated_at`            | DATETIME     | Bumped on every Agent 6 turn and every render.                                         |
+
+#### `manual_messages` (new table)
+
+Mirrors `session_messages` for the chat session phase, but per
+illustration.
+
+| Column            | Type         | Notes                                                                                  |
+|-------------------|--------------|----------------------------------------------------------------------------------------|
+| `id`              | TEXT (UUID4) | Primary key.                                                                           |
+| `illustration_id` | TEXT FK      | → `illustrations.id`. Indexed.                                                         |
+| `role`            | TEXT         | `user` / `assistant` / `image`. The `image` role is a synthetic assistant-side message whose `content` is empty and whose `image_url` is the rendered manual attempt. Stored so reloads reproduce the bubble order exactly. |
+| `content`         | TEXT         | Empty for `role='image'`; the message text otherwise.                                  |
+| `image_url`       | TEXT NULL    | Set only for `role='image'`. Root-relative URL under `/static/...`.                    |
+| `manual_attempt_index` | INTEGER NULL | For `role='image'`, the 1-based attempt index (`1..MAX_MANUAL_ATTEMPTS`). NULL otherwise. |
+| `created_at`      | DATETIME     |                                                                                        |
+
+The frontend renders each row directly:
+
+- `role='user'` → right-aligned chat bubble in the user's color.
+- `role='assistant'` → left-aligned assistant bubble (the
+  `**bold**`-via-`#…#` syntax in the localized welcome string is
+  rendered with a `<strong>` span; see § 6A.7).
+- `role='image'` → full-width image bubble at the card's content
+  margin, with the static "review the image" assistant bubble
+  immediately after (also a separate `assistant`-role row).
+
+There is no truncation cap on `manual_messages` rows per
+illustration; the natural cap comes from `MAX_MANUAL_ATTEMPTS = 5`
+plus ~10 assistant turns per attempt = well under the
+`CHAT_MESSAGES_MAX_PER_SESSION` envelope. No explicit limit is
+enforced server-side beyond a generous safety cap of 200 rows per
+illustration (returns 409 after that — this should never trip in
+practice).
+
+### 6A.7 Localized strings (i18n)
+
+All assistant-authored "framing" copy lives as i18n keys, not in
+Agent 6's prompt or in the database. Agent 6 only authors the
+conversational replies. The static framing strings are inserted by
+the **backend** on the server side so they persist in
+`manual_messages` and round-trip via SSE snapshots; the frontend
+does not synthesize chat bubbles on its own.
+
+New keys under `illustration.manual` in each locale dictionary:
+
+1. **`illustration.manual.welcome`** — first assistant bubble at
+   step 1. The text contains exactly one bold span delimited by
+   `#...#` (so the JSON-safe form is plain text); a small renderer
+   on the frontend splits on `#` and wraps the inner segment in
+   `<strong>`. Required content (semantics — operator wording may
+   vary):
+
+   - English: *"The automatic image generation failed, but no
+     panic! We can work on it together by joining human and AI
+     skills. If you want to continue working on this illustration,
+     just #let me know about your own illustration concept#. I'll
+     tell you whether your idea is technically realistic, and we
+     can iterate together until we land on the final idea. Then
+     I'll translate it into the prompts that go to the image
+     generation AI. After we get the image, I'll guide you through
+     the next round. Do you want to try?"*
+   - Slovak and Czech: equivalent wording, with the same single
+     `#...#` bold span.
+
+2. **`illustration.manual.summary_intro`** — never sent as a
+   standalone bubble; Agent 6's `awaiting_concept_confirmation`
+   `reply` embeds it naturally ("So, just to make sure: …",
+   followed by the verbatim English concept text per § 6A.2 rule
+   #7). This is a nudge for the prompt, not a UI string. Still
+   listed here so the parity test (§ 11.3 / § 9.6.1) keeps the
+   three locales aligned on it (the prompt loads the
+   active-language value inline as authoring guidance — see
+   § 6A.8).
+
+3. **`illustration.manual.render_failed`** — assistant bubble
+   inserted at step 3.10 ("RunPod failure"). Short, apologetic,
+   invites the user to try a different angle.
+
+4. **`illustration.manual.budget_exhausted`** — final assistant
+   bubble at step 6.1: "I'm sorry, I've used up my creative tries
+   for this illustration. Sometimes the perfect image just won't
+   come, and that's okay. We can keep the rest of the story." or
+   equivalent. The wording must NOT be self-deprecating about the
+   technology — it stays warm and conversational.
+
+5. **`illustration.manual.review_prompt`** — assistant bubble
+   inserted by the backend immediately after every
+   `manual_image_rendered` event (§ 6A.4 step 3.8). This is the
+   bubble that opens the feedback-gathering sub-phase, so it
+   carries three responsibilities at once:
+   1. **Show the image as the user's responsibility.** The text
+      must say, in plain words, that **Agent 6 itself does not see
+      the rendered image** — in the auto pipeline an evaluator
+      agent inspected each render, but in the collaboration mode
+      the user is the only viewer. The user is therefore explicitly
+      asked to be the agent's eyes.
+   2. **Instruct the user to be concrete and specific.** Rather
+      than the generic "does it look good?", the bubble explicitly
+      asks the user to describe what is right and what is wrong on
+      the image in concrete visual terms — referencing the agreed
+      concept, especially its most load-bearing elements.
+   3. **Mention the escape hatches.** A one-line reminder that the
+      user can either confirm they want to keep the image as-is
+      (which ends the manual flow with success) or, if they want to
+      go in a fundamentally different direction, they can simply
+      say so and Agent 6 will help redesign the concept from
+      scratch.
+
+   English reference wording (semantics — exact phrasing may vary
+   across the three locales as long as all three points above are
+   preserved):
+   *"Here is the image. A quick heads-up: unlike in the fully
+   automatic mode, I don't actually see it — you do, and you're my
+   eyes. Take a moment to look it over and tell me, as
+   specifically as you can, what works and what doesn't. It helps
+   most when you compare it to the concept we agreed on — does
+   each important element really show up the way we meant it to?
+   If you're happy with the image as-is, just say so and we'll
+   keep it. If you'd rather discard this direction and design a
+   different concept together, that's fine too — just tell me."*
+   Same single-bubble length budget as the welcome message; no
+   `#...#` formatting in this one.
+
+6. **`illustration.manual.budget_remaining_hint`** — never shown
+   as a bubble; appended by the prompt loader to the active
+   transcript as authoring guidance for Agent 6 (so the model
+   knows how many attempts remain and can pace its assertiveness
+   accordingly).
+
+The chat UI text labels (header pill "Spoločná tvorba", the input
+placeholder, the disabled-while-rendering hint, etc.) live under
+`illustration.manual.ui.*` keys; they are not authored by Agent 6
+and are not persisted in `manual_messages`.
+
+### 6A.8 Agent prompt files (Agents 6 and 7)
+
+Two files in `backend/app/agents/` back the manual flow. The startup
+loader fails fast if either is missing or empty, same as the
+others (§ 7.4).
+
+#### 6A.8.1 `manual_concept.md` (Agent 6)
+
+The file structure mirrors the existing agents:
+
+1. Role statement ("You are Agent 6, the co-illustrator …"),
+   explicitly framing the agent's **dual responsibility**: it
+   collaborates with the user on a concept *before* each render
+   and gathers feedback on the rendered image *after* each render.
+2. The §§ 6A.2 design philosophy rules, verbatim, with examples of
+   on-tone and off-tone replies. Special emphasis on:
+   - **Rule #7 (verbatim concept handoff).** The model must
+     finalize the English concept wording before it asks for
+     confirmation, embed that exact English text inside its
+     summary `reply` (typically as a quoted block), and emit the
+     same string in `concept_candidate`. On `concept_confirmed`
+     the `concept_candidate` field must be byte-for-byte
+     identical to the prior turn's value — no last-second edits.
+   - **Rule #8 (user-driven feedback).** The model is reminded
+     that it cannot see the rendered image in this mode; it
+     collects detailed visual feedback from the user instead of
+     proposing new concepts. The probing-for-key-elements
+     pattern is illustrated with examples.
+   - **Rule #9 (no feedback summarization).** Examples make clear
+     that closing the feedback phase is a single short question,
+     not a paragraph-long restatement of the user's words.
+   - **Rule #10 (drift detection).** Examples show how the model
+     phrases the choice between iterating on the agreed concept
+     vs. designing a fresh one.
+   - **Rule #11 (polite refusal).** Examples of declining
+     technically out-of-envelope and ethically out-of-bounds
+     requests while staying warm and offering alternatives.
+   - **Rule #12 (cumulative prompt-engineering notes).** The
+     prompt instructs Agent 6 on the *notes discipline*:
+     - The memo is **English-only**, regardless of the run's
+       `source_language` (it is consumed by Agent 1 / Agent 7,
+       which operate in English).
+     - The memo captures **renderer weaknesses and prompt-level
+       countermeasures**, NOT user preferences, NOT aesthetic
+       taste, NOT concept-level edits. Examples of good notes:
+       "the robot keeps rendering as mist or ghostly figure;
+       needs explicit `mecha, metallic plating, glowing eyes,
+       hard edges` in positive and `ghost, mist, ethereal,
+       humanoid` in negative"; "the cat companion drifts to
+       background when not anchored; force `on her shoulder,
+       close to face` positional tags". Examples of bad notes
+       (must NOT be written): "user wants more emotion in the
+       face" (concept-level), "user prefers warmer colors"
+       (preference), "we agreed the setting is a forest"
+       (concept).
+     - The memo is updated via the optional
+       `prompting_notes_update` output field (§ 7.1 Call 6).
+       When emitted, it **fully replaces** the previous notes —
+       Agent 6 is responsible for folding still-relevant prior
+       lessons into the new value. Omitting the field (or
+       emitting `null`) leaves the prior notes untouched.
+     - Agent 6 should consider updating the notes on any turn
+       where the latest exchange yielded a useful prompt-level
+       lesson — typically (but not only) during
+       `gathering_feedback`, `awaiting_feedback_confirmation`,
+       and `feedback_confirmed`. Updates may also be emitted on
+       `restart_concept` turns when the just-discarded concept
+       revealed transferable renderer blind spots.
+     - The memo is never surfaced to the user; Agent 6 must not
+       reference it in `reply` prose.
+3. The §§ 6A.5 feasibility envelope, verbatim, plus examples of
+   how to reframe common infeasible requests ("two characters
+   hugging" → "our hero hugging the cat", etc.).
+4. The phase machine in § 6A.4: which `phase` values are valid in
+   each sub-phase (concept-design vs feedback-gathering), the
+   server-side guard rules (orphan `concept_confirmed`, orphan
+   `feedback_confirmed`, mistimed `accepted`, mistimed
+   `concept_confirmed` in the feedback sub-phase, etc.). The
+   prompt receives the **current sub-phase** as part of the input
+   payload (§ 7.1 Call 6) so the model knows which subset of
+   phases is legal on the upcoming turn.
+5. The output schema (see § 7.1 Call 6 below).
+6. The persona-fragment shared with Agent 0a / 0b / 4 (copy-pasted
+   into the file), so the voice stays consistent across the
+   chat → story → manual fallback arc.
+
+The prompt also embeds the active-language welcome / review /
+budget-exhausted strings (§ 6A.7) as authoring context — so the
+model's `reply` prose can flow naturally into and out of them
+without the user feeling a tonal seam.
+
+#### 6A.8.2 `manual_revise_prompts.md` (Agent 7)
+
+A new file `backend/app/agents/manual_revise_prompts.md` joins the
+existing prompt files. Structure:
+
+1. Role statement ("You are Agent 7, the prompt-revision specialist
+   for the collaboration mode …"). The agent is told it lives
+   *outside* the chat — it never speaks to the user and never sees
+   the chat transcript. It receives a single JSON payload with the
+   inputs in § 7.1 Call 7 and emits a single JSON object with the
+   revised positive/negative prompts.
+2. The agent's four (and only four) information sources for
+   revision decisions:
+   1. The user feedback blob (`user_feedback` input) — the verbatim
+      post-image user messages, in the user's source language.
+   2. The cumulative prompt-engineering memo
+      (`prompting_notes` input) — English-only, curated by Agent 6
+      across the manual session (§ 6A.2 rule #12, § 7.1 Call 6).
+      When present, the prompt treats this memo as **authoritative
+      prompt-level guidance** on this illustration's known
+      renderer blind spots — it accumulates lessons from every
+      prior attempt in the manual session, including concepts
+      that were later discarded via `restart_concept`. When the
+      memo conflicts with a fresh user-feedback turn the memo
+      wins on prompt-level mechanics (tag choices, negative-tag
+      placement) and the user feedback wins on what to depict
+      this attempt; both must coexist in the revised prompt.
+      When the memo is NULL, Agent 7 falls back to user feedback
+      alone, exactly as today.
+   3. Its own Danbooru-tag / Illustrious-XL / MHA-LoRA expertise
+      (§ 7.3.1, § 7.3.6, § 7.3.10) — copy-pasted into the file the
+      same way Agent 3 (`revise_prompts.md`) carries it.
+   4. The shared cross-agent constraints — § 6A.5 feasibility
+      envelope and the § 7.3.6 negative-prompt baseline. The
+      prompt is explicit that **Agent 7 cannot be used to bypass
+      those constraints**: if the user's feedback nudges
+      out-of-envelope, Agent 7 silently keeps the prompts within
+      envelope.
+3. Hard rules carried over from Agent 3 (`revise_prompts.md`):
+   the Danbooru tag discipline, the unchanged-workflow rule
+   (Agent 7 does not toggle `single-lora` ↔ `no-lora`), the
+   character LoRA trigger tags from `character_config.json`, etc.
+4. The output schema (see § 7.1 Call 7 below).
+5. The reminder that the only output is a single JSON object —
+   no Markdown fences, no prefatory text, no commentary outside
+   the JSON.
+
+### 6A.9 Manual regeneration (user-initiated)
+
+Once an illustration reaches `COMPLETED` the user may still be unhappy
+with the result and want to redo just that one image without
+re-running the whole pipeline. A kebab menu (⋮) in the
+`IllustrationCard` header exposes a single action — **Regenerate
+image** — that drops the user back into the § 6A manual chat for that
+illustration only.
+
+**Backend endpoint.** `POST /api/illustrations/{id}/regenerate`
+(returns `ManualSessionResponse`, same shape as the other § 6A
+endpoints). Implemented by `ManualService.start_regeneration`:
+
+| Field on the illustration | Effect of regenerate |
+| --- | --- |
+| `state` | `COMPLETED → MANUAL_CHATTING`. |
+| `image_path` / `image_url` | **Preserved** — used as the fallback the user can revert to via the chat's X button. |
+| `manual_attempts` | **Not reset.** The 5-attempt budget is cumulative across regenerations; if the user has already used 3 manual attempts on a prior pass, they have 2 left. |
+
+On the manual session row:
+
+| Column | Effect |
+| --- | --- |
+| `sub_phase` | Reset to `concept_design`. |
+| `last_concept_candidate` | Cleared. |
+| `last_agreed_concept` | Cleared. |
+| `last_manual_image_path` | Cleared. |
+| `prompting_notes` | **Preserved** — the cumulative English memo carries over. |
+
+Existing `manual_messages` rows are **also preserved**. A new
+assistant bubble (`MANUAL_WELCOME_REGENERATE`, see § 6A.7) is appended
+to the transcript so Agent 6 sees both the prior conversation and the
+fresh prompt for the next iteration.
+
+The owning `runs` row is **not** touched. The run may already be
+`COMPLETED` or `FAILED`; `_maybe_finalize_run` is a no-op on terminal
+runs, so the manual loop runs independently.
+
+**Preconditions** (raise `409` otherwise):
+- `illustration.state == COMPLETED` — else `INVALID_STATE`.
+- `illustration.manual_attempts < 5` — else `BUDGET_EXHAUSTED`.
+- The owning run is not `CANCELLED` — else `RUN_CANCELLED`.
+
+**SSE events emitted** (in this order):
+1. `illustration_state` with `state=MANUAL_CHATTING`.
+2. `illustration_manual_started` with the welcome message payload
+   and `reason: "regeneration"` (the previously implicit `"auto"`
+   reason is the default; this field is forward-looking and the
+   current frontend ignores it).
+
+**Frontend UX.**
+- The kebab menu is visible whenever the card can be regenerated
+  (`COMPLETED` and budget left) OR has an active session that may be
+  hidden/shown (`MANUAL_*` or `FAILED` with budget left).
+- The single menu item "Regenerate image" is disabled (greyed out)
+  when the cumulative budget is exhausted.
+- The chat panel header gains an X close button. Clicking it hides
+  the chat and flips the card back to the previous image (if any) or
+  the failure placeholder. The toggle lives in client memory only.
+- **Default view-mode rule:** whenever `illustration.image_url` is
+  set, the card defaults to showing the image — even while
+  `state ∈ MANUAL_*`. This makes regen in-progress refresh-safe: a
+  page refresh during a regen returns to the previous image until
+  the user re-opens the chat via the kebab. Once the new image is
+  accepted, `illustration_completed` automatically hides the chat
+  toggle so the card flips to the fresh image.
+- Clicking "Regenerate image" while the card is already in a
+  `MANUAL_*` state does **not** POST again — it just reveals the
+  in-flight chat panel.
+
+### 6A.10 Interactive image cards and explicit acceptance
+
+When a § 6A manual render completes, the chat displays the produced
+image as an **interactive `ManualImageCard`** (a mini illustration
+card) rather than a raw `<img>` followed by a canned "describe what
+you see" assistant bubble. The card has three sections:
+
+- **Header.** Left: attempt counter (`Pokus N/5`). Right: two hover/
+  focus/click dropdown icons — one for the **concept** used to render
+  this attempt, one for the **positive + negative prompts** Agent 1
+  (or Agent 7) emitted. Icons are disabled when the row's per-attempt
+  provenance is `NULL` (legacy rows from before this feature).
+- **Image.** Click-through anchor opening the full-size image, same
+  alt text as before.
+- **Footer (two variants).**
+  - **Variant 1 — *choose*:** rendered only when this image is the
+    **latest** attempt AND no non-image message has been appended
+    after it AND the 5-attempt budget is not exhausted AND the
+    illustration is still in a `MANUAL_*` state. Shows two ghost
+    buttons: **Accept** (deterministic promotion) and **Iterate**
+    (appends the iterate-prompt bubble and unlocks input).
+  - **Variant 2 — *use*:** rendered for older attempts (any image
+    with non-image messages after it) and for the latest attempt
+    when the budget is exhausted. Shows a single **Use** ghost
+    button that promotes that specific attempt's image to canonical.
+  - No footer is rendered when the illustration is already
+    `COMPLETED` (defensive — the chat is hidden in that state).
+
+**Input lock UX.** While variant 1 is active for the latest image,
+the text input and Send button are disabled and a small italic hint
+("Choose Accept or Iterate above to continue.") sits above the
+input. Clicking **Iterate** appends an assistant bubble — the
+**MANUAL_ITERATE_PROMPT** localized text (see § 6A.7 below) — which
+breaks variant 1 (a non-image message now follows the latest image)
+and unlocks the input. Variant 1 also unlocks if the user otherwise
+types feedback that gets posted through the regular send path.
+
+**Removed:** `_dispatch_render` no longer auto-emits the
+**MANUAL_REVIEW_PROMPT** ("I can't see — you're my eyes — tell me
+what to change…") after every render. That nudge was redundant with
+the card footer and noisy when users already knew the next step.
+Older transcripts retain the historical review bubbles as inert
+content; they remain rendered exactly like any other assistant row.
+
+**New per-attempt persistence.** `manual_messages` gains three
+nullable columns populated only for `role='image'` rows:
+
+| Column | Source | Notes |
+| --- | --- | --- |
+| `concept_used` | `last_agreed_concept` from the manual session at render time. | The concept Agent 6 / Agent 7 just rendered against. |
+| `positive_prompt` | `positive` field of `current_prompts_json` (Agent 1 or Agent 7). | Identical to what ComfyUI received. |
+| `negative_prompt` | `negative` field of `current_prompts_json`. | Identical to what ComfyUI received. |
+
+Legacy rows from before the migration keep `NULL` for all three.
+The frontend renders the popover icons in a disabled state when any
+field it needs is `NULL`. The `manual_image_rendered` SSE payload
+carries the same three fields and **no longer carries
+`review_message`** (since no canned bubble is emitted).
+
+**New endpoints.**
+
+`POST /api/illustrations/{id}/accept` — body
+`{ "manual_attempt_index": K }` (≥ 1). Promotes attempt K's
+deterministic temp image (`runs/{run_id}/manual_{scene}_{K}.png`) to
+the canonical `runs/{run_id}/scene_{scene}.png`. This **bypasses
+Agent 6 entirely** — deterministic server-side promotion, no Claude
+call. Implemented by `ManualService.accept_attempt`:
+
+- Preconditions (raise 4xx via `ManualServiceError`):
+  - `state ∈ {MANUAL_CHATTING, MANUAL_GENERATING_PROMPTS, MANUAL_RENDERING, FAILED}` → else `INVALID_STATE` (409). `FAILED` is allowed for **post-exhaustion recovery** (see below).
+  - Run not cancelled → else `RUN_CANCELLED` (409).
+  - An image-row for `(illustration_id, manual_attempt_index=K)`
+    exists → else `ATTEMPT_NOT_FOUND` (404).
+  - The deterministic source file exists on disk → else
+    `ATTEMPT_FILE_MISSING` (410).
+- Effects: copy temp → canonical, set `state=COMPLETED`,
+  `image_path=canonical`, clear any prior `error_message` (FAILED
+  recovery), and update `current_concept` to the accepted row's
+  `concept_used` (so the canonical IllustrationCard's ConceptPopover
+  shows the right text). Emit the same SSE trio as the existing
+  Agent-6 acceptance path: `illustration_state`,
+  `illustration_completed`, `illustration_manual_ended` with
+  `outcome="completed"`. Then `_maybe_finalize_run`.
+
+**Post-exhaustion recovery.** Once the user spends the 5-attempt
+manual budget without ever clicking Accept, the illustration
+transitions to `FAILED` (via `_exhaust`, § 6A.7) and the chat is
+hidden by default behind the failed placeholder. The frontend
+nonetheless keeps the kebab menu's **Show chat** option enabled
+whenever a manual session exists and the illustration is not
+`COMPLETED` — explicitly including the `FAILED`-exhausted case.
+Reopening the chat reveals the full transcript with every historical
+`ManualImageCard` showing footer variant *use*; clicking **Use** on
+any prior attempt calls `POST /accept`, which (a) accepts the
+`FAILED` state precondition, (b) promotes the chosen attempt's
+deterministic temp image to canonical, and (c) clears
+`error_message`. The illustration ends up in `COMPLETED` with the
+chosen image. (See § 9.1 Screen B — *Recovery after manual
+exhaustion*.)
+
+The legacy Agent-6 acceptance path (`PHASE_ACCEPTED`) is preserved
+as a thin wrapper that resolves "latest attempt" and calls
+`accept_attempt(K)` — users who type "yes, accept" still work.
+
+`POST /api/illustrations/{id}/manual/iterate` — no body. Appends one
+assistant bubble with the **MANUAL_ITERATE_PROMPT** localized text
+to the transcript. Implemented by
+`ManualService.append_iterate_prompt`. Idempotent: if the latest
+manual message is already the iterate-prompt bubble, returns the
+current state without re-appending. State machine is unaffected
+(sub_phase remains `feedback_gathering`).
+
+**MANUAL_ITERATE_PROMPT (replaces MANUAL_REVIEW_PROMPT).** Localized
+constant in `backend/app/constants.py`:
+
+- **sk:** "Popíš tak detailne ako vieš, čo je s obrázkom zle a v čom
+  sa odlišuje od konceptu, na ktorom sme sa dohodli. Ja tento
+  obrázok nevidím — si moje oči. Čím lepší bude tvoj popis, tým
+  väčšia bude pravdepodobnosť, že sa spoločnými silami dopracujeme
+  k jeho požadovanej podobe."
+- **cs:** Czech translation of the same meaning.
+- **en:** "Describe in as much detail as you can what's wrong with
+  the image and how it differs from the concept we agreed on. I
+  can't see this image — you are my eyes. The better your
+  description, the higher the chance that we'll work our way
+  together to the version you want."
+
+**Agent 6 prompt addendum (defense-in-depth).** The
+`backend/app/agents/manual_concept.md` system prompt notes that
+between an `[image rendered: K]` turn and the next user turn there
+is no longer a canned "describe what's wrong" assistant bubble; if
+the user clicks the Accept button in the UI, the server promotes
+without invoking Agent 6 at all (and may show a `[user accepted
+attempt K]` marker in future transcripts — Agent 6 must treat that
+as terminal and emit no further reply).
+
+---
+
 ## 7. External Service Contracts
 
-### 7.1 Anthropic Messages API (7 distinct calls)
+### 7.1 Anthropic Messages API (9 distinct calls)
 
 All calls use `claude-sonnet-4-6`. Each agent's full system prompt lives
 in a Markdown file under `backend/app/agents/` and is loaded at startup
@@ -659,10 +1737,14 @@ by `services/claude.py` (see § 7.4). The Pydantic schemas below are the
 binding wire contracts; the prose in each agent's `.md` file must produce
 output that validates against the corresponding schema.
 
-Strict JSON-only output is enforced for **Calls 0b through 5** via the
-system prompt; **Call 0a (chat) returns a JSON envelope whose `reply`
-field is free-form prose in the active user language** — see Call 0a
-below. Every JSON response is validated with Pydantic, with up to
+Strict JSON-only output is enforced for **Calls 0b through 5 and Call 7**
+via the system prompt; **Call 0a (chat) returns a JSON envelope whose
+`reply` field is free-form prose in the active user language** — see
+Call 0a below. **Call 6 (manual_concept)** follows the same
+envelope-with-prose pattern as Call 0a — see § 7.1 Call 6 and § 6A.
+**Call 7 (manual_revise_prompts)** is strict-JSON like Agents 1 and 3:
+it emits only a `positive`/`negative` prompt pair and never produces
+user-facing prose. Every JSON response is validated with Pydantic, with up to
 `CLAUDE_JSON_RETRY` (= 2) re-prompts on parse failure before treating
 it as an error.
 
@@ -968,11 +2050,34 @@ hard rules above is treated as a Claude failure (`STORY_BUILD_FAILED`).
 **Input:** `current_concept` (English — single source of truth),
 `style_guide`, `character_role` (`male` / `female` / `mother` / `null` —
 when `null`, the agent treats the illustration as character-less; see
-rule below), and the optional `companion` (`{ description, interaction }
-| null`) attached to the illustration. When `companion` is non-null the
-agent must incorporate it per § 7.3.10 (companion prompting guidance)
-and apply the conditional adjustments to the negative baseline
-described in § 7.3.6.
+rule below), the optional `companion` (`{ description, interaction }
+| null`) attached to the illustration, and the optional
+`prompting_notes: string | null` — an English-only cumulative
+prompt-engineering memo from the collaboration mode (§ 6A.2 rule #12).
+When `companion` is non-null the agent must incorporate it per § 7.3.10
+(companion prompting guidance) and apply the conditional adjustments to
+the negative baseline described in § 7.3.6.
+
+`prompting_notes` semantics:
+
+- In the **auto pipeline** (§ 6 loops, Step 0 → Step 4 dispatches),
+  `prompting_notes` is always `null` — Agent 1 behaves exactly as it
+  did before this field existed.
+- In the **collaboration mode** (§ 6A.4 step 3.3, `concept_confirmed`
+  dispatch), the server passes the current
+  `manual_illustration_sessions.prompting_notes` value (null until
+  Agent 6 emits its first update). When non-null, Agent 1 treats the
+  memo as **authoritative prompt-level guidance** on this
+  illustration's known renderer blind spots (e.g. tags that have
+  worked or failed on this character / environment in prior manual
+  attempts, including across `restart_concept` boundaries) and
+  reflects those lessons in `positive` / `negative` without restating
+  them. The memo does not change the concept — it only changes how
+  the same concept is encoded into prompts.
+
+The `prompting_notes` input is optional in both schema and runtime —
+omitting it or passing `null` is identical from Agent 1's
+perspective.
 
 **Output schema:**
 ```json
@@ -1288,6 +2393,351 @@ text changes again later (Agent 4 rewrite), the next read in that
 language detects the stale `source_hash` and triggers another Agent 5
 call (§ 5.5).
 
+#### Call 6 — `manual_concept` (Agent 6, "the co-illustrator")
+
+**Purpose:** Drive the semi-automatic manual chat flow described in
+§ 6A. The agent talks with the user in the run's `source_language`
+and operates in one of two sub-phases (§ 6A.4):
+
+1. **Concept-design sub-phase** — collaboratively design a feasible
+   illustration concept that fits the envelope in § 6A.5 and finalize
+   its **verbatim English wording** *before* asking for confirmation
+   (§ 6A.2 rule #7).
+2. **Feedback-gathering sub-phase** — after a render, elicit
+   detailed visual feedback from the user (Agent 6 itself does not
+   see the rendered image); detect drift away from the agreed
+   concept; close the phase with a single short confirmation
+   question (§ 6A.2 rules #8–#10).
+
+**Input (to Claude):** a JSON user turn containing
+- `sub_phase` — `"concept_design"` or `"feedback_gathering"`. The
+  server reads it from `manual_illustration_sessions.sub_phase`
+  (§ 6A.6) and includes it in every call. The prompt's phase
+  machine (§ 6A.8.1 step 4) tells the model which `phase` enum
+  subset is legal for the upcoming reply.
+- `style_guide` — the run's existing `style_guide` (§ 5 `runs`).
+- `character_role` — the illustration's existing role (drives the
+  per-role LoRA / character vocabulary the model may rely on).
+- `companions_pool` — the same brief-level pool used by Agent 4
+  (§ 7.1 Call 4); Agent 6 may keep / drop / substitute companions
+  but never invent new ones.
+- `initial_concept` — the illustration's original concept text
+  (English source). Agent 6 may use it as a starting point or
+  deliberately depart from it; the user is in charge.
+- `last_failure_verdict` — the most recent Agent 2 verdict from
+  the auto loop, if any. Helps Agent 6 understand what failed and
+  steer away from the same failure mode (without revealing the
+  reasoning to the user — see § 6A.2 rule #5).
+- `manual_attempts_consumed` — integer, `0..MAX_MANUAL_ATTEMPTS`.
+- `manual_attempts_remaining` — convenience field; the prompt uses
+  this to pace assertiveness (more remaining → more room to
+  iterate; fewer remaining → more decisive recap and confirmation
+  ask).
+- `last_concept_candidate` — the most recent `concept_candidate`
+  Agent 6 itself proposed with `phase=awaiting_concept_confirmation`,
+  if any. Used by the model to recognize a user confirmation
+  referring to it; used by the server to assert the verbatim
+  invariant at `concept_confirmed`.
+- `last_agreed_concept` — the verbatim English concept the user
+  most recently confirmed (i.e. the one the most recent image was
+  rendered from). Non-null only in the `feedback_gathering`
+  sub-phase. The model uses it to identify the load-bearing
+  concept elements it should probe the user about.
+- `prompting_notes` — the current value of
+  `manual_illustration_sessions.prompting_notes` (English-only
+  cumulative prompt-engineering memo, § 6A.2 rule #12). NULL on
+  the first Agent 6 call of the session and on every subsequent
+  call until Agent 6 itself populates it via
+  `prompting_notes_update`. The server simply round-trips
+  whatever value is currently stored — it does not edit, merge,
+  or summarize. Persists across `phase=restart_concept`.
+
+And the prior `manual_messages` transcript (excluding `image`-role
+rows, which the model receives as a sentinel string
+`"[image rendered: attempt K]"` in the assistant slot — Claude
+cannot consume images here, and the actual image is for the user,
+not the model).
+
+**Output schema:**
+```json
+{
+  "reply": "string (assistant chat turn, free-form prose, in source_language; empty string allowed only on phase='accepted', mirroring Agent 0a)",
+  "phase":
+      "gathering"
+    | "awaiting_concept_confirmation"
+    | "concept_confirmed"
+    | "gathering_feedback"
+    | "awaiting_feedback_confirmation"
+    | "feedback_confirmed"
+    | "restart_concept"
+    | "accepted",
+  "concept_candidate": "string (English; verbatim canonical concept the user is being asked to confirm or is confirming) | null",
+  "prompting_notes_update": "string (English-only; full replacement of manual_illustration_sessions.prompting_notes) | null"
+}
+```
+
+The four "structured outputs" the agent can attach to a turn
+(per the user-facing design doc) are therefore (a) `concept_candidate`
+populated on `awaiting_concept_confirmation` / `concept_confirmed`,
+(b) the `feedback_confirmed` flag itself (which tells the server to
+slice the post-image user-message transcript and ship it to Agent 7
+— Agent 6 does not paraphrase the feedback, per § 6A.2 rule #9),
+(c) the `accepted` flag, and (d) the `prompting_notes_update` memo
+(§ 6A.2 rule #12). All four are independently optional from turn
+to turn; most turns will carry only `reply` and a "still gathering"
+`phase`.
+
+**`prompting_notes_update` semantics:**
+
+- The field is the **full replacement value** for
+  `manual_illustration_sessions.prompting_notes`. The server does
+  not merge old + new — Agent 6 is responsible for folding any
+  still-relevant prior lessons into the new memo (the model
+  receives the prior value as `prompting_notes` in the input, so
+  it can re-emit the old text plus new additions).
+- Omitting the field or emitting `null` leaves the stored notes
+  untouched (the field defaults to `null` when missing).
+- The value MUST be **English**, regardless of the run's
+  `source_language` — these notes feed Agent 1 and Agent 7, which
+  consume English. The server treats this as a hard validation
+  rule on the field; on a non-English heuristic violation the
+  server re-prompts up to `CLAUDE_JSON_RETRY` times before
+  storing.
+- The value MUST be about **prompt-level mechanics** (renderer
+  weaknesses and tag-level countermeasures), NOT user preferences
+  or concept content. The prompt enforces this via examples
+  (§ 6A.8.1); the server does not attempt to semantically
+  validate the contents.
+- Updates are legal on any `phase`. They are explicitly **not
+  cleared** on `phase=restart_concept` (the server preserves the
+  notes across concept restarts — § 6A.2 rule #12, § 6A.4 step
+  6.1).
+
+`phase` semantics:
+
+**Concept-design sub-phase (`sub_phase = "concept_design"`):**
+
+- `gathering` — still negotiating; `reply` carries the next assistant
+  turn (question, suggestion, gentle reframe). `concept_candidate`
+  is `null`.
+- `awaiting_concept_confirmation` — the agent has a candidate
+  concept it considers feasible per § 6A.5. `reply` quotes the
+  verbatim English concept inline (§ 6A.2 rule #7) and explicitly
+  asks for confirmation in the user's `source_language`.
+  `concept_candidate` is the English canonical form (suitable for
+  Agent 1), and **must be the exact substring quoted inside `reply`**.
+- `concept_confirmed` — the latest user turn is approval of the
+  previously-proposed `concept_candidate`. `concept_candidate` is
+  the carried-forward English string, **byte-for-byte identical to
+  the prior `awaiting_concept_confirmation` turn's
+  `concept_candidate`** (server asserts this; mismatch → Claude
+  failure and re-prompt). `reply` is short — a one-line
+  acknowledgement that we will now render the image.
+
+**Feedback-gathering sub-phase (`sub_phase = "feedback_gathering"`):**
+
+- `gathering_feedback` — feedback collection continues. `reply` is
+  the next assistant turn (typically one focused question or a
+  probe about a key concept element). `concept_candidate` is `null`.
+- `awaiting_feedback_confirmation` — the agent judges feedback is
+  complete; `reply` is a single short closing question
+  ("Have you said everything you wanted to say about the image?").
+  `concept_candidate` is `null`.
+- `feedback_confirmed` — the latest user turn affirms feedback is
+  complete. `concept_candidate` is `null`. `reply` is a short
+  acknowledgement that the next attempt is starting. The server
+  slices the post-image user-message transcript into Agent 7's
+  `user_feedback` input (§ 7.1 Call 7); Agent 6 does **not**
+  paraphrase or summarize.
+- `restart_concept` — drift exit (§ 6A.2 rule #10). The previous
+  Agent 6 turn must have been a drift question ("…would you like
+  to keep iterating, or design a fresh concept together?") and the
+  user's reply selects the redesign option. `concept_candidate` is
+  `null`. `reply` is a short cheerful acknowledgement ("OK, let's
+  design a fresh idea together"). On this phase the server resets
+  the sub-phase to `concept_design` and clears `last_agreed_concept`
+  and `last_manual_image_path` on the session row.
+
+**Either sub-phase (post-image only):**
+
+- `accepted` — the latest user turn is approval of the most recent
+  rendered image. `concept_candidate` is `null`. `reply` is a short
+  closing acknowledgement. Only legal when at least one `image`
+  row exists in the manual transcript (server guard demotes
+  otherwise to `gathering_feedback`).
+
+Hard rules enforced by the prompt and re-checked server-side:
+
+1. **Sub-phase ↔ phase compatibility.** The server rejects (demotes
+   to a safe phase) any reply whose `phase` is not legal in the
+   active `sub_phase`. Specifically: `concept_confirmed` /
+   `awaiting_concept_confirmation` are demoted to
+   `gathering_feedback` if received in feedback sub-phase;
+   `feedback_confirmed` / `awaiting_feedback_confirmation` /
+   `restart_concept` are demoted to `gathering` if received in
+   concept-design sub-phase.
+2. **Feasibility envelope.** On every
+   `awaiting_concept_confirmation` reply, `concept_candidate` must
+   satisfy § 6A.5. The server runs the conservative heuristic from
+   § 6A.5 and demotes the reply to `gathering` on failure.
+3. **Verbatim concept handoff.** On every `concept_confirmed`
+   reply, `concept_candidate` must exactly equal the
+   `last_concept_candidate` value persisted from the prior
+   `awaiting_concept_confirmation` turn (no trailing whitespace
+   tolerance — the strings must be byte-identical). On every
+   `awaiting_concept_confirmation` reply, the server verifies the
+   `concept_candidate` text appears verbatim as a substring of
+   `reply` (so the user really did see what they are being asked
+   to confirm). A failure is treated as a Claude failure and
+   re-prompted up to `CLAUDE_JSON_RETRY` times.
+4. **No phase shortcuts.** Server demotes a `concept_confirmed`
+   turn with no prior `awaiting_concept_confirmation` in the
+   manual session to `awaiting_concept_confirmation`. Server
+   demotes a `feedback_confirmed` turn with no prior
+   `awaiting_feedback_confirmation` to `gathering_feedback`.
+   Server demotes an `accepted` turn that is not immediately
+   preceded by an `image` row in the transcript to
+   `gathering_feedback`.
+5. **No feedback summarization.** The prompt explicitly forbids
+   summarizing user feedback in `reply` on `feedback_confirmed`.
+   `reply` on `feedback_confirmed` is a short acknowledgement
+   only; the actual feedback content is sliced from the transcript
+   by the server.
+6. **Polite refusal of out-of-bounds requests** (§ 6A.2 rule #11
+   and § 6A.5 "Ethics envelope"). When triggered, the model
+   stays in its current sub-phase: `gathering` (concept design)
+   or `gathering_feedback` (feedback). The refusal text appears
+   in `reply`; no structured output (concept_candidate, etc.) is
+   emitted on a refusal turn.
+7. **Voice continuity.** The persona-fragment shared with Agents
+   0a / 0b / 4 applies. Agent 6's prose must read as the same voice
+   the user heard during the initial chat.
+8. **Tone.** § 6A.2 rules govern all replies. The prompt includes
+   explicit positive and negative examples.
+9. **Localization.** `reply` is in the run's `source_language`; the
+   server does not re-translate it. If the run's `source_language`
+   is `en`, the model writes in English. The frontend's i18n layer
+   only affects framing strings (welcome / review / exhausted) —
+   not Agent 6's authored replies. **Exception:** the verbatim
+   English `concept_candidate` text embedded inside
+   `awaiting_concept_confirmation` `reply` is in English regardless
+   of `source_language` (§ 6A.2 rule #7 — what the user sees is
+   what gets sent to Agent 1).
+10. **Single output.** Agent 6 returns exactly one JSON object per
+    call; no Markdown fences, no prefatory text, no trailing
+    commentary (same rule as Agents 0b–5).
+11. **`prompting_notes_update` discipline.** When the field is
+    present and non-null, the server validates that the value is
+    a plain English string (heuristic; see § 6A.2 rule #12 and
+    § 6A.8.1) and that it is a *full replacement* — Agent 6 has
+    been told the server does not merge with the prior notes.
+    Validation failures are re-prompted up to
+    `CLAUDE_JSON_RETRY` times; on persistent failure the server
+    discards the update for that turn (the `reply` / `phase` /
+    `concept_candidate` outputs are still applied) so the
+    conversation continues. The update is **not** cleared on
+    `phase=restart_concept` (§ 6A.4 step 6.1).
+
+#### Call 7 — `manual_revise_prompts` (Agent 7, "the collaboration prompt reviser")
+
+**Purpose:** In the collaboration mode (§ 6A), translate the user's
+post-image feedback into revised positive/negative prompts that aim
+the next ComfyUI render at the same agreed concept but better. Agent
+7 is dispatched by the server on `phase=feedback_confirmed` (§ 6A.4
+step 5). It is **not** part of the auto pipeline — Agent 3
+(`revise_prompts`, § 7.1 Call 3) continues to handle prompt revision
+in the auto loop.
+
+Agent 7 lives outside the chat: it never speaks to the user, never
+sees the chat transcript directly, and never produces a `reply`
+field. Its sole job is to read a structured input payload and emit
+a revised positive/negative prompt pair.
+
+**Input (to Claude):**
+- `last_agreed_concept` — the verbatim English concept the user
+  confirmed before the most recent render. Same string Agent 1 was
+  invoked with on the previous render. The agreed concept does
+  **not** change here — Agent 7's revisions stay faithful to it
+  (concept-level edits are out of scope for this agent and would
+  reach Agent 6's `restart_concept` exit instead).
+- `user_feedback` — the verbatim post-image user-message blob
+  computed by § 6A.4 step 5.2 (raw user prose in the run's
+  `source_language`, newline-separated). Agent 7's prompt tells
+  the model that this is unedited user text, possibly noisy, that
+  it must read carefully and triage.
+- `last_positive_prompt` / `last_negative_prompt` — the exact
+  positive and negative prompt strings that produced the most
+  recent manual image. On the second-and-later iteration these
+  are the **previously revised** prompts, not the originals —
+  each iteration builds on the last (§ 6A.4 step 5.8).
+- `prompting_notes` — the current value of
+  `manual_illustration_sessions.prompting_notes` (English-only
+  cumulative prompt-engineering memo curated by Agent 6 across
+  this manual session, § 6A.2 rule #12). NULL until Agent 6 has
+  populated it at least once. When non-null, Agent 7 treats this
+  memo as **authoritative prompt-level guidance** — it
+  accumulates lessons across every manual attempt on this
+  illustration, including across `restart_concept` boundaries.
+  Conflict resolution: the memo wins on prompt-level mechanics
+  (tag choices, negative-tag placement) while the immediate
+  `user_feedback` wins on what to depict this attempt. Both
+  must coexist in the revised prompts.
+- `style_guide` — same as Agent 1 / Agent 3.
+- `character_role` — same as Agent 1 / Agent 3. Agent 7 cannot
+  change the workflow choice (`single-lora` ↔ `no-lora`) because
+  the cast shape is fixed for this illustration; the server reuses
+  `illustrations.current_workflow` after this call.
+- `companion` — same as Agent 1 / Agent 3 (the brief-attached
+  companion or `null`).
+
+**Output schema:**
+```json
+{
+  "positive": "string (revised positive prompt; same Danbooru-style format as Agent 1/3)",
+  "negative": "string (revised negative prompt; same baseline + scene-specific negatives)"
+}
+```
+
+The output shape is intentionally a subset of Agent 3's — no
+`workflow`, no `notes`, no concept commentary — because Agent 7's
+contract is narrower (cast shape and concept are both fixed).
+
+Hard rules enforced by the prompt:
+
+1. **Stay within the § 6A.5 envelope.** Even if the user's feedback
+   explicitly asks for an out-of-envelope change (a second
+   character, regional prompting effects, text inside the image,
+   etc.), the revised prompts must remain within envelope. The
+   prompt makes clear that Agent 7 is not a side channel to bypass
+   the constraints Agent 6 enforces upstream.
+2. **Stay within the § 7.3.6 negative-prompt baseline.** All
+   safety/anatomy/quality/multi-character negatives from the
+   baseline must remain in `negative`. Agent 7 may add scene- or
+   feedback-specific negatives on top of them.
+3. **Honor the agreed concept first.** When user feedback conflicts
+   with the agreed concept (e.g. the user contradicts an element of
+   the concept that was previously confirmed), Agent 7 prefers the
+   agreed concept. The model is instructed that such conflicts are
+   rare in normal use because Agent 6's drift detection should
+   have caught them upstream; when they do arrive, the safe bet is
+   to keep the concept intact and treat the conflicting feedback
+   as noise.
+4. **Same Danbooru / Illustrious / MHA discipline as Agent 3.** The
+   prompt embeds the § 7.3.1 / § 7.3.6 / § 7.3.10 conventions
+   verbatim (copy-pasted from `revise_prompts.md` as authoring
+   guidance, the same way Agent 4 copy-pastes from
+   `build_story.md`).
+5. **Polite refusal.** If `user_feedback` contains a request for
+   ethically out-of-bounds content (§ 6A.5 "Ethics envelope"),
+   Agent 7 ignores that portion of the feedback while honoring the
+   rest. It does not have a refusal channel back to the user —
+   the absence of the requested element in the next image is its
+   only signal. (Agent 6's upstream refusal should normally catch
+   such cases first.)
+6. **Single output.** Agent 7 returns exactly one JSON object per
+   call; no Markdown fences, no prefatory text, no trailing
+   commentary (same rule as Agents 0b–5).
+
 ### 7.2 RunPod ComfyUI Serverless
 
 The app ships **two** workflow files in `app/workflows/`, both in
@@ -1390,9 +2840,10 @@ relative path (relative to `OUTPUT_DIR`) is stored in `illustrations.image_path`
 
 ### 7.3 Creative brief for prompt design
 
-This section defines the creative and prompting conventions that all six
-Claude agents must respect. The technical contracts in § 7.1 stay generic;
-this section makes them concrete for the MVP visual stack.
+This section defines the creative and prompting conventions that all
+nine Claude agents must respect. The technical contracts in § 7.1
+stay generic; this section makes them concrete for the MVP visual
+stack.
 
 #### 7.3.1 Visual stack
 
@@ -1420,11 +2871,11 @@ reference used in prompts:
 | `mother`         | Inko Midoriya                            |
 
 This mapping is the *single source of truth* for character identity in
-prompts. Agents 1 and 3 must always use these names (plus their canonical
-trigger words and visual descriptors) regardless of the names the user
-chose during the chat (`name_in_story`). The user-chosen names are
-narrative only — they appear in the story prose written by Agent 0b but
-are never sent to ComfyUI.
+prompts. Agents 1, 3, and 7 must always use these names (plus their
+canonical trigger words and visual descriptors) regardless of the names
+the user chose during the chat (`name_in_story`). The user-chosen names
+are narrative only — they appear in the story prose written by Agent 0b
+but are never sent to ComfyUI.
 
 The roster the user is allowed to assemble during the chat is constrained
 by the same vocabulary: at most one `male`, at most one `female`, and
@@ -1490,8 +2941,8 @@ field must explicitly mention at least one of:
 
 A combination of these is preferred over any single one.
 
-Agents 1 and 3 carry this discipline into the actual Danbooru tags. The
-`positive` field must include explicit emotion/expression tags and
+Agents 1, 3, and 7 carry this discipline into the actual Danbooru tags.
+The `positive` field must include explicit emotion/expression tags and
 explicit action/pose tags. Vague tags like `standing`, `looking`, or
 `posing` alone are insufficient and must be augmented with specifics.
 
@@ -1546,9 +2997,9 @@ expression, missing action, wrong environment, mild anatomy issues.
 
 #### 7.3.6 Negative prompt baseline
 
-Agents 1 and 3 must always include in `negative` a standard safety and
-quality baseline, in addition to scene-specific negatives. The baseline
-includes at minimum:
+Agents 1, 3, and 7 must always include in `negative` a standard safety
+and quality baseline, in addition to scene-specific negatives. The
+baseline includes at minimum:
 
 - Safety: `nsfw, suggestive, revealing clothing, lingerie, nudity,
   cleavage, underwear, sexualized`.
@@ -1562,9 +3013,9 @@ includes at minimum:
 The exact baseline string lives in `backend/app/constants.py` so it is
 reusable and consistent across agents 1 and 3.
 
-**Conditional adjustments when `companion` is present** (Agents 1 and 3
-apply these on top of the baseline above when the illustration carries
-a non-null `companion`):
+**Conditional adjustments when `companion` is present** (Agents 1, 3,
+and 7 apply these on top of the baseline above when the illustration
+carries a non-null `companion`):
 
 - **Do not include** `solo` in the *positive* prompt. The Danbooru `solo`
   tag means "only one entity in the image" and conflicts with the
@@ -1639,7 +3090,7 @@ Agent 0b's `style_guide` output covers global, illustration-wide concerns:
 - `character_baseline_description`: a free-text English description of
   the visual continuity intended across all illustrations of this run
   (e.g., "All scenes share warm afternoon lighting and a storybook-like
-  framing"). Agents 1 and 3 reference this when constructing prompts.
+  framing"). Agents 1, 3, and 7 reference this when constructing prompts.
 
 The style LoRA applies globally to every visible entity in the frame,
 including any companion. This is the desired behavior (consistent look)
@@ -1715,12 +3166,12 @@ their ordering) is fixed at run creation and must not be altered.
 
 #### 7.3.10 Companion prompting guidance
 
-Generic principles that Agents 1 and 3 follow when the illustration's
-`companion` field is non-null. **These principles apply regardless of
-the kind of non-human entity** — there are no entity-specific code
-paths anywhere in the implementation. All non-human handling is driven
-by the free-text `description` and category reasoning inside the agent
-prompts.
+Generic principles that Agents 1, 3, and 7 follow when the
+illustration's `companion` field is non-null. **These principles apply
+regardless of the kind of non-human entity** — there are no
+entity-specific code paths anywhere in the implementation. All non-human
+handling is driven by the free-text `description` and category
+reasoning inside the agent prompts.
 
 - **Numeric tagging.** Use Danbooru-style numeric tags for the companion
   where applicable (`1cat`, `1dog`, `1dragon`, `1robot`). The human is
@@ -1761,21 +3212,23 @@ prompts.
 ### 7.4 Agent prompt files
 
 Each Claude agent's system prompt lives in its own Markdown file under
-`backend/app/agents/`. There are seven files, one per call in § 7.1:
+`backend/app/agents/`. There are nine files, one per call in § 7.1:
 
-| File                  | Agent | Call name           |
-|-----------------------|-------|---------------------|
-| `chat.md`             | 0a    | `chat`              |
-| `build_story.md`      | 0b    | `build_story`       |
-| `generate_prompts.md` | 1     | `generate_prompts`  |
-| `evaluate_image.md`   | 2     | `evaluate_image`    |
-| `revise_prompts.md`   | 3     | `revise_prompts`    |
-| `rethink_concept.md`  | 4     | `rethink_concept`   |
-| `translate.md`        | 5     | `translate`         |
+| File                        | Agent | Call name                |
+|-----------------------------|-------|--------------------------|
+| `chat.md`                   | 0a    | `chat`                   |
+| `build_story.md`            | 0b    | `build_story`            |
+| `generate_prompts.md`       | 1     | `generate_prompts`       |
+| `evaluate_image.md`         | 2     | `evaluate_image`         |
+| `revise_prompts.md`         | 3     | `revise_prompts`         |
+| `rethink_concept.md`        | 4     | `rethink_concept`        |
+| `translate.md`              | 5     | `translate`              |
+| `manual_concept.md`         | 6     | `manual_concept`         |
+| `manual_revise_prompts.md`  | 7     | `manual_revise_prompts`  |
 
 Loading rules:
 
-- `services/claude.py` reads all seven files at process startup and caches
+- `services/claude.py` reads all nine files at process startup and caches
   their contents in memory. The contents are used verbatim as the
   Anthropic `system` parameter for the corresponding call. No template
   substitution is applied to the prompt body; runtime context (the
@@ -1809,6 +3262,26 @@ end-to-end and contain at minimum:
 7. For Agent 5 (`translate.md`): the embedded persona-fragment from
    `build_story.md` (so translated prose matches the authored voice)
    and the list of supported `target_language` codes.
+8. For Agent 6 (`manual_concept.md`): the design philosophy from
+   § 6A.2 verbatim (including the verbatim-concept-handoff,
+   user-driven-feedback, drift-detection, and refusal rules), the
+   feasibility envelope from § 6A.5 verbatim, the phase machine
+   from § 6A.4 (which `phase` values are legal in each `sub_phase`),
+   and the embedded persona-fragment shared with Agents 0a / 0b / 4.
+   Agent 6 follows the same JSON-only-output discipline as Agents
+   0b–5, except that its `reply` field is free-form prose like
+   Agent 0a's.
+9. For Agent 7 (`manual_revise_prompts.md`): the § 7.3.1 / § 7.3.6 /
+   § 7.3.10 prompting conventions verbatim (copy-pasted from
+   `revise_prompts.md` the same way Agent 4 copy-pastes from
+   `build_story.md`), the § 6A.5 envelope verbatim (including the
+   "Application to Agent 7" paragraph), the "agreed concept first"
+   conflict-resolution rule (§ 7.1 Call 7), and the explicit
+   reminder that Agent 7 never writes user-facing prose — its only
+   output is the `{positive, negative}` JSON object. A short
+   comment block at the top of the §§ 7.3 sections names
+   `revise_prompts.md` as the source-of-truth sibling so future
+   editors keep them in sync.
 
 Agents 0a and 0b share a short persona-fragment ("the assistant's voice")
 that is embedded into each file's text (copy-pasted, not imported) so
@@ -2190,6 +3663,10 @@ SSE event types (`event:` field) and JSON payloads:
 | `translations_refreshed`    | `{ "language", "items": [ { "kind": "story_title\|story_topic_description\|paragraph\|illustration_concept", "paragraph_index"?: N, "scene_index"?: N, "text": "string" } ] }` — emitted to every subscriber after § 8.9 completes, so multi-tab views in the same language stay in sync |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
+| `illustration_manual_started` | `{ "illustration_id", "scene_index", "welcome_message": { "role": "assistant", "content": "string (the localized welcome text in source_language, with `#…#` bold markers preserved)", "id": "string", "created_at": "ISO-8601" } }` — emitted once when an illustration transitions into `MANUAL_CHATTING` for the first time (§ 6A.3). |
+| `manual_message_appended`   | `{ "illustration_id", "scene_index", "message": { "id", "role": "user\|assistant", "content", "created_at" }, "phase": "gathering\|awaiting_concept_confirmation\|concept_confirmed\|gathering_feedback\|awaiting_feedback_confirmation\|feedback_confirmed\|restart_concept\|accepted\|null", "sub_phase": "concept_design\|feedback_gathering" }` — emitted whenever a new chat row is persisted in `manual_messages` (§ 6A.6). One event per row; user echoes are emitted just like assistant turns so other tabs stay in sync. `phase` carries Agent 6's reply phase when the row is assistant-authored (and is `null` for user echoes and for the static framing bubbles inserted by the backend like the welcome / render-failed / review-prompt bubbles). `sub_phase` is the post-event session sub-phase, included on every event so frontends can update affordances in lockstep with the message. |
+| `manual_image_rendered`     | `{ "illustration_id", "scene_index", "manual_attempt": K, "image_url": "string", "review_message": { "id", "role": "assistant", "content": "string (the localized review prompt in source_language)", "created_at" }, "sub_phase": "feedback_gathering" }` — emitted after a successful manual render (§ 6A.4 step 3.8). The frontend renders the image bubble and the review-prompt bubble in this order. `sub_phase` is always `feedback_gathering` here (a render flips the session into that sub-phase). |
+| `illustration_manual_ended` | `{ "illustration_id", "scene_index", "outcome": "completed\|exhausted\|cancelled" }` — emitted when the manual flow terminates (user accepted the image → `completed`; attempts exhausted → `exhausted`; run cancelled → `cancelled`). The frontend uses this to collapse the chat overlay. |
 | `run_completed`             | `{ "completed": N, "failed": M }`                                       |
 | `run_failed`                | `{ "error_code": "string", "error_message": "string" }`                 |
 | `run_cancelled`             | `{}`                                                                    |
@@ -2341,6 +3818,162 @@ the run's event bus, scoped to subscribers in `target_language`, so
 sibling tabs / windows pick up the same translations without having
 to re-request them.
 
+### 8.10 Manual illustration chat (§ 6A)
+
+Three endpoints back the manual chat fallback. All are scoped to a
+single illustration; they share the `:illustration_id` path
+parameter, are guarded by the run's cancellation flag, and emit SSE
+events on the parent run's event bus so other tabs viewing the run
+see chat activity in real time. Behind the scenes Agent 6 is invoked
+on every user-message POST; the prompt-proposing / -revising steps
+(Agent 1 in the concept-design sub-phase, Agent 7 in the
+feedback-gathering sub-phase) and the RunPod render are
+server-internal side effects of `concept_confirmed` and
+`feedback_confirmed` turns respectively.
+
+The endpoints return **only the new events** since the request, not
+the full transcript — the frontend reconstructs the transcript from
+the same snapshot SSE event used by the auto loop (§ 8.4). The
+snapshot payload (§ 8.3) is extended with a per-illustration
+`manual_session: { messages: [...], manual_attempts: K, last_image_url: "string|null", sub_phase: "concept_design"|"feedback_gathering" } | null`
+object so reconnects and deep links restore the chat exactly,
+including which sub-phase the user is currently in (so the frontend
+can render the right affordances — concept-iteration vs.
+feedback-on-image — without an extra round trip).
+
+#### 8.10.1 `POST /api/illustrations/{illustration_id}/manual/messages`
+
+Append a user message to the manual chat and let Agent 6 (and possibly
+Agent 1 + RunPod) react. Idempotency is NOT enforced server-side in
+MVP — the frontend is responsible for disabling the send button while
+a request is in flight (mirrors § 8.1's chat send pattern).
+
+Request body:
+```json
+{ "content": "string (user message, ≤ CHAT_MESSAGE_MAX_CHARS)" }
+```
+
+Server flow (in this exact order):
+
+1. Reject with **404** if the illustration does not exist.
+2. Reject with **409** if the illustration is not in `MANUAL_CHATTING`.
+3. Reject with **409** if the run is cancelled or has reached a
+   terminal status.
+4. Persist the user row in `manual_messages`. Emit
+   `manual_message_appended`.
+5. Invoke Agent 6 (§ 7.1 Call 6) with the input fields per § 7.1,
+   including the current
+   `manual_illustration_sessions.sub_phase`.
+6. Apply server guards (sub-phase ↔ phase compatibility, phase
+   demotion, feasibility heuristic, verbatim-handoff assertion;
+   § 6A.4 / § 6A.5 / § 7.1 Call 6 hard rules 1–4).
+7. Persist Agent 6's assistant row in `manual_messages`. Emit
+   `manual_message_appended`.
+8. If the final phase is `concept_confirmed`: perform the dispatch
+   sequence in § 6A.4 step 3 (state transitions, Agent 1 call,
+   render, image bubble) and on success flip
+   `manual_illustration_sessions.sub_phase` to
+   `feedback_gathering`. Each step writes to DB and emits its SSE
+   event before the next step starts.
+9. If the final phase is `feedback_confirmed`: perform the
+   prompt-revision dispatch sequence in § 6A.4 step 5 (slice
+   post-image user messages, call Agent 7, render, image bubble).
+   On success the sub-phase stays at `feedback_gathering`
+   (the same agreed concept is being iterated on). Each step
+   writes to DB and emits its SSE event before the next step
+   starts.
+10. If the final phase is `restart_concept`: perform the reset
+    sequence in § 6A.4 step 6 (clear `last_agreed_concept` and
+    `last_manual_image_path`, flip `sub_phase` to `concept_design`).
+    No render is dispatched and `manual_attempts` is not
+    incremented.
+11. If the final phase is `accepted`: perform the promotion sequence
+    in § 6A.4 step 7.
+12. Run the budget check (§ 6A.4 step 8). If it trips, emit the
+    apology turn, set the illustration to `FAILED`, and emit
+    `illustration_state` (FAILED), `illustration_failed`, and
+    `illustration_manual_ended` with `outcome="exhausted"`.
+
+Response 200: a thin envelope confirming acceptance —
+```json
+{
+  "illustration_id": "string",
+  "state": "MANUAL_CHATTING|MANUAL_GENERATING_PROMPTS|MANUAL_RENDERING|COMPLETED|FAILED",
+  "manual_attempts": K,
+  "sub_phase": "concept_design|feedback_gathering"
+}
+```
+The frontend treats the SSE stream as the source of truth for the
+new messages and image; this response is only used to confirm the
+POST, re-enable the input, and (via `sub_phase`) update the input
+placeholder / affordances for the next user turn.
+
+Errors:
+
+- 400 if `content` is empty or exceeds `CHAT_MESSAGE_MAX_CHARS`.
+- 404 if the illustration does not exist.
+- 409 if the illustration is not in `MANUAL_CHATTING`, the run is
+  in a terminal state, or the manual flow has already been ended
+  (`outcome="exhausted"` previously emitted).
+- 502 if Agent 6 fails after `CLAUDE_JSON_RETRY` retries; the
+  manual session stays in `MANUAL_CHATTING` (in the same sub-phase
+  it was in) and the user can retry the same message. No state
+  change is persisted on this path (the user's row IS persisted at
+  step 4; the assistant row at step 7 is what fails).
+- 502 if Agent 1 fails on a `concept_confirmed` turn (after Agent 6
+  succeeded). The illustration is rolled back to `MANUAL_CHATTING`
+  in the concept-design sub-phase and an
+  `illustration.manual.render_failed` assistant bubble is
+  appended.
+- 502 if Agent 7 fails on a `feedback_confirmed` turn (after
+  Agent 6 succeeded). The illustration is rolled back to
+  `MANUAL_CHATTING` in the feedback-gathering sub-phase
+  (the agreed concept and its image remain the working baseline)
+  and an `illustration.manual.render_failed` assistant bubble is
+  appended.
+- 502 if RunPod fails on the manual render. See § 6A.4 step 3.10
+  for the behavior; the response is still 502 and the frontend
+  shows a toast.
+
+#### 8.10.2 `GET /api/illustrations/{illustration_id}/manual`
+
+Returns the full manual chat for a single illustration (used by the
+frontend on a hard refresh when the SSE snapshot has not yet
+arrived, and for tests). Response body:
+
+```json
+{
+  "illustration_id": "string",
+  "state": "MANUAL_CHATTING|MANUAL_GENERATING_PROMPTS|MANUAL_RENDERING|COMPLETED|FAILED",
+  "manual_attempts": K,
+  "sub_phase": "concept_design|feedback_gathering",
+  "messages": [
+    { "id": "string", "role": "user|assistant|image", "content": "string", "image_url": "string|null", "manual_attempt_index": "K|null", "created_at": "ISO-8601" }
+  ],
+  "last_image_url": "string|null",
+  "last_agreed_concept": "string|null"
+}
+```
+
+- 404 if the illustration does not exist.
+- 200 with `state` reflecting any terminal state if the manual flow
+  has ended. After `COMPLETED` or exhausted-FAILED the messages are
+  retained for read-only history.
+
+#### 8.10.3 Cancellation behavior
+
+`POST /api/runs/{run_id}/cancel` (§ 8.5) checks every illustration's
+state. For each illustration in any `MANUAL_*` state it:
+
+1. Transitions the illustration to `CANCELLED`.
+2. Emits `illustration_state` (CANCELLED) and `illustration_manual_ended`
+   with `outcome="cancelled"`.
+
+This happens synchronously inside the cancel handler — there are no
+long-running async manual loops to interrupt; all manual writes are
+inside POST handlers in § 8.10.1 which all start with the
+cancellation check.
+
 ### 8.6 Error codes
 
 The following `error_code` values are defined for MVP.
@@ -2364,6 +3997,23 @@ The following `error_code` values are defined for MVP.
 | `error_code`           | Meaning                                                                                          |
 |------------------------|--------------------------------------------------------------------------------------------------|
 | `TRANSLATE_FAILED`     | Agent 5 failed after `CLAUDE_JSON_RETRY` retries. Returned in the 502 body so the frontend can show a toast and keep displaying the stale / source-language fallback. |
+
+**Manual illustration endpoint** (HTTP-only, not persisted on any row;
+§ 8.10):
+
+| `error_code`           | Meaning                                                                                          |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| `MANUAL_CHAT_FAILED`   | Agent 6 failed after `CLAUDE_JSON_RETRY` retries. The manual session remains in `MANUAL_CHATTING` in its current sub-phase; the user can retry. |
+| `MANUAL_PROMPT_FAILED` | Agent 1 failed after retries on a `concept_confirmed` turn, or Agent 7 failed after retries on a `feedback_confirmed` turn. The branch is rolled back to `MANUAL_CHATTING` (in the matching sub-phase) and an apology bubble is appended. |
+| `MANUAL_RENDER_FAILED` | RunPod failed on a manual render. The manual attempt is consumed; the branch returns to `MANUAL_CHATTING` (or to `FAILED` if the budget is now exhausted). |
+
+On terminal exhaustion (§ 6A.4 step 8), the illustration's
+`error_message` is set to a non-localized sentinel (`"Manual attempts
+exhausted"`) and the **state** alone — `FAILED` with the
+`illustration_manual_ended` event preceding it — is what the frontend
+uses to render the standard FAILED card. There is intentionally no
+user-facing error code for "manual exhausted" since the chat itself
+already explained the situation conversationally (§ 6A.7 key #4).
 
 The previous run-level codes `NO_SUITABLE_SCENES` and `STEP0_FAILED` are
 removed. Their replacement at the session layer is `STORY_BUILD_FAILED`
@@ -2709,6 +4359,22 @@ keyboard focus, not only on hover.
   from null to non-null, it appears.
 - On `FAILED`: a short error message (no retry button in MVP).
 - On `CANCELLED`: greyed-out card with label "Zrušené".
+- On `MANUAL_CHATTING` / `MANUAL_GENERATING_PROMPTS` / `MANUAL_RENDERING`:
+  the card **transforms** into a chat surface (§ 9.1A) — the image
+  slot, attempt counter, and concept popover are replaced by the
+  chat transcript. The card header keeps the "Ilustrácia N" label
+  but swaps the state pill for a `Spoločná tvorba` pill (carrying
+  the same spinner semantics as the other non-terminal pills) with
+  a small `manual_attempts/MAX_MANUAL_ATTEMPTS` counter beneath
+  (e.g. "Pokus 2 z 5"). On `COMPLETED` reached via manual confirmation,
+  the chat collapses and the card renders as a standard completed
+  card with the accepted image. On `FAILED` reached via budget
+  exhaustion (`illustration_manual_ended.outcome="exhausted"`), the
+  chat collapses and the card renders the standard FAILED card
+  ("Túto ilustráciu sa nepodarilo vytvoriť.") — the apology turn
+  Agent 6 produced is dropped from the user's view, because the
+  rendered failure card carries the same message in a more familiar
+  form. (Tests cover both paths.)
 
 Reactivity guarantees carried over from the previous spec still hold:
 when `current_concept` changes mid-flight (Agent 4 cycle), the
@@ -2724,6 +4390,79 @@ loss of expanded / collapsed UI state.
 - On `run_completed` / `run_failed` / `run_cancelled`, close the
   EventSource but stay on the screen.
 - On navigation away, close the EventSource.
+
+### 9.1A IllustrationCard chat takeover (§ 6A)
+
+When an illustration enters any `MANUAL_*` state, the `IllustrationCard`
+swaps its body to a `ManualChatPanel` component. The header (scene
+number + state pill + attempt counter) stays visible above. Layout
+rules:
+
+- The chat occupies the card's natural width (no popout, no modal).
+  It is **not** the same component as the home-screen chat
+  (`ChatPanel.vue`); see § 9.1B for why a separate component exists.
+- The transcript scrolls inside the card. Default height = the
+  natural height of the image slot it replaces (the 1:1 skeleton's
+  aspect-ratio box), so cards in the grid keep their footprint. The
+  panel internally scrolls beyond that height; the card itself
+  doesn't grow. The image-bubble rows ignore this clamp and expand
+  the card vertically when present (the rendered image is the most
+  important content in the chat).
+- Bubble alignment, color, and typography mirror the home-screen
+  chat for visual continuity (the user already knows the look from
+  Screen A).
+- The input area is a single-line auto-growing `<textarea>` plus a
+  send button. Send is disabled while a request is in flight (the
+  store tracks `isSendingManualMessage[illustration_id]`). The
+  placeholder is sub-phase-dependent: when
+  `manual_session.sub_phase === "concept_design"` the placeholder
+  reads `i18n.t('illustration.manual.ui.input_placeholder_concept')`
+  (e.g. "Popíš, ako by mal obrázok vyzerať…"); when
+  `sub_phase === "feedback_gathering"` it reads
+  `i18n.t('illustration.manual.ui.input_placeholder_feedback')`
+  (e.g. "Povedz, čo na obrázku funguje a čo nie…"). The base
+  `input_placeholder` key is removed.
+- When state is `MANUAL_GENERATING_PROMPTS` or `MANUAL_RENDERING`,
+  the input area is replaced by a centered indeterminate progress
+  bar with the localized hint
+  `i18n.t('illustration.manual.ui.rendering_hint')` (Slovak:
+  "Vytváram obrázok podľa nášho konceptu…"). The user cannot type
+  while a render is in flight — this prevents both a confused
+  duplicate dispatch and a race between the user's next concept
+  and the render result.
+- Image bubbles render the manual render at full content-margin
+  width with a small caption `"Pokus K"` (or localized equivalent).
+  Click opens the original.
+- The `#…#` bold marker in `illustration.manual.welcome` is rendered
+  via a tiny helper (`splitBoldMarker`) that splits the string on
+  `#`, alternates plain / `<strong>` spans, and asserts exactly one
+  bold span in dev mode. The helper lives in
+  `frontend/src/utils/manualBold.ts` and is unit-tested
+  (§ 11.3 amendment).
+
+When the manual flow ends:
+
+- On `illustration_manual_ended.outcome="completed"`, the panel
+  unmounts and the card re-renders as a standard completed card
+  with the canonical image — the existing reactive switch on
+  `illustration.state === "COMPLETED"` handles this with no extra
+  code in the panel.
+- On `outcome="exhausted"`, the panel unmounts and the card
+  renders the FAILED card (existing path).
+- On `outcome="cancelled"`, the panel unmounts and the card
+  renders the CANCELLED card (existing path).
+
+The `manual_session` data on each illustration is held on the
+runStore (§ 9.2.2 amendment): `runStore.illustrationManualSessions:
+Map<illustration_id, { messages, manual_attempts, last_image_url, sub_phase, last_agreed_concept }>`,
+mutated in place by the SSE event handlers and re-initialized from
+each `snapshot` event. `sub_phase` is updated locally on every
+`manual_message_appended` / `manual_image_rendered` event (each
+carries the post-event `sub_phase` value, see § 8.4) and on the
+POST response and the snapshot, so all tabs converge on the same
+affordances. The store also exposes a Promise-returning action
+`runStore.sendManualMessage(illustration_id, content)` used by the
+panel.
 
 ### 9.2 Stores
 
@@ -3153,7 +4892,10 @@ copy-pasted links preserve the language for the recipient.
   Each is a plain TypeScript object with the same nested shape — top-level
   groups include `chat`, `story`, `nav`, `errors.session`, `errors.run`,
   `language` (display names of the three languages used by the
-  switcher), and `toast`.
+  switcher), `toast`, and `illustration.manual` (§ 6A.7 keys —
+  `welcome`, `summary_intro`, `render_failed`, `budget_exhausted`,
+  `review_prompt`, `budget_remaining_hint`, and `ui.*` for the chat
+  panel labels).
 - `src/main.ts` registers the i18n plugin with `app.use(i18n)` before
   mounting the router.
 
@@ -3413,13 +5155,14 @@ Defined in `backend/app/constants.py`:
 | `MAX_ILLUSTRATIONS`               | 5     | Exact illustrations per run — Agent 0b MUST return exactly this many (§ 7.1 Call 0b rule #4) |
 | `MAX_PROMPT_ATTEMPTS_PER_CONCEPT` | 3     | Total image-generation attempts per concept (initial + 2 revisions)|
 | `MAX_CONCEPT_ATTEMPTS`            | 3     | Total concepts tried per illustration (initial + 2 rethinks)      |
+| `MAX_MANUAL_ATTEMPTS`             | 5     | Total manual renders the user can request via the § 6A chat fallback before the illustration is force-FAILED. Counts each dispatched ComfyUI job, whether the render itself succeeded or failed. |
 | `COMFYUI_POLL_TIMEOUT_S`          | 600   | Max wait per ComfyUI job                                          |
 | `COMFYUI_POLL_INTERVAL_S`         | 3     | Polling interval                                                  |
 | `MAX_CONCURRENT_BRANCHES`         | 5     | Async semaphore over branches (= MAX_ILLUSTRATIONS for MVP)       |
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
-| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 7 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, translate) |
+| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 8 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, translate, manual_concept) |
 | `SUPPORTED_LANGUAGES`             | `("sk", "cs", "en")` | Tuple of UI / story languages the backend accepts (§ 9.6). The chat agent emits one of these or `"other"`; the build_story, translate, and run APIs all validate against this tuple. |
 | `CONFIRMED_ACK`                   | `Mapping[str, str]` (see below) | Per-language canonical `reply` returned by Agent 0a on `phase="confirmed"`; the chat service looks up `CONFIRMED_ACK[detected_language]` and overwrites any other prose Claude returned. |
 
@@ -3458,11 +5201,11 @@ to chase 100 % line coverage.
     based on the per-illustration role.
 - **Character config loader**: as previously specified.
 - **Agent prompt loader** (new test file, `tests/unit/test_agents_loader.py`):
-  - Loads all seven `.md` files (chat, build_story, generate_prompts,
-    evaluate_image, revise_prompts, rethink_concept, translate) from a
-    temporary `AGENTS_DIR` fixture and exposes them on the Claude
-    client.
-  - Refuses to start (raises typed error) when any of the seven files
+  - Loads all nine `.md` files (chat, build_story, generate_prompts,
+    evaluate_image, revise_prompts, rethink_concept, translate,
+    manual_concept, manual_revise_prompts) from a temporary
+    `AGENTS_DIR` fixture and exposes them on the Claude client.
+  - Refuses to start (raises typed error) when any of the nine files
     is missing, empty, or unreadable.
   - The system prompt sent to Anthropic for each call equals the file
     contents verbatim (verified by intercepting the outgoing request with
@@ -3635,6 +5378,74 @@ to chase 100 % line coverage.
     `alembic downgrade base` followed by `alembic upgrade head` leaves
     the schema identical (round-trip safety on a fresh DB).
 
+- **Agent 6 manual_concept** (`tests/unit/test_manual_concept.py`):
+  - Schema validation accepts each of `gathering` /
+    `awaiting_concept_confirmation` / `concept_confirmed` /
+    `gathering_feedback` / `awaiting_feedback_confirmation` /
+    `feedback_confirmed` / `restart_concept` / `accepted` and
+    rejects unknown phase values.
+  - Sub-phase ↔ phase compatibility: a `concept_confirmed` reply
+    received while `sub_phase = "feedback_gathering"` is demoted
+    to `gathering_feedback`; a `feedback_confirmed` reply while
+    `sub_phase = "concept_design"` is demoted to `gathering`;
+    likewise for the other cross-sub-phase combinations.
+  - Verbatim concept handoff (§ 6A.2 rule #7, § 7.1 Call 6 rule 3):
+    - On `awaiting_concept_confirmation`, the assertion that
+      `concept_candidate` appears verbatim inside `reply` passes
+      when the strings match and fails (treated as Claude failure
+      and re-prompted) when they diverge by even one character.
+    - On `concept_confirmed`, the assertion that
+      `concept_candidate` equals the previous turn's
+      `last_concept_candidate` byte-for-byte passes when identical
+      and fails otherwise.
+  - Server-side phase guards: a `concept_confirmed` reply with no
+    prior `awaiting_concept_confirmation` in the manual session is
+    demoted to `awaiting_concept_confirmation`. A `feedback_confirmed`
+    reply with no prior `awaiting_feedback_confirmation` is demoted
+    to `gathering_feedback`. An `accepted` reply that is not
+    immediately preceded by an `image` row is demoted to
+    `gathering_feedback`.
+  - Feasibility heuristic flips obviously infeasible candidates
+    (multi-character, multi-setting, "and then …") to `gathering`.
+  - `restart_concept` resets the session: `last_agreed_concept`
+    and `last_manual_image_path` are cleared, `sub_phase` flips to
+    `concept_design`, `manual_attempts` is unchanged.
+  - Post-image user-message slicing (§ 6A.4 step 5.2): given a
+    fixture transcript with multiple `user`, `assistant`, and
+    `image` rows, the slicer returns exactly the `user` rows
+    created after the most recent `image` row, joined by newlines,
+    with no agent paraphrasing in between.
+  - Budget arithmetic: after `MAX_MANUAL_ATTEMPTS` renders, the
+    next `concept_confirmed` *or* `feedback_confirmed` turn
+    force-FAILs the illustration and emits the apology bubble +
+    `illustration_manual_ended(outcome=exhausted)`.
+
+- **Agent 7 manual_revise_prompts**
+  (`tests/unit/test_manual_revise_prompts.py`):
+  - Schema validation: the output schema accepts a `{positive,
+    negative}` pair and rejects extra fields (no `workflow`, no
+    `reply`, no `concept_candidate`).
+  - The Anthropic system prompt sent to Claude equals
+    `manual_revise_prompts.md` verbatim (intercepted with respx).
+  - Input plumbing: given a stub Agent 7 that echoes its inputs,
+    the dispatch in § 6A.4 step 5 passes the correct
+    `last_agreed_concept`, the correct `user_feedback` blob (the
+    post-image user-message slice), the **most recent**
+    `last_positive_prompt` / `last_negative_prompt` (i.e. the
+    revised prompts from the previous iteration, not the
+    originals), and the unchanged `style_guide` /
+    `character_role` / `companion`.
+  - Negative-prompt baseline (§ 7.3.6) survives revision: a
+    stub Agent 7 that drops the baseline causes the dispatch to
+    treat the call as a Claude failure and re-prompt up to
+    `CLAUDE_JSON_RETRY` times (the server reasserts the baseline
+    invariants on Agent 7's output the same way it does for
+    Agent 1 / Agent 3).
+  - Workflow choice cannot toggle: even if Agent 7's output
+    somehow implied a different cast shape, the dispatch reuses
+    `illustrations.current_workflow` (it never re-reads any
+    workflow hint from Agent 7's output).
+
 ### 11.2 Backend integration (`tests/integration/`)
 
 Anthropic and RunPod are mocked at the HTTP layer (respx). SQLite uses a
@@ -3741,6 +5552,31 @@ as described in § 5.0.
   `error_code = "TRANSLATE_FAILED"`; no rows are persisted in the
   translation tables for the affected items; a subsequent retry with
   Agent 5 mocked to succeed completes normally.
+- **Manual flow happy path (§ 6A):** mock auto-pipeline failure for
+  one illustration → assert transition to `MANUAL_CHATTING` and the
+  `illustration_manual_started` event with the welcome bubble. Send
+  two user messages (gathering → awaiting_confirmation → confirmed)
+  with Agent 6 mocked; assert Agent 1 + RunPod are dispatched on
+  the confirmed turn; assert `MANUAL_RENDERING` → `MANUAL_CHATTING`
+  with an `image` row appended and the `review_prompt` bubble after
+  it. Send an "accepted" reply; assert promotion to `COMPLETED`,
+  canonical `image_path` set, and `illustration_completed` emitted
+  with the canonical URL. Assert `runs.completed_count` increments.
+- **Manual flow exhaustion (§ 6A):** drive 5 confirmed → render
+  iterations without ever sending `accepted`. Assert the 6th
+  confirmed turn force-FAILs the illustration, emits the apology
+  bubble, and emits `illustration_manual_ended(outcome=exhausted)`.
+  POSTing to § 8.10.1 afterwards returns 409.
+- **Manual flow cancellation:** with an illustration in
+  `MANUAL_CHATTING`, POST `/cancel`. Assert the illustration
+  transitions to `CANCELLED`, emits `illustration_manual_ended
+  (outcome=cancelled)`, and that subsequent POSTs to § 8.10.1
+  return 409.
+- **Manual flow render failure budget:** mock RunPod to raise
+  during a manual render. Assert `manual_attempts` is still
+  incremented (the attempt is consumed), the user receives the
+  `manual.render_failed` bubble, and the branch returns to
+  `MANUAL_CHATTING` with the remaining budget intact.
 
 ### 11.3 Frontend unit (`frontend/tests/`)
 
@@ -4003,6 +5839,42 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
   - A switcher click on `/cs/runs/:id` results in exactly one
     `runStore.switchLanguage` call (the route-watcher path is a
     no-op after the locale store has already cascaded).
+- **ManualChatPanel (§ 9.1A, § 6A):**
+  - Renders the welcome message with exactly one `<strong>` span
+    when `illustration.manual.welcome` contains a single `#…#`
+    bold marker (via the `splitBoldMarker` helper).
+  - Does NOT render the welcome bubble when `manual_session.messages`
+    is non-empty (i.e. it has already been persisted by the
+    backend) — i.e. the welcome bubble is read from the backend
+    transcript, not synthesized client-side.
+  - The send button and `<textarea>` are disabled while
+    `runStore.isSendingManualMessage[illustration_id]` is true.
+  - During `MANUAL_GENERATING_PROMPTS` and `MANUAL_RENDERING`,
+    the input area is replaced by the indeterminate progress bar
+    + `illustration.manual.ui.rendering_hint`.
+  - After `manual_image_rendered`, the next two bubbles are
+    (a) an image bubble whose `<img>` src equals the event's
+    `image_url`, (b) an assistant bubble carrying the
+    `review_message.content` text. The panel also updates
+    `manual_session.sub_phase` to `feedback_gathering` from the
+    event payload.
+  - Sub-phase-dependent input placeholder (§ 9.1A): when
+    `manual_session.sub_phase === "concept_design"` the input
+    `placeholder` attribute equals
+    `i18n.t('illustration.manual.ui.input_placeholder_concept')`;
+    when it equals `"feedback_gathering"` the placeholder equals
+    `i18n.t('illustration.manual.ui.input_placeholder_feedback')`.
+    A `manual_message_appended` event whose `phase` is
+    `restart_concept` flips the placeholder back to the concept
+    one on the next render tick.
+  - On `illustration_manual_ended(outcome=completed)` the panel
+    unmounts and the card reverts to the standard completed
+    layout. On `outcome=exhausted` it unmounts and the FAILED
+    card is rendered (existing path). On `outcome=cancelled` it
+    unmounts and the CANCELLED card is rendered.
+- **`splitBoldMarker` utility:** unit tests for the `#…#`-parsing
+  helper (zero, one, two markers; empty string; nested `#`
+  rejected with a clear error in dev mode).
 
 ### 11.4 What is NOT required (out of scope for MVP)
 

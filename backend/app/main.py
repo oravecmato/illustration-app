@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.api import illustrations as illustrations_api
 from app.api import runs as runs_api
 from app.api import sessions as sessions_api
 from app.config import Settings, get_settings
@@ -101,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(sessions_api.router)
     app.include_router(runs_api.router)
+    app.include_router(illustrations_api.router)
 
     return app
 

@@ -1,7 +1,25 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { Illustration, Language, Run, SseEvent, TranslationItem } from "@/types";
-import { cancelRun, getRun, openSseStream, translateRun } from "@/services/api";
+import type {
+  Illustration,
+  Language,
+  ManualMessage,
+  ManualSessionSummary,
+  Run,
+  SseEvent,
+  TranslationItem,
+} from "@/types";
+import {
+  acceptIllustrationAttempt,
+  cancelRun,
+  getManualChat,
+  getRun,
+  iterateManualImage,
+  openSseStream,
+  postManualMessage,
+  regenerateIllustration as regenerateIllustrationApi,
+  translateRun,
+} from "@/services/api";
 import { i18n } from "@/i18n";
 
 interface RunTranslationCache {
@@ -28,6 +46,11 @@ export const useRunStore = defineStore("run", () => {
   // the user sees the source text being replaced (not blanked) only
   // while the network call is in flight.
   const pendingParagraphTranslations = ref<Set<number>>(new Set());
+
+  // Per-illustration "show chat vs. show image" UI toggle (§ 6A.9).
+  // Plain object (rather than Map/Set) for reliable Vue 3 reactivity in
+  // template `.get()` reads. Refresh resets this so defaults reapply.
+  const chatToggle = ref<Record<string, "shown" | "hidden">>({});
 
   let eventSource: EventSource | null = null;
 
@@ -130,6 +153,9 @@ export const useRunStore = defineStore("run", () => {
           ill.state = "COMPLETED";
           ill.image_url = event.data.image_url;
         }
+        // A completed (re)generation flips the card back to the image.
+        // Clear any chat toggle so the default viewMode rules apply.
+        hideManualChat(event.data.illustration_id);
         // Counters derive from illustrations.value via computed getters,
         // so the state change above is enough — no manual run.* mutation.
         break;
@@ -159,6 +185,104 @@ export const useRunStore = defineStore("run", () => {
         if (ill) {
           ill.character_role = event.data.character_role;
         }
+        break;
+      }
+      case "illustration_manual_started": {
+        // Auto-pipeline exhausted; § 6A manual chat opens.
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          const summary: ManualSessionSummary = ill.manual_session ?? {
+            messages: [],
+            manual_attempts: 0,
+            last_image_url: null,
+            sub_phase: event.data.sub_phase ?? "concept_design",
+          };
+          summary.sub_phase = event.data.sub_phase ?? summary.sub_phase ?? "concept_design";
+          summary.messages = [
+            ...summary.messages,
+            {
+              id: event.data.welcome_message.id,
+              role: event.data.welcome_message.role,
+              content: event.data.welcome_message.content,
+              image_url: null,
+              manual_attempt_index: null,
+              created_at: event.data.welcome_message.created_at,
+            },
+          ];
+          ill.manual_session = summary;
+          ill.manual_attempts = summary.manual_attempts;
+        }
+        break;
+      }
+      case "manual_message_appended": {
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          const summary: ManualSessionSummary = ill.manual_session ?? {
+            messages: [],
+            manual_attempts: ill.manual_attempts ?? 0,
+            last_image_url: null,
+            sub_phase: event.data.sub_phase ?? "concept_design",
+          };
+          if (event.data.sub_phase) {
+            summary.sub_phase = event.data.sub_phase;
+          }
+          // Reconcile optimistic user rows: if a pending user message with
+          // matching content exists, replace it; otherwise append.
+          const idx = summary.messages.findIndex(
+            (m) =>
+              m.pending &&
+              m.role === "user" &&
+              m.content === event.data.message.content,
+          );
+          const incoming: ManualMessage = { ...event.data.message };
+          if (idx >= 0) {
+            summary.messages.splice(idx, 1, incoming);
+          } else if (!summary.messages.some((m) => m.id === incoming.id)) {
+            summary.messages.push(incoming);
+          }
+          ill.manual_session = summary;
+        }
+        break;
+      }
+      case "manual_image_rendered": {
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          const summary: ManualSessionSummary = ill.manual_session ?? {
+            messages: [],
+            manual_attempts: 0,
+            last_image_url: null,
+            sub_phase: event.data.sub_phase ?? "feedback_gathering",
+          };
+          // After a successful render the backend always flips to
+          // feedback_gathering, but trust the event payload.
+          summary.sub_phase = event.data.sub_phase ?? "feedback_gathering";
+          if (!summary.messages.some((m) => m.id === event.data.image_message_id)) {
+            summary.messages.push({
+              id: event.data.image_message_id,
+              role: "image",
+              content: "",
+              image_url: event.data.image_url,
+              manual_attempt_index: event.data.manual_attempt,
+              concept_used: event.data.concept_used,
+              positive_prompt: event.data.positive_prompt,
+              negative_prompt: event.data.negative_prompt,
+              created_at: new Date().toISOString(),
+            });
+          }
+          // § 6A.10: no review_message bubble is auto-emitted anymore —
+          // the new ManualImageCard footer handles Accept / Iterate.
+          summary.manual_attempts = event.data.manual_attempt;
+          summary.last_image_url = event.data.image_url;
+          ill.manual_session = summary;
+          ill.manual_attempts = event.data.manual_attempt;
+        }
+        break;
+      }
+      case "illustration_manual_ended": {
+        // Terminal manual outcome. The accompanying `illustration_state` /
+        // `illustration_completed` / `illustration_failed` event drives the
+        // illustration state — nothing else to mutate here, but the
+        // explicit event lets the UI close the chat panel cleanly.
         break;
       }
       case "translations_refreshed": {
@@ -542,6 +666,144 @@ export const useRunStore = defineStore("run", () => {
     }
   }
 
+  // ── § 6A manual chat ───────────────────────────────────────────────────
+
+  async function loadManualChat(illustrationId: string): Promise<void> {
+    const data = await getManualChat(illustrationId);
+    const ill = illustrations.value.find((i) => i.id === illustrationId);
+    if (ill) {
+      // The backend may auto-open the manual flow on GET when the
+      // illustration is FAILED with budget left (legacy rows), which
+      // transitions the row to MANUAL_CHATTING. Reflect the new state
+      // locally so the IllustrationCard renders the chat panel rather
+      // than the failure placeholder until SSE catches up.
+      ill.state = data.state;
+      ill.manual_attempts = data.manual_attempts;
+      ill.manual_session = {
+        messages: data.messages,
+        manual_attempts: data.manual_attempts,
+        last_image_url: data.last_image_url,
+        sub_phase: data.sub_phase,
+      };
+    }
+  }
+
+  async function sendManualMessage(
+    illustrationId: string,
+    content: string,
+  ): Promise<void> {
+    const ill = illustrations.value.find((i) => i.id === illustrationId);
+    if (!ill) return;
+    const summary: ManualSessionSummary = ill.manual_session ?? {
+      messages: [],
+      manual_attempts: ill.manual_attempts ?? 0,
+      last_image_url: null,
+      sub_phase: "concept_design",
+    };
+    const clientId = `client-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    summary.messages = [
+      ...summary.messages,
+      {
+        id: clientId,
+        role: "user",
+        content,
+        image_url: null,
+        manual_attempt_index: null,
+        created_at: new Date().toISOString(),
+        pending: true,
+        client_id: clientId,
+      },
+    ];
+    ill.manual_session = summary;
+    try {
+      const data = await postManualMessage(illustrationId, content);
+      // Reconcile with the authoritative server response.
+      ill.manual_attempts = data.manual_attempts;
+      ill.manual_session = {
+        messages: data.messages,
+        manual_attempts: data.manual_attempts,
+        last_image_url: data.last_image_url,
+        sub_phase: data.sub_phase,
+      };
+    } catch (err) {
+      // Drop the optimistic row so the user can retry.
+      const current = ill.manual_session;
+      if (current) {
+        current.messages = current.messages.filter((m) => m.client_id !== clientId);
+        ill.manual_session = { ...current };
+      }
+      throw err;
+    }
+  }
+
+  // § 6A.9 manual regeneration ────────────────────────────────────────────
+
+  function showManualChat(illustrationId: string): void {
+    chatToggle.value = { ...chatToggle.value, [illustrationId]: "shown" };
+  }
+
+  function hideManualChat(illustrationId: string): void {
+    chatToggle.value = { ...chatToggle.value, [illustrationId]: "hidden" };
+  }
+
+  // § 6A.10 interactive image cards ──────────────────────────────────────
+
+  async function acceptManualAttempt(
+    illustrationId: string,
+    manualAttemptIndex: number,
+  ): Promise<void> {
+    const data = await acceptIllustrationAttempt(illustrationId, manualAttemptIndex);
+    const ill = illustrations.value.find((i) => i.id === illustrationId);
+    if (ill) {
+      // Reflect the server-side promotion locally; SSE
+      // (illustration_completed) will arrive too but updating eagerly
+      // makes the UI feel instant.
+      ill.state = data.state;
+      ill.manual_attempts = data.manual_attempts;
+      ill.manual_session = {
+        messages: data.messages,
+        manual_attempts: data.manual_attempts,
+        last_image_url: data.last_image_url,
+        sub_phase: data.sub_phase,
+      };
+      if (data.last_image_url) {
+        ill.image_url = data.last_image_url;
+      }
+    }
+  }
+
+  async function requestIterate(illustrationId: string): Promise<void> {
+    const data = await iterateManualImage(illustrationId);
+    const ill = illustrations.value.find((i) => i.id === illustrationId);
+    if (ill) {
+      ill.manual_attempts = data.manual_attempts;
+      ill.manual_session = {
+        messages: data.messages,
+        manual_attempts: data.manual_attempts,
+        last_image_url: data.last_image_url,
+        sub_phase: data.sub_phase,
+      };
+    }
+  }
+
+  async function regenerateIllustration(illustrationId: string): Promise<void> {
+    const data = await regenerateIllustrationApi(illustrationId);
+    const ill = illustrations.value.find((i) => i.id === illustrationId);
+    if (ill) {
+      // Backend transitions COMPLETED → MANUAL_CHATTING and appends a
+      // welcome bubble while preserving prior messages and image_url.
+      ill.state = data.state;
+      ill.manual_attempts = data.manual_attempts;
+      ill.manual_session = {
+        messages: data.messages,
+        manual_attempts: data.manual_attempts,
+        last_image_url: data.last_image_url,
+        sub_phase: data.sub_phase,
+      };
+    }
+    showManualChat(illustrationId);
+  }
+
   function reset(): void {
     unsubscribe();
     run.value = null;
@@ -552,6 +814,7 @@ export const useRunStore = defineStore("run", () => {
     currentLanguage.value = "sk";
     pendingTranslationLanguages.value.clear();
     pendingParagraphTranslations.value.clear();
+    chatToggle.value = {};
   }
 
   return {
@@ -579,5 +842,13 @@ export const useRunStore = defineStore("run", () => {
     switchLanguage,
     ensureTranslations,
     isLanguageFresh,
+    loadManualChat,
+    sendManualMessage,
+    chatToggle,
+    showManualChat,
+    hideManualChat,
+    regenerateIllustration,
+    acceptManualAttempt,
+    requestIterate,
   };
 });

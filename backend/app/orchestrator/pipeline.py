@@ -127,6 +127,21 @@ async def run_pipeline(
 
         await asyncio.gather(*[run_with_semaphore(ill) for ill in illustrations])
 
+        # Re-read illustrations from DB so we observe any state writes
+        # made by the manual fallback (§ 6A) during the auto branches.
+        illustrations = await repo.get_illustrations_for_run(run.id)
+
+        # If any illustration is still in a MANUAL_* state, the run stays
+        # in RUNNING and the manual-chat endpoint will finalize the run
+        # once the user resolves all manual sessions (§ 6A.3).
+        manual_states = {
+            IllustrationState.MANUAL_CHATTING,
+            IllustrationState.MANUAL_GENERATING_PROMPTS,
+            IllustrationState.MANUAL_RENDERING,
+        }
+        if any(ill.state in manual_states for ill in illustrations):
+            return
+
         # Count outcomes
         completed = sum(1 for ill in illustrations if ill.state == IllustrationState.COMPLETED)
         failed = sum(1 for ill in illustrations if ill.state == IllustrationState.FAILED)

@@ -10,8 +10,17 @@
     <div class="card-header">
       <span class="scene-number">{{ t('story.illustration_n', { n: illustration.scene_index + 1 }) }}</span>
       <span class="state-label">{{ stateLabel }}</span>
-      <span v-if="isNonTerminal" class="spinner" :aria-label="t('a11y.loading')" />
+      <span v-if="showHeaderSpinner" class="spinner" :aria-label="t('a11y.loading')" />
       <span class="header-spacer" />
+      <IllustrationCardMenu
+        v-if="showMenu"
+        :can-regenerate="canRegenerate"
+        :can-show-chat="canShowChat"
+        :is-chat-shown="viewMode === 'chat'"
+        @regenerate="handleRegenerateClick"
+        @show-chat="runStore.showManualChat(illustration.id)"
+        @hide-chat="runStore.hideManualChat(illustration.id)"
+      />
       <ConceptPopover
         v-if="illustration.current_concept"
         :concept="illustration.current_concept"
@@ -26,21 +35,21 @@
       {{ t('illustration.companion_subtitle', { description: illustration.companion.description }) }}
     </div>
 
-    <div class="image-slot">
+    <div v-if="viewMode !== 'chat'" class="image-slot">
       <a
-        v-if="illustration.state === 'COMPLETED' && illustration.image_url"
-        :href="illustration.image_url"
+        v-if="hasImage"
+        :href="illustration.image_url!"
         target="_blank"
         rel="noopener"
       >
         <img
-          :src="illustration.image_url"
+          :src="illustration.image_url!"
           :alt="t('story.illustration_n', { n: illustration.scene_index + 1 })"
           class="illustration-image"
         />
       </a>
       <div
-        v-else-if="illustration.state === 'FAILED'"
+        v-else-if="showFailedPlaceholder"
         class="image-failed"
       >
         <span class="sad-face">:(</span>
@@ -48,23 +57,106 @@
       </div>
       <SkeletonBlock v-else shape="rect" aspect-ratio="1 / 1" />
     </div>
+
+    <ManualChatPanel
+      v-if="viewMode === 'chat'"
+      :illustration="illustration"
+      @close="runStore.hideManualChat(illustration.id)"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { Illustration, IllustrationState } from "@/types";
+import { useRunStore } from "@/stores/run";
 import ConceptPopover from "./ConceptPopover.vue";
+import IllustrationCardMenu from "./IllustrationCardMenu.vue";
+import ManualChatPanel from "./ManualChatPanel.vue";
 import SkeletonBlock from "./SkeletonBlock.vue";
 
 const props = defineProps<{ illustration: Illustration }>();
 
 const { t } = useI18n();
+const runStore = useRunStore();
 
 const TERMINAL_STATES: IllustrationState[] = ["COMPLETED", "FAILED", "CANCELLED"];
 
 const ATTEMPT_STATES: IllustrationState[] = ["RENDERING", "REVISING_PROMPTS", "RETHINKING_CONCEPT"];
+
+const MANUAL_STATES: IllustrationState[] = [
+  "MANUAL_CHATTING",
+  "MANUAL_GENERATING_PROMPTS",
+  "MANUAL_RENDERING",
+];
+
+const MAX_MANUAL_ATTEMPTS = 5;
+
+const regenInFlight = ref(false);
+
+const hasImage = computed(
+  () => !!props.illustration.image_url && props.illustration.state !== "FAILED",
+);
+const isCompleted = computed(() => props.illustration.state === "COMPLETED");
+const isManualState = computed(() => MANUAL_STATES.includes(props.illustration.state));
+const budgetLeft = computed(
+  () => (props.illustration.manual_attempts ?? 0) < MAX_MANUAL_ATTEMPTS,
+);
+// A session exists when we are mid-manual or have any persisted manual data.
+const sessionExists = computed(
+  () =>
+    isManualState.value ||
+    !!props.illustration.manual_session ||
+    props.illustration.state === "FAILED",
+);
+
+// View mode resolution (§ 6A.9):
+//   - explicit toggle wins
+//   - otherwise default to image when one exists (even mid-regen)
+//   - otherwise show chat if a session exists with budget left
+//   - otherwise placeholder
+const viewMode = computed<"image" | "chat" | "placeholder">(() => {
+  const toggle = runStore.chatToggle[props.illustration.id];
+  if (toggle === "shown") return "chat";
+  if (toggle === "hidden") return hasImage.value ? "image" : "placeholder";
+
+  if (hasImage.value) return "image";
+  if (sessionExists.value && budgetLeft.value) return "chat";
+  return "placeholder";
+});
+
+const canRegenerate = computed(
+  () => isCompleted.value && budgetLeft.value && !regenInFlight.value,
+);
+// Chat remains accessible after budget exhaustion (§ 6A.10): the user
+// can still open the chat to click "Use" on a prior ManualImageCard
+// attempt and promote it to the canonical illustration.
+const canShowChat = computed(() => sessionExists.value && !isCompleted.value);
+const showMenu = computed(() => canRegenerate.value || canShowChat.value);
+
+// The "could not be created" placeholder only after even the manual budget
+// has been exhausted.
+const showFailedPlaceholder = computed(() => {
+  return (
+    props.illustration.state === "FAILED" &&
+    (props.illustration.manual_attempts ?? 0) >= MAX_MANUAL_ATTEMPTS
+  );
+});
+
+async function handleRegenerateClick(): Promise<void> {
+  if (props.illustration.state === "COMPLETED") {
+    regenInFlight.value = true;
+    try {
+      await runStore.regenerateIllustration(props.illustration.id);
+    } finally {
+      regenInFlight.value = false;
+    }
+  } else {
+    // MANUAL_CHATTING / FAILED-with-budget: no API call — just reveal chat.
+    runStore.showManualChat(props.illustration.id);
+  }
+}
 
 const stateLabel = computed(() => {
   const base = t(`illustration.state.${props.illustration.state}`);
@@ -75,6 +167,14 @@ const stateLabel = computed(() => {
 });
 
 const isNonTerminal = computed(() => !TERMINAL_STATES.includes(props.illustration.state));
+
+// Header spinner is suppressed in MANUAL_CHATTING — that's an
+// idle-waiting-for-user state, not a "work in progress" state. It only
+// spins during the actual image pipeline: prompt generation and render
+// (both auto and manual variants).
+const showHeaderSpinner = computed(
+  () => isNonTerminal.value && props.illustration.state !== "MANUAL_CHATTING",
+);
 
 const showAttemptCounter = computed(() => ATTEMPT_STATES.includes(props.illustration.state));
 

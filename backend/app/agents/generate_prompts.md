@@ -24,6 +24,15 @@ You will receive the following context in the user message:
   `"a brass clockwork owl"`) and `interaction` is what the companion is
   doing relative to the human in this specific scene (e.g.
   `"curled on her lap"`).
+- `prompting_notes` (OPTIONAL, may be absent or `null`) — an English-only
+  cumulative memo of *renderer-specific prompt-level lessons* for this
+  illustration, accumulated by the collaboration-mode agent across
+  prior failed attempts. When present, treat it as **authoritative
+  prompt-level guidance** on what tag choices have worked or failed for
+  this particular character + environment + companion combination, and
+  fold its recommendations into `positive` / `negative`. The memo never
+  changes the concept — only how the same concept is encoded into tags.
+  When absent or `null`, behave exactly as you do without the field.
 
 ## Critical prompt rules
 

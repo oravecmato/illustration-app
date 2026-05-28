@@ -18,16 +18,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Illustration,
     IllustrationConceptTranslation,
+    IllustrationState,
     Run,
     RunStatus,
     StoryBlockTranslation,
     StoryTranslation,
 )
-from app.db.repositories import RunRepository
+from app.db.repositories import ManualRepository, RunRepository
 from app.db.session import get_session_factory
 from app.orchestrator.events import EventBus
 from app.schemas.api import (
     IllustrationResponse,
+    ManualMessageResponse,
+    ManualSessionSummary,
     RunDetailResponse,
     RunResponse,
     TranslateRequest,
@@ -208,6 +211,7 @@ def _build_illustration_response(
     language: str | None = None,
     source_language: str | None = None,
     concept_trans: IllustrationConceptTranslation | None = None,
+    manual_session: ManualSessionSummary | None = None,
 ) -> IllustrationResponse:
     """Build IllustrationResponse with translation support.
 
@@ -270,6 +274,53 @@ def _build_illustration_response(
         prompt_attempt=ill.prompt_attempt,
         image_url=image_url,
         companion=companion,
+        manual_attempts=ill.manual_attempts or 0,
+        manual_session=manual_session,
+    )
+
+
+async def _load_manual_session_summary(
+    session: AsyncSession, illustration
+) -> ManualSessionSummary | None:
+    """Load manual chat rows for an illustration if it has entered the
+    manual flow (§ 6A). Returns None for illustrations that never did.
+    """
+    if illustration.manual_attempts == 0 and illustration.state not in (
+        IllustrationState.MANUAL_CHATTING,
+        IllustrationState.MANUAL_GENERATING_PROMPTS,
+        IllustrationState.MANUAL_RENDERING,
+    ):
+        # Skip a DB roundtrip for the common case.
+        return None
+    manual_repo = ManualRepository(session)
+    rows = await manual_repo.get_messages(illustration.id)
+    if not rows:
+        return None
+    ms = await manual_repo.get_manual_session(illustration.id)
+    last_image_url = None
+    sub_phase = "concept_design"
+    if ms is not None:
+        if ms.last_manual_image_path:
+            last_image_url = f"/static/{ms.last_manual_image_path}"
+        sub_phase = ms.sub_phase or "concept_design"
+    return ManualSessionSummary(
+        messages=[
+            ManualMessageResponse(
+                id=row.id,
+                role=row.role,
+                content=row.content,
+                image_url=row.image_url,
+                manual_attempt_index=row.manual_attempt_index,
+                concept_used=row.concept_used,
+                positive_prompt=row.positive_prompt,
+                negative_prompt=row.negative_prompt,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        manual_attempts=illustration.manual_attempts or 0,
+        last_image_url=last_image_url,
+        sub_phase=sub_phase,
     )
 
 
@@ -287,11 +338,17 @@ async def _build_snapshot(
     translated state the frontend just fetched.
     """
     if language == run.source_language:
+        manual_summaries = {
+            ill.id: await _load_manual_session_summary(session, ill) for ill in illustrations
+        }
         return {
             "run": _build_run_response(run, language=language).model_dump(mode="json"),
             "illustrations": [
                 _build_illustration_response(
-                    ill, language=language, source_language=run.source_language
+                    ill,
+                    language=language,
+                    source_language=run.source_language,
+                    manual_session=manual_summaries.get(ill.id),
                 ).model_dump(mode="json")
                 for ill in illustrations
             ],
@@ -338,6 +395,9 @@ async def _build_snapshot(
     )
     concept_trans_map = {ct.illustration_id: ct for ct in concept_trans_list}
 
+    manual_summaries = {
+        ill.id: await _load_manual_session_summary(session, ill) for ill in illustrations
+    }
     return {
         "run": _build_run_response(
             run, language=language, story_trans=story_trans, block_trans_map=block_trans_map
@@ -348,6 +408,7 @@ async def _build_snapshot(
                 language=language,
                 source_language=run.source_language,
                 concept_trans=concept_trans_map.get(ill.id),
+                manual_session=manual_summaries.get(ill.id),
             ).model_dump(mode="json")
             for ill in illustrations
         ],
@@ -379,11 +440,17 @@ async def get_run(
 
     # If lang == source_language, no need to fetch translations
     if lang == run.source_language:
+        manual_summaries = {
+            ill.id: await _load_manual_session_summary(session, ill) for ill in illustrations
+        }
         return RunDetailResponse(
             run=_build_run_response(run, language=lang),
             illustrations=[
                 _build_illustration_response(
-                    ill, language=lang, source_language=run.source_language
+                    ill,
+                    language=lang,
+                    source_language=run.source_language,
+                    manual_session=manual_summaries.get(ill.id),
                 )
                 for ill in illustrations
             ],
@@ -420,6 +487,9 @@ async def get_run(
     concept_trans_list = concept_trans_result.scalars().all()
     concept_trans_map = {ct.illustration_id: ct for ct in concept_trans_list}
 
+    manual_summaries = {
+        ill.id: await _load_manual_session_summary(session, ill) for ill in illustrations
+    }
     return RunDetailResponse(
         run=_build_run_response(
             run, language=lang, story_trans=story_trans, block_trans_map=block_trans_map
@@ -430,6 +500,7 @@ async def get_run(
                 language=lang,
                 source_language=run.source_language,
                 concept_trans=concept_trans_map.get(ill.id),
+                manual_session=manual_summaries.get(ill.id),
             )
             for ill in illustrations
         ],
@@ -923,5 +994,64 @@ async def cancel_run(
     cancel_flag = _cancel_flags.get(run_id)
     if cancel_flag:
         cancel_flag.set()
+
+    # § 6A.3 cancellation: illustrations parked in any MANUAL_* state have
+    # no long-running async loop to interrupt, so the cancel endpoint must
+    # transition them synchronously. Auto-pipeline illustrations are
+    # interrupted by the cancel_flag and transitioned by branch.py.
+    illustrations = await repo.get_illustrations_for_run(run_id)
+    manual_states = {
+        IllustrationState.MANUAL_CHATTING,
+        IllustrationState.MANUAL_GENERATING_PROMPTS,
+        IllustrationState.MANUAL_RENDERING,
+    }
+    event_bus = _run_buses.get(run_id)
+    for ill in illustrations:
+        if ill.state in manual_states:
+            await repo.update_illustration(ill, state=IllustrationState.CANCELLED)
+            if event_bus is not None:
+                await event_bus.publish(
+                    "illustration_state",
+                    {
+                        "illustration_id": ill.id,
+                        "scene_index": ill.scene_index,
+                        "state": IllustrationState.CANCELLED,
+                        "concept_attempt": ill.concept_attempt,
+                        "prompt_attempt": ill.prompt_attempt,
+                        "current_concept": ill.current_concept,
+                        "scene_excerpt": ill.scene_excerpt,
+                    },
+                )
+                await event_bus.publish(
+                    "illustration_manual_ended",
+                    {
+                        "illustration_id": ill.id,
+                        "scene_index": ill.scene_index,
+                        "outcome": "cancelled",
+                    },
+                )
+
+    # If the pipeline already finished its asyncio.gather and is parked
+    # waiting on the manual flow, no background task is going to flip the
+    # run to CANCELLED. Do it here once the illustrations are settled.
+    if cancel_flag and all(
+        ill.state
+        in (
+            IllustrationState.COMPLETED,
+            IllustrationState.FAILED,
+            IllustrationState.CANCELLED,
+        )
+        for ill in illustrations
+    ):
+        completed = sum(1 for ill in illustrations if ill.state == IllustrationState.COMPLETED)
+        failed = sum(1 for ill in illustrations if ill.state == IllustrationState.FAILED)
+        await repo.update_run(
+            run,
+            status=RunStatus.CANCELLED,
+            completed_count=completed,
+            failed_count=failed,
+        )
+        if event_bus is not None:
+            await event_bus.publish("run_cancelled", {})
 
     return {"status": "CANCELLED"}

@@ -17,9 +17,19 @@ from httpx import AsyncClient
 
 from app.api import runs as runs_api
 from app.config import Settings
-from app.constants import CONFIRMED_ACK
+from app.constants import CONFIRMED_ACK, MANUAL_ITERATE_PROMPT
 from app.db.migrations import upgrade_to_head_async
-from app.db.session import init_db
+from app.db.models import (
+    Illustration,
+    IllustrationState,
+    ManualIllustrationSession,
+    ManualMessage,
+    ManualMessageRole,
+    Run,
+    RunStatus,
+)
+from app.db.models import Session as SessionModel
+from app.db.session import get_session_factory, init_db
 from app.main import create_app
 from app.services.character_config import load_character_config
 from app.services.claude import ClaudeClient, load_agent_prompts
@@ -435,3 +445,191 @@ async def test_cancel_active_run(app_client):
 
     cancel_resp = await client.post(f"/api/runs/{run_id}/cancel")
     assert cancel_resp.status_code in (200, 409)
+
+
+# ── § 6A.10 Manual image card endpoints ──────────────────────────────────────
+
+MANUAL_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+
+
+async def _seed_manual_illustration(
+    *,
+    settings: Settings,
+    attempts: int = 1,
+    write_files: bool = True,
+    state: IllustrationState = IllustrationState.MANUAL_CHATTING,
+    error_message: str | None = None,
+) -> tuple[str, str, str]:
+    """Seed a MANUAL_CHATTING illustration with N image-row attempts.
+
+    Returns ``(run_id, illustration_id, run_output_subdir)``.
+    """
+    factory = get_session_factory()
+    async with factory() as db:
+        sess = SessionModel()
+        db.add(sess)
+        await db.flush()
+        run = Run(
+            session_id=sess.id,
+            status=RunStatus.RUNNING,
+            source_language="sk",
+            topic_short="Test",
+            story_title="Test Story",
+            story_topic_description="A test",
+            story_blocks_json=json.dumps([{"type": "paragraph", "text": "Once."}]),
+            style_guide_json=json.dumps(
+                {
+                    "overall_style_positive": "anime",
+                    "overall_style_negative": "blurry",
+                    "character_lora": "",
+                    "character_baseline_description": "",
+                }
+            ),
+            illustration_count=1,
+        )
+        db.add(run)
+        await db.flush()
+        ill = Illustration(
+            run_id=run.id,
+            scene_index=0,
+            scene_excerpt="Once.",
+            paragraph_index=0,
+            character_role="female",
+            initial_concept="A girl on a stage",
+            current_concept="A girl on a stage",
+            state=state,
+            manual_attempts=attempts,
+            error_message=error_message,
+        )
+        db.add(ill)
+        await db.flush()
+        ms = ManualIllustrationSession(
+            illustration_id=ill.id,
+            sub_phase="feedback_gathering",
+            last_agreed_concept="A girl on a stage",
+            last_manual_image_path=f"runs/{run.id}/manual_0_{attempts}.png",
+        )
+        db.add(ms)
+        for k in range(1, attempts + 1):
+            db.add(
+                ManualMessage(
+                    illustration_id=ill.id,
+                    role=ManualMessageRole.IMAGE,
+                    content="",
+                    image_url=f"/static/runs/{run.id}/manual_0_{k}.png",
+                    manual_attempt_index=k,
+                    concept_used="A girl on a stage",
+                    positive_prompt="brave girl, stage",
+                    negative_prompt="blurry",
+                )
+            )
+        await db.commit()
+        run_id, ill_id = run.id, ill.id
+
+    if write_files:
+        run_dir = os.path.join(settings.output_dir, "runs", run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        for k in range(1, attempts + 1):
+            with open(os.path.join(run_dir, f"manual_0_{k}.png"), "wb") as f:
+                f.write(MANUAL_PNG)
+    return run_id, ill_id, f"runs/{run_id}"
+
+
+@pytest.mark.asyncio
+async def test_accept_attempt_promotes_latest(app_client):
+    client, settings = app_client
+    _, ill_id, run_subdir = await _seed_manual_illustration(settings=settings, attempts=1)
+
+    resp = await client.post(
+        f"/api/illustrations/{ill_id}/accept", json={"manual_attempt_index": 1}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["state"] == IllustrationState.COMPLETED
+    canonical = os.path.join(settings.output_dir, run_subdir, "scene_0.png")
+    assert os.path.exists(canonical)
+
+
+@pytest.mark.asyncio
+async def test_accept_attempt_promotes_older(app_client):
+    client, settings = app_client
+    _, ill_id, run_subdir = await _seed_manual_illustration(settings=settings, attempts=3)
+
+    resp = await client.post(
+        f"/api/illustrations/{ill_id}/accept", json={"manual_attempt_index": 1}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["state"] == IllustrationState.COMPLETED
+    canonical = os.path.join(settings.output_dir, run_subdir, "scene_0.png")
+    assert os.path.exists(canonical)
+
+
+@pytest.mark.asyncio
+async def test_accept_attempt_bad_index_returns_404(app_client):
+    client, settings = app_client
+    _, ill_id, _ = await _seed_manual_illustration(settings=settings, attempts=1)
+
+    resp = await client.post(
+        f"/api/illustrations/{ill_id}/accept", json={"manual_attempt_index": 9}
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_accept_attempt_missing_file_returns_410(app_client):
+    client, settings = app_client
+    _, ill_id, _ = await _seed_manual_illustration(settings=settings, attempts=1, write_files=False)
+
+    resp = await client.post(
+        f"/api/illustrations/{ill_id}/accept", json={"manual_attempt_index": 1}
+    )
+    assert resp.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_accept_attempt_from_failed_state(app_client):
+    """§ 6A.10 post-exhaustion recovery: FAILED illustrations can be
+    healed by promoting a prior attempt to canonical."""
+    client, settings = app_client
+    _, ill_id, run_subdir = await _seed_manual_illustration(
+        settings=settings,
+        attempts=5,
+        state=IllustrationState.FAILED,
+        error_message="Manual attempts exhausted",
+    )
+
+    resp = await client.post(
+        f"/api/illustrations/{ill_id}/accept", json={"manual_attempt_index": 2}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["state"] == IllustrationState.COMPLETED
+    canonical = os.path.join(settings.output_dir, run_subdir, "scene_0.png")
+    assert os.path.exists(canonical)
+
+
+@pytest.mark.asyncio
+async def test_manual_iterate_appends_localized_bubble(app_client):
+    client, settings = app_client
+    _, ill_id, _ = await _seed_manual_illustration(settings=settings, attempts=1)
+
+    resp = await client.post(f"/api/illustrations/{ill_id}/manual/iterate")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Last message is the localized iterate prompt (Slovak).
+    last = body["messages"][-1]
+    assert last["role"] == ManualMessageRole.ASSISTANT
+    assert last["content"] == MANUAL_ITERATE_PROMPT["sk"]
+
+
+@pytest.mark.asyncio
+async def test_manual_iterate_is_idempotent(app_client):
+    client, settings = app_client
+    _, ill_id, _ = await _seed_manual_illustration(settings=settings, attempts=1)
+
+    first = await client.post(f"/api/illustrations/{ill_id}/manual/iterate")
+    assert first.status_code == 200
+    count_after_first = len(first.json()["messages"])
+    second = await client.post(f"/api/illustrations/{ill_id}/manual/iterate")
+    assert second.status_code == 200
+    assert len(second.json()["messages"]) == count_after_first

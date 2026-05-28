@@ -37,9 +37,18 @@ class IllustrationState(StrEnum):
     EVALUATING = "EVALUATING"
     REVISING_PROMPTS = "REVISING_PROMPTS"
     RETHINKING_CONCEPT = "RETHINKING_CONCEPT"
+    MANUAL_CHATTING = "MANUAL_CHATTING"
+    MANUAL_GENERATING_PROMPTS = "MANUAL_GENERATING_PROMPTS"
+    MANUAL_RENDERING = "MANUAL_RENDERING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class ManualMessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    IMAGE = "image"
 
 
 def _utcnow() -> datetime:
@@ -130,12 +139,77 @@ class Illustration(Base):
     companion_description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     companion_interaction: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    manual_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    manual_state_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
     run: Mapped["Run"] = relationship("Run", back_populates="illustrations")
+    manual_session: Mapped["ManualIllustrationSession | None"] = relationship(
+        "ManualIllustrationSession",
+        back_populates="illustration",
+        uselist=False,
+    )
+    manual_messages: Mapped[list["ManualMessage"]] = relationship(
+        "ManualMessage",
+        back_populates="illustration",
+        order_by="ManualMessage.created_at",
+    )
+
+
+class ManualIllustrationSession(Base):
+    """One row per illustration that has ever entered the manual flow (§ 6A)."""
+
+    __tablename__ = "manual_illustration_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    illustration_id: Mapped[str] = mapped_column(
+        String, ForeignKey("illustrations.id"), nullable=False, unique=True
+    )
+    sub_phase: Mapped[str] = mapped_column(
+        String, nullable=False, default="concept_design", server_default="concept_design"
+    )
+    last_manual_image_path: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    last_concept_candidate: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    last_agreed_concept: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    prompting_notes: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    illustration: Mapped["Illustration"] = relationship(
+        "Illustration", back_populates="manual_session"
+    )
+
+
+class ManualMessage(Base):
+    """Chat row in an illustration's manual flow (§ 6A)."""
+
+    __tablename__ = "manual_messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    illustration_id: Mapped[str] = mapped_column(
+        String, ForeignKey("illustrations.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    manual_attempt_index: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # Per-attempt provenance for `role=image` rows. Populated only when the
+    # row is the image record of a manual render; all other roles leave
+    # these NULL. Legacy rows from before the migration also stay NULL
+    # (frontend disables the corresponding popovers).
+    concept_used: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    positive_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    illustration: Mapped["Illustration"] = relationship(
+        "Illustration", back_populates="manual_messages"
+    )
 
 
 class StoryTranslation(Base):

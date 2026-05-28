@@ -1,7 +1,7 @@
 """Unit tests for per-illustration branch state machine (§11.1)."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -134,23 +134,36 @@ async def run_branch(illustration, style_guide, claude, runpod, cancel_flag=None
 
     workflow_template = {"node": {"inputs": {"text": "POSITIVE_PROMPT", "lora": "CHARACTER_LORA"}}}
 
-    await _run_branch(
-        illustration=illustration,
-        style_guide=style_guide,
-        workflow_template=workflow_template,
-        output_dir="/tmp",
-        claude=claude,
-        runpod=runpod,
-        repo=repo,
-        event_bus=event_bus,
-        cancel_flag=cancel_flag,
-        character_config=CHARACTER_CONFIG,
-        story_title="A short story",
-        story_blocks=[
-            {"type": "paragraph", "text": "Stál pri okne a hľadel von."},
-            {"type": "illustration", "scene_index": 0},
-        ],
-    )
+    # The exhaustion path in branch.py constructs a ManualService and calls
+    # open_manual_flow(). We don't want unit tests to depend on a real
+    # SQLAlchemy session — stub the service so it just transitions state.
+    async def _stub_open_manual_flow(ill, source_language):
+        await repo.update_illustration(ill, state=IllustrationState.MANUAL_CHATTING)
+
+    fake_service = MagicMock()
+    fake_service.open_manual_flow = AsyncMock(side_effect=_stub_open_manual_flow)
+
+    with (
+        patch("app.orchestrator.branch.ManualService", return_value=fake_service),
+        patch("app.orchestrator.branch.ManualRepository", return_value=MagicMock()),
+    ):
+        await _run_branch(
+            illustration=illustration,
+            style_guide=style_guide,
+            workflow_template=workflow_template,
+            output_dir="/tmp",
+            claude=claude,
+            runpod=runpod,
+            repo=repo,
+            event_bus=event_bus,
+            cancel_flag=cancel_flag,
+            character_config=CHARACTER_CONFIG,
+            story_title="A short story",
+            story_blocks=[
+                {"type": "paragraph", "text": "Stál pri okne a hľadel von."},
+                {"type": "illustration", "scene_index": 0},
+            ],
+        )
     return illustration
 
 
@@ -215,14 +228,20 @@ async def test_concept_rejection_immediate():
 
 
 @pytest.mark.asyncio
-async def test_all_attempts_exhausted_leads_to_failed():
-    """All 3 concepts, all 3 prompt attempts each -> FAILED."""
+async def test_all_attempts_exhausted_enters_manual_flow():
+    """All 3 concepts, all 3 prompt attempts each → MANUAL_CHATTING (§ 6A).
+
+    The branch no longer transitions straight to FAILED on auto-pipeline
+    exhaustion; it hands off to the manual chat fallback by transitioning
+    the illustration to MANUAL_CHATTING and creating a manual session
+    row. Exhaustion-to-FAILED only happens later, inside the manual flow,
+    when the manual budget itself is exhausted.
+    """
     ill = make_illustration()
     claude, runpod = make_services()
     claude.evaluate_image.return_value = VERDICT_FAIL_PROMPT
     await run_branch(ill, STYLE_GUIDE, claude, runpod)
-    assert ill.state == IllustrationState.FAILED
-    assert ill.error_message is not None
+    assert ill.state == IllustrationState.MANUAL_CHATTING
 
 
 @pytest.mark.asyncio

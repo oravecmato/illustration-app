@@ -86,9 +86,49 @@ export type IllustrationState =
   | "EVALUATING"
   | "REVISING_PROMPTS"
   | "RETHINKING_CONCEPT"
+  | "MANUAL_CHATTING"
+  | "MANUAL_GENERATING_PROMPTS"
+  | "MANUAL_RENDERING"
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED";
+
+export type ManualMessageRole = "user" | "assistant" | "image";
+
+export type ManualSubPhase = "concept_design" | "feedback_gathering";
+
+export interface ManualMessage {
+  id: string;
+  role: ManualMessageRole;
+  content: string;
+  image_url: string | null;
+  manual_attempt_index: number | null;
+  // Per-attempt provenance populated only on `role === "image"` rows
+  // (legacy rows pre-§6A.10 leave these null → popovers disabled).
+  concept_used?: string | null;
+  positive_prompt?: string | null;
+  negative_prompt?: string | null;
+  created_at: string;
+  // Client-only fields for optimistic rendering of POSTed user messages.
+  pending?: boolean;
+  client_id?: string;
+}
+
+export interface ManualSessionSummary {
+  messages: ManualMessage[];
+  manual_attempts: number;
+  last_image_url: string | null;
+  sub_phase: ManualSubPhase;
+}
+
+export interface ManualSessionResponse {
+  illustration_id: string;
+  state: IllustrationState;
+  manual_attempts: number;
+  messages: ManualMessage[];
+  last_image_url: string | null;
+  sub_phase: ManualSubPhase;
+}
 
 export interface StyleGuide {
   overall_style_positive: string;
@@ -143,6 +183,8 @@ export interface Illustration {
   prompt_attempt: number;
   image_url: string | null;
   companion: Companion | null;
+  manual_attempts?: number;
+  manual_session?: ManualSessionSummary | null;
 }
 
 // SSE event payloads
@@ -218,6 +260,47 @@ export interface RunFailedEvent {
   error_message: string;
 }
 
+// ── § 6A manual chat SSE events ───────────────────────────────────────────
+
+export interface IllustrationManualStartedEvent {
+  illustration_id: string;
+  scene_index: number;
+  sub_phase: ManualSubPhase;
+  welcome_message: {
+    id: string;
+    role: ManualMessageRole;
+    content: string;
+    created_at: string;
+  };
+}
+
+export interface ManualMessageAppendedEvent {
+  illustration_id: string;
+  scene_index: number;
+  sub_phase: ManualSubPhase;
+  message: ManualMessage;
+}
+
+export interface ManualImageRenderedEvent {
+  illustration_id: string;
+  scene_index: number;
+  sub_phase: ManualSubPhase;
+  manual_attempt: number;
+  image_url: string;
+  image_message_id: string;
+  // § 6A.10: per-attempt provenance for the new image row. Used by the
+  // frontend to render ManualImageCard popovers.
+  concept_used: string | null;
+  positive_prompt: string | null;
+  negative_prompt: string | null;
+}
+
+export interface IllustrationManualEndedEvent {
+  illustration_id: string;
+  scene_index: number;
+  outcome: "completed" | "exhausted" | "cancelled";
+}
+
 export type SseEvent =
   | { type: "snapshot"; data: SnapshotEvent }
   | { type: "illustration_state"; data: IllustrationStateEvent }
@@ -225,6 +308,10 @@ export type SseEvent =
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
   | { type: "illustration_companion_updated"; data: IllustrationCompanionUpdatedEvent }
   | { type: "illustration_role_updated"; data: IllustrationRoleUpdatedEvent }
+  | { type: "illustration_manual_started"; data: IllustrationManualStartedEvent }
+  | { type: "manual_message_appended"; data: ManualMessageAppendedEvent }
+  | { type: "manual_image_rendered"; data: ManualImageRenderedEvent }
+  | { type: "illustration_manual_ended"; data: IllustrationManualEndedEvent }
   | { type: "translations_refreshed"; data: TranslationsRefreshedEvent }
   | { type: "paragraph_updated"; data: ParagraphUpdatedEvent }
   | { type: "run_completed"; data: RunCompletedEvent }

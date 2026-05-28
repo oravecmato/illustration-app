@@ -7,11 +7,12 @@ import os
 
 from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
 from app.db.models import Illustration, IllustrationState
-from app.db.repositories import RunRepository
+from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
 from app.schemas.claude import Companion, StyleGuide, companion_in_pool
 from app.services.claude import ClaudeClient
 from app.services.images import save_image
+from app.services.manual import ManualService
 from app.services.runpod import RunPodClient
 from app.services.workflow import replace_placeholders
 
@@ -376,19 +377,23 @@ async def run_branch(
         if concept_succeeded:
             return
 
-    # All attempts exhausted
-    await transition(
-        IllustrationState.FAILED,
-        error_message="All concept and prompt attempts exhausted",
+    # All automatic attempts exhausted — enter the § 6A manual chat
+    # fallback instead of going straight to FAILED. The branch task ends
+    # here; the rest of the manual flow runs synchronously inside the
+    # POST /api/illustrations/{id}/manual/messages handler.
+    manual_repo = ManualRepository(repo.session)
+    manual_service = ManualService(
+        run_repo=repo,
+        manual_repo=manual_repo,
+        claude=claude,
+        runpod=runpod,
+        event_bus=event_bus,
+        cancel_flag=cancel_flag,
+        workflow_template=workflow_template,
+        output_dir=output_dir,
+        character_config=char_config,
     )
-    await event_bus.publish(
-        "illustration_failed",
-        {
-            "illustration_id": illustration.id,
-            "scene_index": illustration.scene_index,
-            "error_message": illustration.error_message,
-        },
-    )
+    await manual_service.open_manual_flow(illustration, source_language=source_language)
 
 
 def _load_last_verdict(illustration: Illustration):

@@ -23,6 +23,8 @@ from app.schemas.claude import (
     Companion,
     EvaluateImageResponse,
     GeneratePromptsResponse,
+    ManualConceptResponse,
+    ManualRevisePromptsResponse,
     RethinkConceptResponse,
     RevisePromptsResponse,
     StyleGuide,
@@ -37,6 +39,28 @@ STRICT_JSON_RETRY_SUFFIX = (
 )
 
 
+def _strip_json_fences(text: str) -> str:
+    """Best-effort recovery for agents that wrap JSON in Markdown fences.
+
+    Strips a single leading ```json / ``` fence and trailing ``` fence
+    (with surrounding whitespace) so ``json.loads`` can consume the body.
+    The agent prompts all forbid this, but the model occasionally lapses
+    — falling back here avoids a 502 over a cosmetic wrapping.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # Drop opening fence + optional language tag on first line.
+        first_newline = stripped.find("\n")
+        if first_newline != -1:
+            stripped = stripped[first_newline + 1 :]
+        else:
+            stripped = stripped[3:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        stripped = stripped.strip()
+    return stripped
+
+
 AGENT_FILES = {
     "chat": "chat.md",
     "build_story": "build_story.md",
@@ -45,6 +69,8 @@ AGENT_FILES = {
     "revise_prompts": "revise_prompts.md",
     "rethink_concept": "rethink_concept.md",
     "translate": "translate.md",
+    "manual_concept": "manual_concept.md",
+    "manual_revise_prompts": "manual_revise_prompts.md",
 }
 
 
@@ -106,11 +132,16 @@ class ClaudeClient:
             raw_text = response.content[0].text
 
             try:
-                data = json.loads(raw_text)
+                data = json.loads(_strip_json_fences(raw_text))
                 return response_model(**data)
             except (json.JSONDecodeError, ValidationError) as e:
                 last_error = e
-                logger.warning("Claude response parse failure (attempt %d): %s", attempt + 1, e)
+                logger.warning(
+                    "Claude response parse failure (attempt %d): %s; raw=%r",
+                    attempt + 1,
+                    e,
+                    raw_text[:500],
+                )
 
         raise ClaudeError(
             f"Failed to parse Claude response after {CLAUDE_JSON_RETRY + 1} attempts: {last_error}"
@@ -177,15 +208,27 @@ class ClaudeClient:
         character_role: str | None,
         character_config: dict,
         companion: Companion | None = None,
+        prompting_notes: str | None = None,
     ) -> GeneratePromptsResponse:
         """Generate prompts for illustration.
 
         When character_role is None (companion-alone scenes), workflow will be 'no-lora'.
+
+        `prompting_notes` is the optional English-only cumulative memo curated by
+        Agent 6 in the collaboration mode (§ 6A.2 rule #12, § 7.1 Call 1). NULL in
+        the auto pipeline. When present, the prompt treats it as authoritative
+        prompt-level guidance about this illustration's known renderer blind
+        spots.
         """
         companion_line = (
             f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
             if companion is not None
             else "companion: null"
+        )
+        notes_line = (
+            f"\nprompting_notes (English-only renderer hints, authoritative):\n{prompting_notes}\n"
+            if prompting_notes
+            else ""
         )
 
         if character_role:
@@ -200,7 +243,8 @@ class ClaudeClient:
                 f"style_negative: {style_guide.overall_style_negative}\n"
                 f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
                 f"concept: {current_concept}\n"
-                f"{companion_line}\n\n"
+                f"{companion_line}\n"
+                f"{notes_line}\n"
                 f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
                 'Respond with JSON: {"workflow": "single-lora", '
                 '"positive": "...", "negative": "..."}'
@@ -212,7 +256,8 @@ class ClaudeClient:
                 f"style_positive: {style_guide.overall_style_positive}\n"
                 f"style_negative: {style_guide.overall_style_negative}\n\n"
                 f"concept: {current_concept}\n"
-                f"{companion_line}\n\n"
+                f"{companion_line}\n"
+                f"{notes_line}\n"
                 f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
                 'Respond with JSON: {"workflow": "no-lora", "positive": "...", "negative": "..."}'
             )
@@ -438,5 +483,185 @@ class ClaudeClient:
             response_model=TranslateResponse,
             system=self._prompts["translate"],
             max_tokens=4096,
+        )
+        return result  # type: ignore[return-value]
+
+    # ── Agent 6: manual_concept ──────────────────────────────────────────────
+
+    async def manual_concept(
+        self,
+        *,
+        source_language: str,
+        sub_phase: str,
+        story_title: str,
+        story_blocks: list[dict],
+        current_paragraph_index: int,
+        current_scene_excerpt: str,
+        original_concept: str,
+        character_role: str | None,
+        current_companion: Companion | None,
+        manual_attempts_consumed: int,
+        manual_attempts_remaining: int,
+        last_concept_candidate: str | None,
+        last_agreed_concept: str | None,
+        prompting_notes: str | None,
+        transcript: list[dict],
+    ) -> ManualConceptResponse:
+        """Run one manual-chat turn with Agent 6 (§ 6A, § 7.1 Call 6).
+
+        ``sub_phase`` is the active sub-phase persisted on the manual
+        session row (``concept_design`` / ``feedback_gathering``); the
+        prompt's phase machine uses it to know which output `phase`
+        values are legal on the upcoming reply.
+
+        ``last_concept_candidate`` is the candidate the model itself
+        proposed on its previous ``awaiting_concept_confirmation`` turn,
+        or ``None`` if no such turn exists. The model uses it to
+        recognise approvals and to keep the verbatim handoff stable.
+
+        ``last_agreed_concept`` is the verbatim concept the user
+        confirmed before the most recent image; non-null only in the
+        feedback-gathering sub-phase.
+
+        ``transcript`` is the prior manual-chat dialogue (excluding
+        ``image``-role rows) terminating with the user's latest message,
+        formatted as ``{"role": "user"|"assistant", "content": str}``.
+        ``image``-role rows are surfaced in this transcript by the
+        caller as assistant turns with content ``"[image rendered:
+        attempt K]"``.
+        """
+        rendered_blocks: list[str] = []
+        for idx, block in enumerate(story_blocks):
+            if block["type"] == "paragraph":
+                tag = " (this paragraph)" if idx == current_paragraph_index else ""
+                rendered_blocks.append(f"[BLOCK {idx} PARAGRAPH{tag}]\n{block['text']}")
+            else:
+                rendered_blocks.append(f"[BLOCK {idx} ILLUSTRATION {block['scene_index']}]")
+        full_story = "\n\n".join(rendered_blocks)
+
+        current_companion_json = (
+            json.dumps(current_companion.model_dump(), ensure_ascii=False)
+            if current_companion is not None
+            else "null"
+        )
+        char_display = CHARACTER_ROLE_MAP[character_role] if character_role else "null"
+
+        last_candidate_blob = (
+            json.dumps(last_concept_candidate, ensure_ascii=False)
+            if last_concept_candidate is not None
+            else "null"
+        )
+        last_agreed_blob = (
+            json.dumps(last_agreed_concept, ensure_ascii=False)
+            if last_agreed_concept is not None
+            else "null"
+        )
+        prompting_notes_blob = (
+            json.dumps(prompting_notes, ensure_ascii=False)
+            if prompting_notes is not None
+            else "null"
+        )
+
+        context_blob = (
+            f"source_language: {source_language}\n"
+            f"sub_phase: {sub_phase}\n"
+            f"story_title: {story_title}\n\n"
+            f"full_story:\n{full_story}\n\n"
+            f"current_paragraph_index: {current_paragraph_index}\n"
+            f"current_scene_excerpt: {current_scene_excerpt}\n"
+            f"original_concept: {original_concept}\n"
+            f"character_role: {character_role or 'null'}\n"
+            f"character_display: {char_display}\n"
+            f"current_companion: {current_companion_json}\n"
+            f"manual_attempts_consumed: {manual_attempts_consumed}\n"
+            f"manual_attempts_remaining: {manual_attempts_remaining}\n"
+            f"last_concept_candidate: {last_candidate_blob}\n"
+            f"last_agreed_concept: {last_agreed_blob}\n"
+            f"prompting_notes: {prompting_notes_blob}\n\n"
+            "Use the dialogue that follows to continue or open the manual chat. "
+            "Respond with the JSON object specified in your instructions."
+        )
+
+        messages: list[dict] = [{"role": "user", "content": context_blob}]
+        # An assistant ack so the first transcript message can be "user".
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "Context received. I will follow Agent 6 protocol.",
+            }
+        )
+        messages.extend(transcript)
+
+        result = await self._call_with_retry(
+            messages=messages,
+            response_model=ManualConceptResponse,
+            system=self._prompts["manual_concept"],
+        )
+        return result  # type: ignore[return-value]
+
+    # ── Agent 7: manual_revise_prompts ───────────────────────────────────────
+
+    async def manual_revise_prompts(
+        self,
+        *,
+        last_agreed_concept: str,
+        user_feedback: str,
+        last_positive_prompt: str,
+        last_negative_prompt: str,
+        style_guide: StyleGuide,
+        character_role: str | None,
+        character_config: dict,
+        companion: Companion | None = None,
+        prompting_notes: str | None = None,
+    ) -> ManualRevisePromptsResponse:
+        """Run Agent 7 to translate the user's post-image feedback into
+        revised positive/negative prompts (§ 7.1 Call 7, § 6A.4 step 5).
+
+        Workflow choice is NOT decided here — the caller carries forward
+        ``illustrations.current_workflow`` (see § 6A.4 step 5.5).
+        """
+        companion_line = (
+            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
+            if companion is not None
+            else "companion: null"
+        )
+
+        if character_role:
+            char_entry = character_config[character_role]
+            char_display = CHARACTER_ROLE_MAP[character_role]
+            character_block = (
+                f"character_display: {char_display}\n"
+                f"character_role: {character_role}\n"
+                f"trigger_tags: {char_entry['trigger_tags']}\n"
+                f"outfit_baseline: {char_entry['outfit_baseline']}\n"
+                f"character_baseline_description: {style_guide.character_baseline_description}\n"
+            )
+        else:
+            character_block = "character_role: null\n"
+
+        notes_block = (
+            f"prompting_notes (English-only, authoritative renderer hints curated by Agent 6):\n"
+            f"{prompting_notes}\n\n"
+            if prompting_notes
+            else ""
+        )
+
+        user_text = (
+            f"{character_block}"
+            f"style_positive: {style_guide.overall_style_positive}\n"
+            f"style_negative: {style_guide.overall_style_negative}\n\n"
+            f"last_agreed_concept: {last_agreed_concept}\n"
+            f"{companion_line}\n\n"
+            f"last_positive_prompt: {last_positive_prompt}\n"
+            f"last_negative_prompt: {last_negative_prompt}\n\n"
+            f"user_feedback (raw post-image user prose, may be noisy):\n{user_feedback}\n\n"
+            f"{notes_block}"
+            f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+            'Respond with JSON: {"positive": "...", "negative": "..."}'
+        )
+        result = await self._call_with_retry(
+            messages=[{"role": "user", "content": user_text}],
+            response_model=ManualRevisePromptsResponse,
+            system=self._prompts["manual_revise_prompts"],
         )
         return result  # type: ignore[return-value]

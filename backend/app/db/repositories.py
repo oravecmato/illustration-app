@@ -3,7 +3,14 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Illustration, Run, Session, SessionMessage
+from app.db.models import (
+    Illustration,
+    ManualIllustrationSession,
+    ManualMessage,
+    Run,
+    Session,
+    SessionMessage,
+)
 
 
 class SessionRepository:
@@ -138,3 +145,88 @@ class RunRepository:
             .order_by(Illustration.scene_index)
         )
         return list(result.scalars().all())
+
+    async def get_illustration(self, illustration_id: str) -> Illustration | None:
+        result = await self.session.execute(
+            select(Illustration).where(Illustration.id == illustration_id)
+        )
+        return result.scalar_one_or_none()
+
+
+class ManualRepository:
+    """Persistence for the § 6A manual chat fallback."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_manual_session(self, illustration_id: str) -> ManualIllustrationSession:
+        ms = ManualIllustrationSession(illustration_id=illustration_id)
+        self.session.add(ms)
+        await self.session.commit()
+        await self.session.refresh(ms)
+        return ms
+
+    async def get_manual_session(self, illustration_id: str) -> ManualIllustrationSession | None:
+        result = await self.session.execute(
+            select(ManualIllustrationSession).where(
+                ManualIllustrationSession.illustration_id == illustration_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def update_manual_session(
+        self, ms: ManualIllustrationSession, **kwargs
+    ) -> ManualIllustrationSession:
+        for key, value in kwargs.items():
+            setattr(ms, key, value)
+        ms.updated_at = datetime.now(UTC)
+        self.session.add(ms)
+        await self.session.commit()
+        await self.session.refresh(ms)
+        return ms
+
+    async def add_message(
+        self,
+        illustration_id: str,
+        role: str,
+        content: str,
+        image_url: str | None = None,
+        manual_attempt_index: int | None = None,
+        concept_used: str | None = None,
+        positive_prompt: str | None = None,
+        negative_prompt: str | None = None,
+    ) -> ManualMessage:
+        msg = ManualMessage(
+            illustration_id=illustration_id,
+            role=role,
+            content=content,
+            image_url=image_url,
+            manual_attempt_index=manual_attempt_index,
+            concept_used=concept_used,
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+        )
+        self.session.add(msg)
+        await self.session.commit()
+        await self.session.refresh(msg)
+        return msg
+
+    async def get_messages(self, illustration_id: str) -> list[ManualMessage]:
+        result = await self.session.execute(
+            select(ManualMessage)
+            .where(ManualMessage.illustration_id == illustration_id)
+            .order_by(ManualMessage.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def get_image_message(
+        self, illustration_id: str, manual_attempt_index: int
+    ) -> ManualMessage | None:
+        """Look up the image-row for a specific manual attempt."""
+        result = await self.session.execute(
+            select(ManualMessage)
+            .where(ManualMessage.illustration_id == illustration_id)
+            .where(ManualMessage.role == "image")
+            .where(ManualMessage.manual_attempt_index == manual_attempt_index)
+        )
+        return result.scalar_one_or_none()

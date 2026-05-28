@@ -1,5 +1,6 @@
 import type {
   Illustration,
+  ManualSessionResponse,
   PostMessageResponse,
   Run,
   Session,
@@ -81,6 +82,10 @@ export function openSseStream(
     "illustration_failed",
     "illustration_companion_updated",
     "illustration_role_updated",
+    "illustration_manual_started",
+    "manual_message_appended",
+    "manual_image_rendered",
+    "illustration_manual_ended",
     "translations_refreshed",
     "paragraph_updated",
     "run_completed",
@@ -124,6 +129,60 @@ export interface TranslateRunResponse {
     text: string;
     source_hash: string;
   }>;
+}
+
+// ── § 6A manual illustration chat ─────────────────────────────────────────
+
+export async function getManualChat(illustrationId: string): Promise<ManualSessionResponse> {
+  const res = await fetch(`${API_BASE}/api/illustrations/${illustrationId}/manual`);
+  return jsonOrThrow<ManualSessionResponse>(res);
+}
+
+export async function postManualMessage(
+  illustrationId: string,
+  content: string,
+): Promise<ManualSessionResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/illustrations/${illustrationId}/manual/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  return jsonOrThrow<ManualSessionResponse>(res);
+}
+
+export async function regenerateIllustration(
+  illustrationId: string,
+): Promise<ManualSessionResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/illustrations/${illustrationId}/regenerate`,
+    { method: "POST" },
+  );
+  return jsonOrThrow<ManualSessionResponse>(res);
+}
+
+export async function acceptIllustrationAttempt(
+  illustrationId: string,
+  manualAttemptIndex: number,
+): Promise<ManualSessionResponse> {
+  const res = await fetch(`${API_BASE}/api/illustrations/${illustrationId}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ manual_attempt_index: manualAttemptIndex }),
+  });
+  return jsonOrThrow<ManualSessionResponse>(res);
+}
+
+export async function iterateManualImage(
+  illustrationId: string,
+): Promise<ManualSessionResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/illustrations/${illustrationId}/manual/iterate`,
+    { method: "POST" },
+  );
+  return jsonOrThrow<ManualSessionResponse>(res);
 }
 
 export async function translateRun(

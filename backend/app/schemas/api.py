@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.claude import CollectedBrief, Companion, StyleGuide
 
@@ -75,6 +75,29 @@ class RunResponse(BaseModel):
     error_message: str | None
 
 
+class ManualMessageResponse(BaseModel):
+    id: str
+    role: Literal["user", "assistant", "image"]
+    content: str
+    image_url: str | None = None
+    manual_attempt_index: int | None = None
+    # Per-attempt provenance (§ 6A.10). Populated only on role="image" rows;
+    # legacy rows from before the migration return null.
+    concept_used: str | None = None
+    positive_prompt: str | None = None
+    negative_prompt: str | None = None
+    created_at: datetime
+
+
+class ManualSessionSummary(BaseModel):
+    """Embedded summary of the § 6A manual chat for an illustration."""
+
+    messages: list[ManualMessageResponse]
+    manual_attempts: int
+    last_image_url: str | None = None
+    sub_phase: Literal["concept_design", "feedback_gathering"] = "concept_design"
+
+
 class IllustrationResponse(BaseModel):
     id: str
     scene_index: int
@@ -90,6 +113,34 @@ class IllustrationResponse(BaseModel):
     prompt_attempt: int
     image_url: str | None
     companion: Companion | None = None
+    manual_attempts: int = 0
+    manual_session: ManualSessionSummary | None = None
+
+
+# ── Manual illustration chat (§ 8.10) ────────────────────────────────────────
+
+
+class ManualMessageRequest(BaseModel):
+    content: str
+
+
+class AcceptAttemptRequest(BaseModel):
+    """Body of POST /api/illustrations/{id}/accept (§ 6A.10)."""
+
+    manual_attempt_index: int = Field(ge=1)
+
+
+class ManualSessionResponse(BaseModel):
+    """Full response payload of POST /api/illustrations/{id}/manual/messages
+    and GET /api/illustrations/{id}/manual.
+    """
+
+    illustration_id: str
+    state: str
+    manual_attempts: int
+    messages: list[ManualMessageResponse]
+    last_image_url: str | None = None
+    sub_phase: Literal["concept_design", "feedback_gathering"] = "concept_design"
 
 
 class RunDetailResponse(BaseModel):

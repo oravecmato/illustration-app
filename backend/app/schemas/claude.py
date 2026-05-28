@@ -262,3 +262,77 @@ class TranslationItem(BaseModel):
 
 class TranslateResponse(BaseModel):
     translations: list[TranslationItem]
+
+
+# ── Agent 6: manual_concept ──────────────────────────────────────────────────
+
+
+ManualPhase = Literal[
+    "gathering",
+    "awaiting_concept_confirmation",
+    "concept_confirmed",
+    "gathering_feedback",
+    "awaiting_feedback_confirmation",
+    "feedback_confirmed",
+    "restart_concept",
+    "accepted",
+]
+
+ManualSubPhase = Literal["concept_design", "feedback_gathering"]
+
+
+class ManualConceptResponse(BaseModel):
+    """Agent 6 output for the § 6A manual chat fallback.
+
+    The phase flag drives the server-side state machine. See § 7.1 Call 6
+    for the full phase semantics. The cross-field invariant enforced here:
+
+    * ``concept_candidate`` is required (non-empty) iff
+      ``phase in {awaiting_concept_confirmation, concept_confirmed}``;
+      it MUST be null for every other phase.
+    * ``reply`` is non-empty for every phase except ``accepted``, where
+      an empty string is tolerated (mirrors Agent 0a's `phase=confirmed`).
+    """
+
+    phase: ManualPhase
+    reply: str
+    concept_candidate: str | None = None
+    prompting_notes_update: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_phase(self) -> "ManualConceptResponse":
+        if self.phase in ("awaiting_concept_confirmation", "concept_confirmed"):
+            if not self.concept_candidate or not self.concept_candidate.strip():
+                raise ValueError(f"concept_candidate is required when phase is {self.phase!r}")
+        else:
+            if self.concept_candidate is not None:
+                raise ValueError(f"concept_candidate must be null when phase is {self.phase!r}")
+        # `accepted` may carry an empty reply; everything else must be non-empty.
+        if self.phase != "accepted" and (not self.reply or not self.reply.strip()):
+            raise ValueError("reply must be a non-empty string")
+        # `prompting_notes_update`, when present, must be a non-empty string
+        # (Agent 6 either updates the memo with content or omits the field;
+        # an empty/whitespace-only update is treated as malformed). § 6A.2 #12.
+        if self.prompting_notes_update is not None and not self.prompting_notes_update.strip():
+            raise ValueError("prompting_notes_update must be a non-empty string when provided")
+        return self
+
+
+# ── Agent 7: manual_revise_prompts ───────────────────────────────────────────
+
+
+class ManualRevisePromptsResponse(BaseModel):
+    """Agent 7 output. Narrower than Agent 1/3: no `workflow` field, because
+    the workflow choice is fixed by the illustration's `character_role`
+    and Agent 7 cannot toggle it (§ 6A.4 step 5.5 / § 7.1 Call 7)."""
+
+    positive: str
+    negative: str
+
+    @model_validator(mode="after")
+    def _validate_non_empty(self) -> "ManualRevisePromptsResponse":
+        if not self.positive or not self.positive.strip():
+            raise ValueError("positive must be a non-empty string")
+        if not self.negative or not self.negative.strip():
+            raise ValueError("negative must be a non-empty string")
+        return self

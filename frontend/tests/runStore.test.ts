@@ -424,4 +424,290 @@ describe("runStore", () => {
     expect(store.run).toBeNull();
     expect(store.illustrations).toHaveLength(0);
   });
+
+  // ── § 6A manual chat SSE ───────────────────────────────────────────────
+
+  it("illustration_manual_started seeds the welcome bubble", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", state: "MANUAL_CHATTING" })],
+      },
+    });
+
+    store.handleSseEvent({
+      type: "illustration_manual_started",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        sub_phase: "concept_design",
+        welcome_message: {
+          id: "msg-w",
+          role: "assistant",
+          content: "Niečo sa zaseklo. #Skús povedať, čo si predstavuješ.#",
+          created_at: "2026-05-27T17:00:00Z",
+        },
+      },
+    });
+
+    const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(ill?.manual_session?.messages).toHaveLength(1);
+    expect(ill?.manual_session?.messages[0].role).toBe("assistant");
+  });
+
+  it("manual_message_appended appends a chat row", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", state: "MANUAL_CHATTING" })],
+      },
+    });
+
+    store.handleSseEvent({
+      type: "manual_message_appended",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        sub_phase: "concept_design",
+        message: {
+          id: "msg-1",
+          role: "user",
+          content: "Make her brave",
+          image_url: null,
+          manual_attempt_index: null,
+          created_at: "2026-05-27T17:01:00Z",
+        },
+      },
+    });
+
+    const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(ill?.manual_session?.messages).toHaveLength(1);
+    expect(ill?.manual_session?.messages[0].content).toBe("Make her brave");
+  });
+
+  it("manual_image_rendered appends only the image row with provenance (§ 6A.10)", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", state: "MANUAL_RENDERING" })],
+      },
+    });
+
+    store.handleSseEvent({
+      type: "manual_image_rendered",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        sub_phase: "feedback_gathering",
+        manual_attempt: 1,
+        image_url: "/static/runs/run-1/manual_0_1.png",
+        image_message_id: "img-1",
+        concept_used: "A boy at the door",
+        positive_prompt: "1boy, doorway, determined",
+        negative_prompt: "blurry",
+      },
+    });
+
+    const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+    expect(ill?.manual_attempts).toBe(1);
+    expect(ill?.manual_session?.last_image_url).toBe("/static/runs/run-1/manual_0_1.png");
+    // § 6A.10: only the image row — no canned review-prompt bubble.
+    expect(ill?.manual_session?.messages).toHaveLength(1);
+    const imageRow = ill?.manual_session?.messages[0];
+    expect(imageRow?.role).toBe("image");
+    expect(imageRow?.concept_used).toBe("A boy at the door");
+    expect(imageRow?.positive_prompt).toBe("1boy, doorway, determined");
+    expect(imageRow?.negative_prompt).toBe("blurry");
+  });
+
+  describe("§ 6A.9 regeneration", () => {
+    it("showManualChat / hideManualChat flip the toggle for one illustration", () => {
+      const store = useRunStore();
+      store.showManualChat("ill-1");
+      expect(store.chatToggle["ill-1"]).toBe("shown");
+      store.hideManualChat("ill-1");
+      expect(store.chatToggle["ill-1"]).toBe("hidden");
+      // Unrelated ids stay untouched.
+      expect(store.chatToggle["ill-2"]).toBeUndefined();
+    });
+
+    it("illustration_completed clears any chat toggle for that illustration", () => {
+      const store = useRunStore();
+      store.handleSseEvent({
+        type: "snapshot",
+        data: {
+          run: makeRun(),
+          illustrations: [makeIllustration({ state: "MANUAL_CHATTING" })],
+        },
+      });
+      store.showManualChat("ill-1");
+      expect(store.chatToggle["ill-1"]).toBe("shown");
+
+      store.handleSseEvent({
+        type: "illustration_completed",
+        data: { illustration_id: "ill-1", image_url: "/static/x.png" },
+      });
+      // Hide takes precedence so the new image is shown.
+      expect(store.chatToggle["ill-1"]).toBe("hidden");
+    });
+
+    it("regenerateIllustration POSTs, applies returned session, and shows chat without clearing image_url", async () => {
+      const store = useRunStore();
+      store.handleSseEvent({
+        type: "snapshot",
+        data: {
+          run: makeRun(),
+          illustrations: [
+            makeIllustration({
+              state: "COMPLETED",
+              image_url: "/static/old.png",
+              manual_attempts: 1,
+            }),
+          ],
+        },
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            illustration_id: "ill-1",
+            state: "MANUAL_CHATTING",
+            manual_attempts: 1,
+            messages: [
+              {
+                id: "m-1",
+                role: "assistant",
+                content: "welcome back",
+                image_url: null,
+                manual_attempt_index: null,
+                created_at: "2026-05-28T00:00:00Z",
+              },
+            ],
+            last_image_url: null,
+            sub_phase: "concept_design",
+          }),
+        }) as Response;
+
+      try {
+        await store.regenerateIllustration("ill-1");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+      expect(ill?.state).toBe("MANUAL_CHATTING");
+      expect(ill?.image_url).toBe("/static/old.png"); // preserved!
+      expect(ill?.manual_session?.messages).toHaveLength(1);
+      expect(ill?.manual_session?.sub_phase).toBe("concept_design");
+      expect(store.chatToggle["ill-1"]).toBe("shown");
+    });
+
+    it("reset() clears chatToggle", () => {
+      const store = useRunStore();
+      store.showManualChat("ill-1");
+      store.reset();
+      expect(store.chatToggle["ill-1"]).toBeUndefined();
+    });
+  });
+
+  describe("§ 6A.10 interactive image cards", () => {
+    it("acceptManualAttempt POSTs and reflects COMPLETED state locally", async () => {
+      const store = useRunStore();
+      store.handleSseEvent({
+        type: "snapshot",
+        data: {
+          run: makeRun(),
+          illustrations: [
+            makeIllustration({ id: "ill-1", state: "MANUAL_CHATTING", manual_attempts: 2 }),
+          ],
+        },
+      });
+
+      let postedBody: unknown = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (_input, init) => {
+        postedBody = init?.body ? JSON.parse(init.body as string) : null;
+        return {
+          ok: true,
+          json: async () => ({
+            illustration_id: "ill-1",
+            state: "COMPLETED",
+            manual_attempts: 2,
+            messages: [],
+            last_image_url: "/static/runs/run-1/scene_0.png",
+            sub_phase: "feedback_gathering",
+          }),
+        } as Response;
+      };
+
+      try {
+        await store.acceptManualAttempt("ill-1", 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(postedBody).toEqual({ manual_attempt_index: 2 });
+      const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+      expect(ill?.state).toBe("COMPLETED");
+      expect(ill?.image_url).toBe("/static/runs/run-1/scene_0.png");
+    });
+
+    it("requestIterate POSTs and applies the returned session", async () => {
+      const store = useRunStore();
+      store.handleSseEvent({
+        type: "snapshot",
+        data: {
+          run: makeRun(),
+          illustrations: [
+            makeIllustration({ id: "ill-1", state: "MANUAL_CHATTING", manual_attempts: 1 }),
+          ],
+        },
+      });
+
+      let calls = 0;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => {
+        calls++;
+        return {
+          ok: true,
+          json: async () => ({
+            illustration_id: "ill-1",
+            state: "MANUAL_CHATTING",
+            manual_attempts: 1,
+            messages: [
+              {
+                id: "msg-iter",
+                role: "assistant",
+                content: "Popíš čo je zle…",
+                image_url: null,
+                manual_attempt_index: null,
+                created_at: "2026-05-28T12:00:00Z",
+              },
+            ],
+            last_image_url: null,
+            sub_phase: "feedback_gathering",
+          }),
+        } as Response;
+      };
+
+      try {
+        await store.requestIterate("ill-1");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(calls).toBe(1);
+      const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
+      expect(ill?.manual_session?.messages).toHaveLength(1);
+      expect(ill?.manual_session?.messages[0].content).toBe("Popíš čo je zle…");
+    });
+  });
 });
