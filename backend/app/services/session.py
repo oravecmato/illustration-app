@@ -20,6 +20,7 @@ from app.schemas.claude import (
     ChatResponse,
     CollectedBrief,
     companion_in_pool,
+    validate_illustration_distribution,
 )
 from app.services.claude import ClaudeClient, ClaudeError
 
@@ -215,6 +216,7 @@ class SessionService:
             "source_language": source_language,
             "topic_short": topic_short,
             "characters": brief.characters,
+            "main_character_role": brief.main_character_role,
             "companions": brief.companions,
             "topic": brief.topic,
             "notes": brief.notes,
@@ -252,6 +254,24 @@ class SessionService:
                 )
                 raise SessionError("STORY_BUILD_FAILED", msg)
 
+        # Cross-illustration statistical-distribution rules (auto pipeline
+        # only): every cast role >= 1, main >= 2, no side > main, no-human
+        # cap of 1/5, primary/secondary NH-character placement rules. See
+        # ``validate_illustration_distribution`` in schemas.claude for the
+        # full list. On violation we fail the run with STORY_BUILD_FAILED;
+        # the user can restart the chat with an updated brief.
+        try:
+            validate_illustration_distribution(brief, story.illustrations, story.reserved_entities)
+        except ValueError as e:
+            msg = f"Agent 0b output violates distribution rules: {e}"
+            await self.repo.update_session(
+                s,
+                state=SessionState.FAILED,
+                error_code="STORY_BUILD_FAILED",
+                error_message=msg,
+            )
+            raise SessionError("STORY_BUILD_FAILED", msg) from e
+
         # Persist run + illustrations.
         import json as _json
 
@@ -278,11 +298,19 @@ class SessionService:
             ),
             style_guide_json=story.style_guide.model_dump_json(),
             illustration_count=len(story.illustrations),
+            main_character_role=brief.main_character_role,
+            environments_json=_json.dumps(
+                [e.model_dump() for e in story.environments], ensure_ascii=False
+            ),
+            reserved_entities_json=_json.dumps(
+                [e.model_dump() for e in story.reserved_entities], ensure_ascii=False
+            ),
             id=run_id,
         )
 
         illustrations: list[dict] = []
         for ill in story.illustrations:
+            env = story.environments[ill.scene_index]
             row = await run_repo.create_illustration(
                 run_id=run.id,
                 scene_index=ill.scene_index,
@@ -296,6 +324,8 @@ class SessionService:
                 companion_interaction=(
                     ill.companion.interaction if ill.companion is not None else None
                 ),
+                environment_label=env.label,
+                environment_aspect=env.aspect,
             )
             illustrations.append(
                 {

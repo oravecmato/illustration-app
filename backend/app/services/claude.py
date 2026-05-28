@@ -172,6 +172,7 @@ class ClaudeClient:
                 - source_language: str (e.g., 'sk', 'cs', 'en')
                 - topic_short: str (brief topic for skeleton UI)
                 - characters: list of Character dicts
+                - main_character_role: str (one of 'male'|'female'|'mother')
                 - companions: list of Companion dicts
                 - topic: str (full topic description)
                 - notes: str (optional notes)
@@ -186,6 +187,7 @@ class ClaudeClient:
             f"source_language: {input_dict['source_language']}\n"
             f"topic_short: {input_dict['topic_short']}\n\n"
             f"characters:\n{characters_json}\n\n"
+            f"main_character_role: {input_dict['main_character_role']}\n\n"
             f"companions:\n{companions_json}\n\n"
             f"topic: {input_dict['topic']}\n\n"
             f"notes: {input_dict.get('notes') or '(none)'}\n\n"

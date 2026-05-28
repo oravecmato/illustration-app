@@ -68,6 +68,9 @@ class RunRepository:
         story_blocks_json: str,
         style_guide_json: str,
         illustration_count: int,
+        main_character_role: str | None = None,
+        environments_json: str | None = None,
+        reserved_entities_json: str | None = None,
         id: str | None = None,
     ) -> Run:
         kwargs: dict = dict(
@@ -79,6 +82,9 @@ class RunRepository:
             story_blocks_json=story_blocks_json,
             style_guide_json=style_guide_json,
             illustration_count=illustration_count,
+            main_character_role=main_character_role,
+            environments_json=environments_json,
+            reserved_entities_json=reserved_entities_json,
         )
         if id is not None:
             kwargs["id"] = id
@@ -111,6 +117,8 @@ class RunRepository:
         character_role: str | None,
         companion_description: str | None = None,
         companion_interaction: str | None = None,
+        environment_label: str | None = None,
+        environment_aspect: str | None = None,
     ) -> Illustration:
         ill = Illustration(
             run_id=run_id,
@@ -123,6 +131,8 @@ class RunRepository:
             current_concept=concept,
             companion_description=companion_description,
             companion_interaction=companion_interaction,
+            environment_label=environment_label,
+            environment_aspect=environment_aspect,
         )
         self.session.add(ill)
         await self.session.commit()
