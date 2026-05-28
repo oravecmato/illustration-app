@@ -20,12 +20,23 @@ from app.schemas.claude import (
 
 
 def _brief(roles: list[str]) -> dict:
+    # Pick main_character_role deterministically from the cast: prefer male,
+    # then female, then mother (mother-only is invalid anyway and exercised
+    # by tests below). Tests that need a specific main can override the key
+    # on the returned dict.
+    if "male" in roles:
+        main = "male"
+    elif "female" in roles:
+        main = "female"
+    else:
+        main = "mother"
     return {
         "characters": [
             {"role": r, "name_in_story": r.title(), "short_description": f"a {r}"} for r in roles
         ],
         "topic": "A short story about something.",
         "notes": "",
+        "main_character_role": main,
     }
 
 
@@ -67,6 +78,7 @@ def test_collected_brief_rejects_too_many():
             ],
             topic="t",
             notes="",
+            main_character_role="male",
         )
 
 
@@ -116,17 +128,35 @@ VALID_STYLE_GUIDE = {
 }
 
 
+def _default_environments(count: int = MAX_ILLUSTRATIONS) -> list[dict]:
+    """5 distinct single-form indoor labels — satisfies disjointness rule."""
+    labels = ["obývačka", "kuchyňa", "spálňa", "kúpeľňa", "predsieň"]
+    return [
+        {"label": labels[i % len(labels)], "kind": "indoor", "aspect": "single"}
+        for i in range(count)
+    ]
+
+
 def _build_story_payload(
     *,
     blocks: list[dict],
     illustrations: list[dict],
+    environments: list[dict] | None = None,
+    reserved_entities: list[dict] | None = None,
 ) -> dict:
+    # When the test only fixes ``illustrations`` count != MAX_ILLUSTRATIONS,
+    # the environments must still be MAX_ILLUSTRATIONS for the outer
+    # validator's structural check (we want the illustrations cardinality
+    # rule — not the environments rule — to be the visible failure).
+    envs = environments if environments is not None else _default_environments()
     return {
         "story_title": "Krátky príbeh",
         "story_topic_description": "Krátky príbeh o dobrodružstve",
         "story_blocks": blocks,
         "style_guide": VALID_STYLE_GUIDE,
         "illustrations": illustrations,
+        "environments": envs,
+        "reserved_entities": reserved_entities if reserved_entities is not None else [],
     }
 
 
@@ -340,6 +370,7 @@ def test_rethink_concept_accepts_valid():
         character_role="male",
         paragraph_text="Stál pri okne a hľadel von. Pršalo a on plakal.",
         scene_excerpt="Pršalo a on plakal.",
+        narrative_continuity_check="Flows naturally between prior and next paragraphs.",
     )
     assert "new approach" in resp.concept
     assert resp.scene_excerpt in resp.paragraph_text
@@ -362,9 +393,13 @@ def test_rethink_concept_rejects_wrong_type():
 def test_rethink_concept_rejects_excerpt_not_in_paragraph():
     with pytest.raises(ValidationError):
         RethinkConceptResponse(
+            workflow="single-lora",
             concept="A new concept",
+            concept_localized="A new concept",
+            character_role="male",
             paragraph_text="Pršalo a on plakal.",
             scene_excerpt="Slniečko svietilo.",
+            narrative_continuity_check="ok",
         )
 
 
@@ -441,6 +476,7 @@ def test_rethink_concept_accepts_companion_null():
         paragraph_text="Pršalo a on plakal.",
         scene_excerpt="Pršalo a on plakal.",
         companion=None,
+        narrative_continuity_check="ok",
     )
     assert resp.companion is None
 
@@ -457,6 +493,7 @@ def test_rethink_concept_accepts_companion_populated():
             "description": "a small black cat",
             "interaction": "curled on her lap",
         },
+        narrative_continuity_check="ok",
     )
     assert resp.companion is not None
     assert resp.companion.description == "a small black cat"
@@ -465,10 +502,14 @@ def test_rethink_concept_accepts_companion_populated():
 def test_rethink_concept_rejects_companion_with_empty_field():
     with pytest.raises(ValidationError):
         RethinkConceptResponse(
+            workflow="single-lora",
             concept="A new concept",
+            concept_localized="A new concept",
+            character_role="male",
             paragraph_text="Pršalo.",
             scene_excerpt="Pršalo.",
             companion={"description": "a cat", "interaction": ""},
+            narrative_continuity_check="ok",
         )
 
 

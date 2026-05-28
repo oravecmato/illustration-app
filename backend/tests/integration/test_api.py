@@ -52,6 +52,7 @@ BRIEF = {
     ],
     "topic": "A short story about overcoming stage fright.",
     "notes": "Warm tone, gentle ending.",
+    "main_character_role": "female",
 }
 
 STORY_BLOCKS = [
@@ -110,6 +111,14 @@ BUILD_STORY_RESULT = {
             "character_role": "female",
         },
     ],
+    "environments": [
+        {"label": "obývačka", "kind": "indoor", "aspect": "single"},
+        {"label": "spálňa", "kind": "indoor", "aspect": "single"},
+        {"label": "šatňa pred zrkadlom", "kind": "indoor", "aspect": "single"},
+        {"label": "zákulisie", "kind": "indoor", "aspect": "single"},
+        {"label": "javisko", "kind": "indoor", "aspect": "single"},
+    ],
+    "reserved_entities": [],
 }
 
 

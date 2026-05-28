@@ -54,6 +54,7 @@ RETHOUGHT_CONCEPT = RethinkConceptResponse(
     character_role="male",
     paragraph_text="Stál pri okne a hľadel von. Pršalo a on plakal.",
     scene_excerpt="Pršalo a on plakal.",
+    narrative_continuity_check="ok",
 )
 
 IMAGE_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
