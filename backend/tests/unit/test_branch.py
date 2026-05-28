@@ -1,6 +1,7 @@
 """Unit tests for per-illustration branch state machine (§11.1)."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from app.schemas.claude import (
     EvaluateImageResponse,
     GeneratePromptsResponse,
     RethinkConceptResponse,
+    RethinkEnvironmentResponse,
     StyleGuide,
 )
 
@@ -45,6 +47,24 @@ VERDICT_FAIL_CONCEPT = EvaluateImageResponse(
     problem="concept",
     reasoning="Wrong scene",
     suggestion="Change concept",
+)
+
+VERDICT_FAIL_ENVIRONMENT = EvaluateImageResponse(
+    ok=False,
+    problem="environment",
+    reasoning="The locked environment cannot be rendered.",
+    suggestion="Swap to a more concrete locale.",
+)
+
+RETHOUGHT_ENVIRONMENT = RethinkEnvironmentResponse(
+    workflow="single-lora",
+    concept="character at the attic window",
+    concept_localized="postava pri podkrovnom okne",
+    character_role="male",
+    paragraph_text="Stál pri podkrovnom okne a pozeral von. Pršalo.",
+    scene_excerpt="Stál pri podkrovnom okne a pozeral von.",
+    environment={"label": "podkrovie", "kind": "indoor", "aspect": "single"},
+    narrative_continuity_check="ok",
 )
 
 RETHOUGHT_CONCEPT = RethinkConceptResponse(
@@ -108,6 +128,7 @@ def make_services(
     evaluate_image_return=None,
     revise_prompts_return=None,
     rethink_concept_return=None,
+    rethink_environment_return=None,
     run_workflow_return=None,
 ):
     claude = AsyncMock()
@@ -115,6 +136,7 @@ def make_services(
     claude.evaluate_image.return_value = evaluate_image_return or VERDICT_OK
     claude.revise_prompts.return_value = revise_prompts_return or PROMPTS
     claude.rethink_concept.return_value = rethink_concept_return or RETHOUGHT_CONCEPT
+    claude.rethink_environment.return_value = rethink_environment_return or RETHOUGHT_ENVIRONMENT
 
     runpod = AsyncMock()
     runpod.run_workflow.return_value = run_workflow_return or IMAGE_BYTES
@@ -323,3 +345,176 @@ async def test_character_lora_from_character_config():
 
         wf_str = json.dumps(wf)
         assert "jirou_v1.safetensors" in wf_str, f"Expected lora not found in workflow: {wf}"
+
+
+# ---- Environment-rethink path (Agent 4b, § 11) ----------------------------
+
+
+def _make_env_repo():
+    """Build a repo mock whose ``get_run`` returns a run with locked envs.
+
+    The run-level fields ``environments_json``, ``reserved_entities_json``,
+    and ``main_character_role`` are what ``_do_environment_rethink``
+    reads from the DB.
+    """
+    fake_run = MagicMock()
+    fake_run.id = "run-1"
+    fake_run.main_character_role = "male"
+    fake_run.environments_json = json.dumps(
+        [
+            {"label": "obývačka", "kind": "indoor", "aspect": "single"},
+            {"label": "kuchyňa", "kind": "indoor", "aspect": "single"},
+            {"label": "spálňa", "kind": "indoor", "aspect": "single"},
+            {"label": "kúpeľňa", "kind": "indoor", "aspect": "single"},
+            {"label": "záhrada", "kind": "outdoor", "aspect": "single"},
+        ]
+    )
+    fake_run.reserved_entities_json = "[]"
+    fake_run.story_blocks_json = None
+
+    repo = AsyncMock()
+    repo.update_illustration = AsyncMock(side_effect=lambda ill, **kwargs: _apply(ill, **kwargs))
+    repo.get_run = AsyncMock(return_value=fake_run)
+    repo.update_run = AsyncMock(return_value=fake_run)
+    repo.session = MagicMock()
+    return repo, fake_run
+
+
+async def _run_branch_with_env_context(
+    illustration,
+    claude,
+    runpod,
+    repo,
+    *,
+    scene_index_for_env=0,
+):
+    """Drive run_branch through the env-rethink path using a custom repo."""
+    from app.orchestrator.branch import run_branch as _run_branch
+
+    event_bus = AsyncMock()
+    cancel_flag = asyncio.Event()
+    workflow_template = {"node": {"inputs": {"text": "POSITIVE_PROMPT", "lora": "CHARACTER_LORA"}}}
+
+    async def _stub_open_manual_flow(ill, source_language):
+        await repo.update_illustration(ill, state=IllustrationState.MANUAL_CHATTING)
+
+    fake_service = MagicMock()
+    fake_service.open_manual_flow = AsyncMock(side_effect=_stub_open_manual_flow)
+
+    with (
+        patch("app.orchestrator.branch.ManualService", return_value=fake_service),
+        patch("app.orchestrator.branch.ManualRepository", return_value=MagicMock()),
+    ):
+        await _run_branch(
+            illustration=illustration,
+            style_guide=STYLE_GUIDE,
+            workflow_template=workflow_template,
+            output_dir="/tmp",
+            claude=claude,
+            runpod=runpod,
+            repo=repo,
+            event_bus=event_bus,
+            cancel_flag=cancel_flag,
+            character_config=CHARACTER_CONFIG,
+            story_title="Test story",
+            story_blocks=[
+                {"type": "paragraph", "text": "Pôvodný odsek."},
+                {"type": "illustration", "scene_index": scene_index_for_env},
+            ],
+        )
+    return event_bus
+
+
+@pytest.mark.asyncio
+async def test_environment_rethink_path_swaps_env_and_succeeds():
+    """verdict.problem='environment' → Agent 4b fires → new env persisted, next concept succeeds."""
+    ill = make_illustration()
+    ill.paragraph_index = 0
+    claude, runpod = make_services()
+    # 1st evaluation: env-rejected → A4b fires. 2nd evaluation: ok.
+    claude.evaluate_image.side_effect = [VERDICT_FAIL_ENVIRONMENT, VERDICT_OK]
+    repo, fake_run = _make_env_repo()
+
+    event_bus = await _run_branch_with_env_context(ill, claude, runpod, repo)
+
+    # A4b was invoked exactly once.
+    claude.rethink_environment.assert_called_once()
+    # A4 (concept rethink) was NOT invoked — A4b's output replaced the concept.
+    claude.rethink_concept.assert_not_called()
+    # Final state is COMPLETED (second render passed evaluation).
+    assert ill.state == IllustrationState.COMPLETED
+    # New env persisted at the slot's scene_index in the run's environments_json.
+    update_run_calls = [
+        c for c in repo.update_run.await_args_list if "environments_json" in c.kwargs
+    ]
+    envs = json.loads(update_run_calls[-1].kwargs["environments_json"])
+    assert envs[ill.scene_index]["label"] == "podkrovie"
+    # Per-illustration env fields were updated.
+    assert ill.environment_label == "podkrovie"
+    assert ill.environment_aspect == "single"
+    # Concept was rewritten via A4b output.
+    assert ill.current_concept == "postava pri podkrovnom okne"
+    assert ill.scene_excerpt == "Stál pri podkrovnom okne a pozeral von."
+    # The illustration_environment_updated event was published.
+    event_topics = [c.args[0] for c in event_bus.publish.await_args_list]
+    assert "illustration_environment_updated" in event_topics
+    assert "paragraph_updated" in event_topics
+
+
+@pytest.mark.asyncio
+async def test_environment_rethink_only_fires_once_per_branch():
+    """A4b is one-shot; subsequent env verdicts must NOT trigger another swap."""
+    ill = make_illustration()
+    ill.paragraph_index = 0
+    claude, runpod = make_services()
+    # After A4b, every subsequent verdict is also env-rejected — but A4b
+    # must not fire again. Eventually the branch exhausts its budget and
+    # enters MANUAL_CHATTING.
+    claude.evaluate_image.return_value = VERDICT_FAIL_ENVIRONMENT
+    repo, _ = _make_env_repo()
+
+    await _run_branch_with_env_context(ill, claude, runpod, repo)
+
+    # rethink_environment fires exactly once even though every verdict
+    # is still 'environment'.
+    assert claude.rethink_environment.await_count == 1
+    # Branch falls through to manual fallback on exhaustion.
+    assert ill.state == IllustrationState.MANUAL_CHATTING
+
+
+@pytest.mark.asyncio
+async def test_environment_rethink_rejects_label_collision():
+    """A4b output that clashes with an in-use env label is rejected → FAILED."""
+    ill = make_illustration()
+    ill.paragraph_index = 0
+    claude, runpod = make_services(
+        rethink_environment_return=RethinkEnvironmentResponse(
+            workflow="single-lora",
+            concept="character in the living room window",
+            concept_localized="postava pri okne obývačky",
+            character_role="male",
+            paragraph_text="Stál v obývačke a hľadel von oknom.",
+            scene_excerpt="Stál v obývačke a hľadel von oknom.",
+            # 'obývačka' is already at scene_index=0 in the fake run; the
+            # slot under test is scene_index=1 (kuchyňa). The proposed
+            # label clashes with another slot — must be rejected.
+            environment={"label": "obývačka", "kind": "indoor", "aspect": "single"},
+            narrative_continuity_check="ok",
+        ),
+    )
+    claude.evaluate_image.return_value = VERDICT_FAIL_ENVIRONMENT
+    repo, _ = _make_env_repo()
+
+    # Slot under test is scene_index=1 — its label is 'kuchyňa'. The A4b
+    # output proposes 'obývačka' which is taken by scene_index=0.
+    ill.scene_index = 1
+    ill.id = "ill-1"
+
+    # The collision branch in _do_environment_rethink marks the row FAILED
+    # and then re-raises a RuntimeError; we expect both behaviours.
+    with pytest.raises(RuntimeError, match="collides"):
+        await _run_branch_with_env_context(ill, claude, runpod, repo, scene_index_for_env=1)
+
+    claude.rethink_environment.assert_called_once()
+    assert ill.state == IllustrationState.FAILED
+    assert "collides" in (ill.error_message or "")

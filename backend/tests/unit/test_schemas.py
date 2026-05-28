@@ -9,11 +9,15 @@ from app.schemas.claude import (
     ChatResponse,
     CollectedBrief,
     Companion,
+    Environment,
     EvaluateImageResponse,
     GeneratePromptsResponse,
+    ReservedEntity,
     RethinkConceptResponse,
+    RethinkEnvironmentResponse,
     RevisePromptsResponse,
     companion_in_pool,
+    validate_illustration_distribution,
 )
 
 # ---- CollectedBrief ----
@@ -545,3 +549,601 @@ def test_companion_in_pool_rejects_empty_description():
 
 def test_companion_in_pool_rejects_empty_pool():
     assert not companion_in_pool("a small black cat", [])
+
+
+# ---- main_character_role ----
+
+
+def test_collected_brief_requires_main_character_role():
+    payload = _brief(["male", "female"])
+    del payload["main_character_role"]
+    with pytest.raises(ValidationError):
+        CollectedBrief(**payload)
+
+
+def test_collected_brief_rejects_main_not_in_cast():
+    payload = _brief(["male"])
+    payload["main_character_role"] = "female"
+    with pytest.raises(ValidationError):
+        CollectedBrief(**payload)
+
+
+def test_collected_brief_rejects_main_mother_with_companions():
+    # 'mother' cannot be main when she's not the only human (cast rules
+    # require male/female alongside her, which then forbids mother-as-main).
+    payload = _brief(["male", "mother"])
+    payload["main_character_role"] = "mother"
+    with pytest.raises(ValidationError):
+        CollectedBrief(**payload)
+
+
+# ---- Environment ----
+
+
+def test_environment_accepts_indoor_single():
+    env = Environment(label="obývačka", kind="indoor", aspect="single")
+    assert env.label == "obývačka"
+
+
+def test_environment_accepts_outdoor_single():
+    Environment(label="záhrada", kind="outdoor", aspect="single")
+
+
+def test_environment_accepts_dual_inside():
+    Environment(label="auto", kind="dual", aspect="inside")
+
+
+def test_environment_accepts_dual_outside():
+    Environment(label="auto", kind="dual", aspect="outside")
+
+
+def test_environment_rejects_indoor_with_inside_aspect():
+    with pytest.raises(ValidationError):
+        Environment(label="obývačka", kind="indoor", aspect="inside")
+
+
+def test_environment_rejects_outdoor_with_outside_aspect():
+    with pytest.raises(ValidationError):
+        Environment(label="záhrada", kind="outdoor", aspect="outside")
+
+
+def test_environment_rejects_dual_with_single_aspect():
+    with pytest.raises(ValidationError):
+        Environment(label="auto", kind="dual", aspect="single")
+
+
+def test_environment_rejects_empty_label():
+    with pytest.raises(ValidationError):
+        Environment(label="   ", kind="indoor", aspect="single")
+
+
+def test_environment_rejects_invalid_kind():
+    with pytest.raises(ValidationError):
+        Environment(label="x", kind="undersea", aspect="single")
+
+
+# ---- ReservedEntity ----
+
+
+def test_reserved_entity_accepts_non_human_primary_with_index():
+    e = ReservedEntity(
+        label="malá čierna mačka",
+        kind="non_human_character",
+        importance="primary",
+        reserved_for_scene_index=2,
+    )
+    assert e.reserved_for_scene_index == 2
+
+
+def test_reserved_entity_accepts_object_unassigned():
+    e = ReservedEntity(
+        label="stará fotografia",
+        kind="object",
+        importance="secondary",
+        reserved_for_scene_index=None,
+    )
+    assert e.reserved_for_scene_index is None
+
+
+def test_reserved_entity_rejects_empty_label():
+    with pytest.raises(ValidationError):
+        ReservedEntity(
+            label="",
+            kind="object",
+            importance="primary",
+        )
+
+
+def test_reserved_entity_rejects_out_of_range_index():
+    with pytest.raises(ValidationError):
+        ReservedEntity(
+            label="x",
+            kind="object",
+            importance="primary",
+            reserved_for_scene_index=MAX_ILLUSTRATIONS,
+        )
+
+
+def test_reserved_entity_rejects_negative_index():
+    with pytest.raises(ValidationError):
+        ReservedEntity(
+            label="x",
+            kind="object",
+            importance="primary",
+            reserved_for_scene_index=-1,
+        )
+
+
+def test_reserved_entity_rejects_invalid_kind():
+    with pytest.raises(ValidationError):
+        ReservedEntity(label="x", kind="weapon", importance="primary")
+
+
+def test_reserved_entity_rejects_invalid_importance():
+    with pytest.raises(ValidationError):
+        ReservedEntity(label="x", kind="object", importance="critical")
+
+
+# ---- BuildStoryResponse environments ----
+
+
+def test_build_story_rejects_wrong_environments_count():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments(count=MAX_ILLUSTRATIONS - 1)
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_rejects_duplicate_indoor_environment_labels():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    # Force two slots to share the same indoor label.
+    envs[1]["label"] = envs[0]["label"]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_rejects_duplicate_outdoor_environment_labels():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0] = {"label": "záhrada", "kind": "outdoor", "aspect": "single"}
+    envs[1] = {"label": "záhrada", "kind": "outdoor", "aspect": "single"}
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_accepts_dual_environment_inside_outside():
+    """Dual environments may occupy two slots — one inside, one outside."""
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0] = {"label": "auto", "kind": "dual", "aspect": "inside"}
+    envs[1] = {"label": "auto", "kind": "dual", "aspect": "outside"}
+    resp = BuildStoryResponse(
+        **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+    )
+    assert resp.environments[0].label == "auto"
+    assert resp.environments[1].label == "auto"
+
+
+def test_build_story_rejects_dual_environment_with_same_aspect_twice():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0] = {"label": "auto", "kind": "dual", "aspect": "inside"}
+    envs[1] = {"label": "auto", "kind": "dual", "aspect": "inside"}
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_rejects_dual_environment_in_three_slots():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0] = {"label": "auto", "kind": "dual", "aspect": "inside"}
+    envs[1] = {"label": "auto", "kind": "dual", "aspect": "outside"}
+    envs[2] = {"label": "auto", "kind": "dual", "aspect": "inside"}
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_rejects_same_label_with_inconsistent_kind():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0] = {"label": "park", "kind": "outdoor", "aspect": "single"}
+    envs[1] = {"label": "park", "kind": "dual", "aspect": "inside"}
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+def test_build_story_environment_label_uniqueness_is_case_insensitive():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    envs[0]["label"] = "Obývačka"
+    envs[1]["label"] = "obývačka"
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(blocks=blocks, illustrations=illustrations, environments=envs)
+        )
+
+
+# ---- BuildStoryResponse reserved entities ----
+
+
+def test_build_story_accepts_reserved_entities_pool():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    reserved = [
+        {
+            "label": "stará kniha",
+            "kind": "object",
+            "importance": "primary",
+            "reserved_for_scene_index": 2,
+        },
+        {
+            "label": "čierna mačka",
+            "kind": "non_human_character",
+            "importance": "secondary",
+            "reserved_for_scene_index": None,
+        },
+    ]
+    resp = BuildStoryResponse(
+        **_build_story_payload(
+            blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+        )
+    )
+    assert len(resp.reserved_entities) == 2
+
+
+def test_build_story_rejects_two_entities_sharing_scene_index():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    reserved = [
+        {
+            "label": "kniha",
+            "kind": "object",
+            "importance": "primary",
+            "reserved_for_scene_index": 1,
+        },
+        {
+            "label": "mačka",
+            "kind": "non_human_character",
+            "importance": "secondary",
+            "reserved_for_scene_index": 1,
+        },
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+            )
+        )
+
+
+def test_build_story_rejects_two_primary_non_human_characters():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    reserved = [
+        {
+            "label": "mačka",
+            "kind": "non_human_character",
+            "importance": "primary",
+            "reserved_for_scene_index": 1,
+        },
+        {
+            "label": "sova",
+            "kind": "non_human_character",
+            "importance": "primary",
+            "reserved_for_scene_index": 2,
+        },
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+            )
+        )
+
+
+def test_build_story_rejects_two_secondary_non_human_characters():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    reserved = [
+        {
+            "label": "mačka",
+            "kind": "non_human_character",
+            "importance": "secondary",
+            "reserved_for_scene_index": 1,
+        },
+        {
+            "label": "sova",
+            "kind": "non_human_character",
+            "importance": "secondary",
+            "reserved_for_scene_index": 2,
+        },
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+            )
+        )
+
+
+# ---- validate_illustration_distribution ----
+
+
+def _ill_concept(scene_index: int, role: str | None) -> dict:
+    return {
+        "scene_index": scene_index,
+        "scene_excerpt": f"excerpt {scene_index}",
+        "concept": f"concept {scene_index}",
+        "character_role": role,
+    }
+
+
+def _build_distribution_inputs(roles: list[str | None], cast: list[str], main: str):
+    """Construct (brief, illustrations) for distribution-validator tests."""
+    from app.schemas.claude import IllustrationConcept
+
+    brief_payload = _brief(cast)
+    brief_payload["main_character_role"] = main
+    brief = CollectedBrief(**brief_payload)
+    illustrations = [IllustrationConcept(**_ill_concept(i, r)) for i, r in enumerate(roles)]
+    return brief, illustrations
+
+
+def test_distribution_accepts_balanced_run():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_accepts_one_no_human_slot():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", None],
+        cast=["male", "female"],
+        main="male",
+    )
+    validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_rejects_cast_role_never_appearing():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "male", "male", "male", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    with pytest.raises(ValueError, match="cast role 'female'"):
+        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_rejects_main_appearing_only_once():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "female", "female", "female"],
+        cast=["male", "female"],
+        main="male",
+    )
+    with pytest.raises(ValueError, match="main_character_role='male'"):
+        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_rejects_side_exceeding_main():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "male", "female", "female", "female"],
+        cast=["male", "female"],
+        main="male",
+    )
+    with pytest.raises(ValueError, match="side role 'female'"):
+        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_rejects_two_no_human_slots():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", None, None],
+        cast=["male", "female"],
+        main="male",
+    )
+    with pytest.raises(ValueError, match="character_role=null"):
+        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+
+
+def test_distribution_rejects_primary_nh_unassigned():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=None,
+        )
+    ]
+    with pytest.raises(ValueError, match="primary non_human_character"):
+        validate_illustration_distribution(brief, illustrations, reserved)
+
+
+def test_distribution_accepts_primary_nh_with_main():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=2,  # male slot
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, reserved)
+
+
+def test_distribution_accepts_primary_nh_alone():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", None],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=4,  # no-human slot
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, reserved)
+
+
+def test_distribution_rejects_primary_nh_with_side_role():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=1,  # female (side) slot
+        )
+    ]
+    with pytest.raises(ValueError, match="neither null"):
+        validate_illustration_distribution(brief, illustrations, reserved)
+
+
+def test_distribution_rejects_secondary_nh_with_side_role():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="hnedá sova",
+            kind="non_human_character",
+            importance="secondary",
+            reserved_for_scene_index=1,  # female (side) slot
+        )
+    ]
+    with pytest.raises(ValueError, match="secondary non_human_character"):
+        validate_illustration_distribution(brief, illustrations, reserved)
+
+
+def test_distribution_accepts_secondary_nh_with_main():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    reserved = [
+        ReservedEntity(
+            label="hnedá sova",
+            kind="non_human_character",
+            importance="secondary",
+            reserved_for_scene_index=2,  # male (main) slot
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, reserved)
+
+
+# ---- EvaluateImageResponse environment problem ----
+
+
+def test_evaluate_image_accepts_environment_problem():
+    resp = EvaluateImageResponse(
+        ok=False,
+        problem="environment",
+        reasoning="The locked environment is unrenderable.",
+        suggestion="Swap to a more concrete locale.",
+    )
+    assert resp.problem == "environment"
+
+
+# ---- RethinkEnvironmentResponse ----
+
+
+def test_rethink_environment_accepts_valid():
+    resp = RethinkEnvironmentResponse(
+        workflow="single-lora",
+        concept="character at a kitchen window",
+        concept_localized="postava pri kuchynskom okne",
+        character_role="female",
+        paragraph_text="Stála pri kuchynskom okne a pozerala von.",
+        scene_excerpt="Stála pri kuchynskom okne a pozerala von.",
+        environment={"label": "kuchyňa", "kind": "indoor", "aspect": "single"},
+        narrative_continuity_check="Flows naturally from prev to next.",
+    )
+    assert resp.environment.label == "kuchyňa"
+    assert resp.companion is None
+
+
+def test_rethink_environment_accepts_dual_environment():
+    resp = RethinkEnvironmentResponse(
+        workflow="no-lora",
+        concept="empty cabin from the outside",
+        concept_localized="prázdna chata zvonku",
+        character_role=None,
+        paragraph_text="Chata stála medzi smrekmi a ticho dymila.",
+        scene_excerpt="Chata stála medzi smrekmi a ticho dymila.",
+        environment={"label": "drevenica", "kind": "dual", "aspect": "outside"},
+        narrative_continuity_check="ok",
+    )
+    assert resp.environment.aspect == "outside"
+
+
+def test_rethink_environment_rejects_excerpt_not_in_paragraph():
+    with pytest.raises(ValidationError):
+        RethinkEnvironmentResponse(
+            workflow="single-lora",
+            concept="x",
+            concept_localized="x",
+            character_role="male",
+            paragraph_text="Stál pri okne.",
+            scene_excerpt="Sedel pri stole.",
+            environment={"label": "obývačka", "kind": "indoor", "aspect": "single"},
+            narrative_continuity_check="ok",
+        )
+
+
+def test_rethink_environment_rejects_empty_continuity_check():
+    with pytest.raises(ValidationError):
+        RethinkEnvironmentResponse(
+            workflow="single-lora",
+            concept="x",
+            concept_localized="x",
+            character_role="male",
+            paragraph_text="Stál pri okne.",
+            scene_excerpt="Stál pri okne.",
+            environment={"label": "obývačka", "kind": "indoor", "aspect": "single"},
+            narrative_continuity_check="   ",
+        )
+
+
+def test_rethink_environment_rejects_invalid_environment_aspect():
+    with pytest.raises(ValidationError):
+        RethinkEnvironmentResponse(
+            workflow="single-lora",
+            concept="x",
+            concept_localized="x",
+            character_role="male",
+            paragraph_text="Stál pri okne.",
+            scene_excerpt="Stál pri okne.",
+            # indoor + aspect=inside is invalid (must be 'single')
+            environment={"label": "obývačka", "kind": "indoor", "aspect": "inside"},
+            narrative_continuity_check="ok",
+        )
