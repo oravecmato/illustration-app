@@ -5688,31 +5688,57 @@ to chase 100 % line coverage.
       tolerant), rejects otherwise.
 - **Claude IO schema — Call 4 (`rethink_concept`):**
   - Accepts a valid response
-    `{ concept, paragraph_text, scene_excerpt, companion: null }`.
-  - Accepts a valid response with a non-null `companion`.
-  - Rejects responses missing any of the three required fields.
+    `{ workflow, concept, paragraph_text, scene_excerpt, character_role, contains_entity_label: null, entity_action: "none", narrative_continuity_check }`.
+  - Accepts a valid response with a non-null
+    `contains_entity_label` and `entity_action ∈ {keep, claim_floating}`.
+  - Accepts `entity_action="drop"` paired with
+    `contains_entity_label=null`.
+  - Rejects responses missing any required field.
   - Server-side validator rejects responses where `scene_excerpt` is
     not a verbatim substring of `paragraph_text` (whitespace-tolerant),
     matching the Agent 0b excerpt rule (§ 7.1 Call 0b rule #3).
-- **Companion schema rules (across Calls 0a / 0b / 4):**
-  - Call 0a's `collected_brief.companions` accepts an empty array, a
-    1-entry array, and a 2-entry array; rejects 3+ entries.
-  - Call 0b's per-illustration `companion` accepts both `null` and a
-    fully populated `{ description, interaction }`; rejects entries
-    that set only `description` or only `interaction`.
-  - Call 4's `companion` field has the same accept/reject behavior as
-    Call 0b's.
-- **Companion pool fidelity validators (server-side, beyond Pydantic):**
+  - Server-side validator rejects responses where `entity_action` is
+    inconsistent with `contains_entity_label`
+    (e.g. `entity_action="drop"` with a non-null label).
+- **Claude IO schema — Call 4b (`rethink_environment`):**
+  - Accepts a valid response
+    `{ workflow, concept, paragraph_text, scene_excerpt, character_role, environment: {label, kind, aspect}, contains_entity_label, entity_action, narrative_continuity_check }`.
+  - Rejects responses whose `environment.aspect` is incompatible with
+    `environment.kind` (e.g. `kind="indoor"` with `aspect="outside"`).
+  - Rejects responses whose `environment.label` collides with another
+    slot's locked label after the proposed swap (disjointness rule).
+  - Rejects responses whose `entity_action` is inconsistent with
+    `contains_entity_label` (same rule as Call 4).
+- **Narrative-entity schema rules (across Calls 0a / 0b / 4 / 4b):**
+  - Call 0a's `collected_brief.non_human_entities` accepts an empty
+    array and arrays of `{label, role_in_story}` entries; rejects
+    entries missing either field.
+  - Call 0b's `narrative_entities` output accepts entries with
+    `kind ∈ {non_human_character, object}`,
+    `importance ∈ {primary, secondary, supporting}`, and
+    `reserved_for_scene_index` either `null` or an integer in
+    `[0, illustration_count)`.
+  - Per-illustration `contains_entity_label` accepts both `null` and
+    a string; rejects empty strings.
+  - Call 4 / Call 4b `contains_entity_label` + `entity_action` use the
+    same accept/reject behavior; rejects unknown `entity_action`
+    values.
+- **Narrative-entity fidelity validators (server-side, beyond Pydantic):**
   - Agent 0b output post-validation: an illustration whose
-    `companion.description` does not match (whitespace-tolerant,
-    case-insensitive substring or exact) any entry in
-    `collected_brief.companions` is rejected and re-prompted up to
-    `CLAUDE_JSON_RETRY` times; ultimate failure surfaces as
-    `STORY_BUILD_FAILED`.
-  - Agent 4 output post-validation: same rule against the run's saved
-    `collected_brief.companions` pool; ultimate failure causes the
-    branch to behave as if Agent 4 returned nothing useful, per § 6
-    loop semantics.
+    `contains_entity_label` does not match any entry in the response's
+    `narrative_entities[]` (normalised label compare) is rejected and
+    re-prompted up to `CLAUDE_JSON_RETRY` times; ultimate failure
+    surfaces as `STORY_BUILD_FAILED`.
+  - Agent 0b output post-validation: any entry in
+    `narrative_entities[]` with a non-null `reserved_for_scene_index`
+    must match exactly one illustration's
+    `contains_entity_label`; otherwise reject.
+  - Agent 4 / Agent 4b output post-validation: same label-must-be-in-
+    register rule against the run's saved `narrative_entities`
+    register; additionally, `entity_action="claim_floating"` is
+    rejected when the supplied label is already scene-locked to a
+    different slot; ultimate failure causes the branch to behave as if
+    the agent returned nothing useful, per § 6 loop semantics.
 - **Branch state machine** (`orchestrator/branch.py`):
   - Existing scenarios (happy path, prompt revision, concept restart,
     all attempts exhausted, cancellation, correct character_config
@@ -5739,31 +5765,60 @@ to chase 100 % line coverage.
     `CLAUDE_JSON_RETRY + 1` times in a row; the branch exhausts the
     concept attempt and continues per § 6 loop semantics (no DB
     mutation occurs from invalid responses).
-  - **Companion happy-path (new):** the illustration starts with a
-    non-null `companion` (set by Agent 0b at run creation). The branch
-    runs through to `COMPLETED`. Calls 1 / 2 / 3 receive the companion
-    in their input (verified by intercepting the outgoing Claude
-    request payload). `companion_description` and
-    `companion_interaction` columns remain set on the row.
-  - **Agent 4 drops the companion (new):** the branch fails its first
-    concept and triggers Agent 4. Mock Agent 4 to return
-    `companion: null`. The branch persists `companion_description=NULL`
-    and `companion_interaction=NULL` on the illustration row, emits
-    `illustration_companion_updated{companion: null}` after
-    `paragraph_updated`, then proceeds.
-  - **Agent 4 swaps the companion (new):** the brief lists two
-    companion entries. Mock Agent 4 to return a companion whose
-    `description` matches the *other* brief entry. The branch persists
-    the new description and interaction and emits
-    `illustration_companion_updated` carrying the new companion.
-  - **Agent 4 unchanged companion (new):** Mock Agent 4 to return the
-    same companion as the current one. The branch does NOT emit
-    `illustration_companion_updated` (no spurious event).
-  - **Agent 4 companion not in pool (new):** Mock Agent 4 to return a
-    companion whose `description` is not in the brief's pool
+  - **Entity happy-path:** the illustration starts with a non-null
+    `contains_entity_label` (set by Agent 0b at run creation). The
+    branch runs through to `COMPLETED`. Calls 1 / 2 / 3 receive
+    `contains_entity` (resolved record) in their input (verified by
+    intercepting the outgoing Claude request payload). The
+    `contains_entity_label` column remains set on the row.
+  - **Agent 4 drops the entity:** the branch fails its first concept
+    and triggers Agent 4. Mock Agent 4 to return
+    `{ entity_action: "drop", contains_entity_label: null }`. The
+    branch persists `contains_entity_label=NULL` on the illustration,
+    emits `illustration_entity_updated{contains_entity_label: null,
+    entity: null}` after `paragraph_updated`, then proceeds. The
+    dropped entity stays in `runs.narrative_entities_json` with its
+    `reserved_for_scene_index` intact (ghost reservation).
+  - **Agent 4 claims a floating entity:** the run's register contains a
+    non-scene-locked entity (`reserved_for_scene_index: null`). Mock
+    Agent 4 to return
+    `{ entity_action: "claim_floating", contains_entity_label: "<that label>" }`.
+    The branch persists the new label, mutates the register entry's
+    `reserved_for_scene_index` to the current slot, and emits
+    `illustration_entity_updated` carrying the new record.
+  - **Agent 4 keeps the entity unchanged:** Mock Agent 4 to return
+    `{ entity_action: "keep", contains_entity_label: "<same label>" }`.
+    The branch does NOT emit `illustration_entity_updated` (no
+    spurious event).
+  - **Agent 4 entity not in register:** Mock Agent 4 to return a label
+    that does not appear in the run's `narrative_entities` register
     `CLAUDE_JSON_RETRY + 1` times. The branch treats this as failure
     and continues per § 6 loop semantics; no DB mutation occurs from
     invalid responses.
+  - **Agent 4 claim violates scene-lock:** Mock Agent 4 to claim a
+    label whose `reserved_for_scene_index` is already a different
+    scene. Rejected and retried; ultimate failure follows the same
+    no-mutation rule.
+  - **Agent 4b environment swap (new):** mock the evaluator to return
+    `problem="environment"` and have Agent 4b return a fresh
+    environment for the slot. Assert (a) `runs.environments_json[scene_index]`
+    is replaced, (b) `illustrations.environment_label` +
+    `environment_aspect` are updated, (c) SSE emits
+    `paragraph_updated`, `illustration_environment_updated`, and
+    optionally `illustration_entity_updated` in that order, (d)
+    `env_rethink_used` is true for this branch, (e)
+    `skip_concept_rethink_once` is set so the next outer-loop
+    iteration bypasses Agent 4, (f) the concept budget is extended by
+    +1 for the rest of the branch.
+  - **Agent 4b one-shot rule:** after a successful 4b swap, a
+    subsequent `problem="environment"` verdict in the same branch must
+    NOT call Agent 4b again. Instead the branch falls through to
+    Agent 4 (or terminates if budget is exhausted). Verified by
+    asserting Agent 4b is called exactly once across the whole branch.
+  - **Agent 4b dual-environment slot disjointness:** when 4b returns a
+    `dual` environment whose label collides with another slot's locked
+    label in an incompatible way, the response is rejected and
+    re-prompted up to `CLAUDE_JSON_RETRY` times.
 - **Pipeline / run creation** (`orchestrator/pipeline.py`):
   - Runs created with N=3 illustrations spawn 3 branches.
   - Runs created with N=5 succeed end-to-end (mocked clients).
@@ -5812,10 +5867,15 @@ to chase 100 % line coverage.
   - Events broadcast to multiple subscribers.
   - Stream closes on terminal run states.
   - `run_failed` payload includes both `error_code` and `error_message`.
-  - `illustration_companion_updated` is broadcast to all current
-    subscribers after Agent 4 returns a *different* companion
-    (including the transition to/from null). Multiple subscribers each
-    observe the same payload.
+  - `illustration_entity_updated` is broadcast to all current
+    subscribers after Agent 4 or Agent 4b returns a different
+    `contains_entity_label` (including the transition to/from null).
+    Multiple subscribers each observe the same payload.
+  - `illustration_environment_updated` is broadcast to all current
+    subscribers after Agent 4b swaps a slot's environment. Multiple
+    subscribers each observe the same payload, and the payload's
+    `environment` matches the post-swap record on
+    `runs.environments_json[scene_index]`.
 - **RunPod client** (`services/runpod.py`): unchanged from previous
   spec.
 - **Alembic / models in sync** (new test file,
@@ -5887,7 +5947,8 @@ to chase 100 % line coverage.
     `last_positive_prompt` / `last_negative_prompt` (i.e. the
     revised prompts from the previous iteration, not the
     originals), and the unchanged `style_guide` /
-    `character_role` / `companion`.
+    `character_role` / `contains_entity` (resolved from the run's
+    `narrative_entities` register).
   - Negative-prompt baseline (§ 7.3.6) survives revision: a
     stub Agent 7 that drops the baseline causes the dispatch to
     treat the call as a Claude failure and re-prompt up to
@@ -5936,22 +5997,51 @@ as described in § 5.0.
   after the first branch transitions to `RENDERING`, verify final
   status `CANCELLED` and that branches transitioned to `CANCELLED`
   rather than continuing.
-- **Companion end-to-end (new):** the chat phase produces a brief with
-  one `companions` entry. Agent 0b returns 5 illustrations with
-  `companion` non-null on scenes 0, 2, 4 and `null` on scenes 1, 3.
-  Run completes via mocked Agents 1–3. Assertions:
+- **Narrative entity end-to-end:** the chat phase produces a brief
+  with one `non_human_entities[]` entry (a creature, e.g. "a small
+  black cat"). Agent 0b returns 5 illustrations with
+  `contains_entity_label = "a small black cat"` on scenes 0, 2, 4 and
+  `null` on scenes 1, 3, and registers the entity in
+  `narrative_entities[]` with `reserved_for_scene_index: 0` (or
+  whichever scene anchors the primary occurrence). Run completes via
+  mocked Agents 1–3. Assertions:
   - All 5 branches run.
-  - The Claude requests for scenes 0/2/4 include the companion in
-    their input JSON payload (verified via respx); scenes 1/3 do not.
-  - `GET /api/runs/{id}` returns the companion field non-null on
+  - The Claude requests for scenes 0/2/4 include the resolved
+    `contains_entity` record in their input JSON payload (verified
+    via respx); scenes 1/3 do not.
+  - `GET /api/runs/{id}` returns `contains_entity_label` non-null on
     scenes 0/2/4 and null on scenes 1/3.
-- **Agent 4 drops companion end-to-end (new):** with a brief that
-  contains one companion and Agent 0b assigning the companion to
-  scene 0, Agent 2 mocked to return `problem="concept"` on the first
-  attempt for scene 0, Agent 4 mocked to return `companion: null`.
-  Assert the SSE stream contains the `illustration_companion_updated`
-  event with `companion: null` for scene 0; assert a subsequent
-  `GET /api/runs/{id}` returns `companion: null` on scene 0 (persisted).
+  - Top-level `narrative_entities[]` is present in the response.
+- **Object entity end-to-end:** as above but the brief lists a single
+  inanimate object (e.g. "the gold pocket watch") and Agent 0b
+  schedules an entity-alone beat (`character_role=null`,
+  `contains_entity_label="the gold pocket watch"`) on one scene.
+  Assert the workflow runner picks `no-lora.json` for that scene and
+  the entity record's `kind="object"` is preserved across REST and
+  SSE payloads.
+- **Agent 4 drops entity end-to-end:** with a brief that contains
+  one entity and Agent 0b assigning it to scene 0, Agent 2 mocked to
+  return `problem="concept"` on the first attempt for scene 0,
+  Agent 4 mocked to return
+  `{ entity_action: "drop", contains_entity_label: null }`. Assert
+  the SSE stream contains the `illustration_entity_updated` event
+  with `contains_entity_label: null, entity: null` for scene 0;
+  assert a subsequent `GET /api/runs/{id}` returns
+  `contains_entity_label: null` on scene 0 (persisted) but the
+  `narrative_entities[]` register entry still carries
+  `reserved_for_scene_index: 0` (ghost reservation).
+- **Agent 4b environment swap end-to-end:** with a brief that yields
+  a story whose first scene is `kitchen / single`, mock the evaluator
+  to return `problem="environment"` after the first render for
+  scene 0, and have Agent 4b return a fresh `garden / outdoor / single`
+  environment for that slot. Assert the SSE stream contains, in
+  order: `illustration_state{state="RETHINKING_ENVIRONMENT"}`,
+  `paragraph_updated`, `illustration_environment_updated{environment: {label: "garden", ...}}`,
+  optional `illustration_entity_updated` (if the swap also changed
+  the entity), and finally
+  `illustration_state{state="GENERATING_PROMPTS"}`. Assert
+  `GET /api/runs/{id}` returns the new environment on scene 0 and on
+  the top-level `environments[0]`.
 - **Agent 4 paragraph rewrite end-to-end:** run the pipeline with
   Agent 2 mocked to return `problem="concept"` on the first attempt
   for one branch, and Agent 4 mocked to return a valid
@@ -6092,28 +6182,50 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
   - Reconciliation preserves array order (assertion: the index of the
     user message in `messages` is identical before and after the
     server response lands).
-- **IllustrationCard companion subtitle (new):**
-  - When mounted with an illustration whose `companion` is non-null,
-    the card renders a Slovak subtitle `"V scéne je tiež: {description}"`.
-  - When `companion` is `null`, the subtitle is not present in the DOM.
-  - When the store mutates `illustration.companion` from non-null to
-    null in place (simulating `illustration_companion_updated`), the
-    subtitle disappears without remounting the card.
-  - When the store mutates `illustration.companion` from null to a
-    populated object in place, the subtitle appears without
+- **IllustrationCard entity subtitle:**
+  - When mounted with an illustration whose `contains_entity_label` is
+    non-null, the card renders the localised subtitle from
+    `i18n.t('illustration.containsEntity', { label })` (Slovak fixture:
+    `"V scéne je tiež: {label}"`).
+  - When `contains_entity_label` is `null`, the subtitle is not present
+    in the DOM.
+  - When the store mutates `illustration.contains_entity_label` from
+    non-null to null in place (simulating
+    `illustration_entity_updated`), the subtitle disappears without
     remounting the card.
-  - When the companion's `description` changes in place, the subtitle
-    text updates in place.
-- **runStore (new event handler):**
-  - `illustration_companion_updated` with a non-null companion writes
-    that companion onto the existing illustration object (reference
-    survival assertion on the illustration object itself; the
-    `companion` field is replaced as a whole).
-  - `illustration_companion_updated` with `companion: null` clears the
-    field on the existing illustration object.
+  - When the store mutates `illustration.contains_entity_label` from
+    null to a string in place, the subtitle appears without remounting
+    the card.
+  - When the label string changes in place, the subtitle text updates
+    in place.
+- **IllustrationCard environment subtitle:**
+  - When mounted with an illustration whose `environment` is set, the
+    card renders the localised environment subtitle from
+    `i18n.t('illustration.environment', { label, aspect })`.
+  - When the store mutates `illustration.environment` in place
+    (simulating `illustration_environment_updated`), the subtitle text
+    updates without remounting the card.
+- **runStore (new event handlers):**
+  - `illustration_entity_updated` with a non-null label writes
+    `contains_entity_label` onto the existing illustration object
+    (reference survival assertion on the illustration object itself).
+    If the payload's `entity` is non-null, the store upserts it into
+    `run.narrative_entities[]` (matched by normalised label).
+  - `illustration_entity_updated` with `contains_entity_label: null`
+    clears the label on the existing illustration object; the
+    register entry is NOT removed (append-only on the frontend).
+  - `illustration_environment_updated` writes the new `Environment`
+    onto the illustration's `environment` field AND overwrites
+    `run.environments[scene_index]` on the live run object. Both
+    assignments are field-level; the IllustrationCard does not
+    remount.
 - **sessionStore (new):**
-  - The store correctly parses `collected_brief.companions` from
-    Agent 0a's reply payloads (empty, 1-entry, 2-entry).
+  - The store correctly parses `collected_brief.non_human_entities`
+    from Agent 0a's reply payloads (empty array, single entry,
+    multi-entry — all valid).
+  - The store correctly parses `collected_brief.main_character_role`
+    and refuses payloads where it is `"mother"` (matching the
+    server-side validator).
 - **IllustrationCard reactive concept text + popover** (revised):
   - The card no longer renders `current_concept` as an inline body
     text element. The concept text is reachable only via the
@@ -6407,11 +6519,13 @@ presets) are not.
 - Hot reload of agent prompt `.md` files.
 - Streaming Agent 0a / Agent 0b responses to the UI token-by-token.
 - Two or more human characters in a single illustration.
-- Anthropomorphic / humanoid non-human companions (treated as a second
+- Anthropomorphic / humanoid non-human entities (treated as a second
   human for scope purposes).
-- Multiple non-human companions in a single illustration.
-- Companion types not present in the brief's agreed pool.
-- Auto-tuned per-illustration LoRA strengths for companion rendering.
+- Multiple non-human entities visible in a single illustration.
+- Entities (animate or inanimate) not present in the run's
+  `narrative_entities` register.
+- Auto-tuned per-illustration LoRA strengths for non-human entity
+  rendering.
 
 ---
 
@@ -6495,20 +6609,34 @@ The MVP is considered complete when:
     `/runs/:id` without page reload; a subsequent `GET /api/runs/:id`
     snapshot returns `story_blocks` carrying the rewritten paragraph
     text (i.e. the change is persisted, not merely visual).
-12. **Optional companion, end-to-end.** With a brief whose
-    `companions` array contains at least one entry, Agent 0b assigns
-    that companion to at least one scene, and the resulting
-    `GET /api/runs/:id` returns the `companion` field set on the
-    matching illustration(s) and `null` on the others. The
+12. **Optional non-human entity, end-to-end.** With a brief whose
+    `non_human_entities[]` contains at least one entry, Agent 0b
+    promotes it into the run's `narrative_entities[]` register and
+    assigns it to at least one scene; the resulting
+    `GET /api/runs/:id` returns `contains_entity_label` set on the
+    matching illustration(s) and `null` on the others, plus the
+    register on the top-level `narrative_entities[]` array. The
     `IllustrationCard` for those illustrations renders the
-    `"V scéne je tiež: …"` subtitle. With a brief whose `companions`
-    array is empty, every illustration has `companion: null` and no
-    card subtitle is rendered — the rest of the app behaves
-    identically to the no-companion baseline (backward compatibility).
-    Forcing Agent 4 to drop a companion mid-run emits an SSE
-    `illustration_companion_updated{companion: null}` event,
-    persists the columns as NULL, and the card subtitle disappears
-    reactively without a page reload.
+    `"V scéne je tiež: {label}"` subtitle. With a brief whose
+    `non_human_entities[]` array is empty, every illustration has
+    `contains_entity_label: null`, the register is empty, and no card
+    subtitle is rendered — the rest of the app behaves identically to
+    the no-entity baseline. Forcing Agent 4 to drop an entity mid-run
+    emits an SSE `illustration_entity_updated{contains_entity_label: null, entity: null}`
+    event, persists the column as NULL while leaving the register's
+    ghost reservation intact, and the card subtitle disappears
+    reactively without a page reload. Forcing the evaluator to return
+    `problem="environment"` triggers Agent 4b, which emits
+    `illustration_environment_updated` with the new slot's record;
+    the new environment subtitle re-renders without a page reload.
+13a. **Object entity end-to-end.** With a brief whose
+    `non_human_entities[]` contains exactly one inanimate object
+    (e.g. *"the gold pocket watch"*), Agent 0b schedules at least one
+    `entity-alone` beat for that object (no human in the scene). The
+    workflow runner dispatches `no-lora.json` for that scene; the
+    rendered card shows the entity subtitle plus the absence of the
+    character badge. No human appears in the rendered image
+    (verified manually).
 13. **Path-prefix routing.** A fresh visit to `/` redirects to one of
     `/sk/`, `/cs/`, `/en/` per the detection rules of § 9.6.3.
     Direct visits to `/sk/`, `/cs/`, `/en/` open the SessionView with
@@ -6527,9 +6655,9 @@ The MVP is considered complete when:
     does NOT re-toast. After the user manually picks a language via
     the LanguageSwitcher, further chat-driven auto-switches do not
     fire.
-15. **Workflow selection.** With a brief whose `companions` array is
-    empty and a build that yields one or more illustrations with
-    `character_role = null`, every `character_role IS NULL` row has
+15. **Workflow selection.** With a brief whose `non_human_entities[]`
+    array is empty and a build that yields one or more illustrations
+    with `character_role = null`, every `character_role IS NULL` row has
     `current_workflow = "no-lora"` and the dispatched ComfyUI job
     uses `no-lora.json` (§ 7.2.1) — no `CHARACTER_LORA` placeholder
     is substituted. Rows with a non-null `character_role` have
