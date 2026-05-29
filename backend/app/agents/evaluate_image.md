@@ -43,21 +43,13 @@ The image is OK only when ALL of the following hold:
    corresponding MHA character (skip when there is no human in the scene).
 3. The character's expression, gesture, or action is clearly identifiable
    and matches the concept. Vague or generic poses (just standing, looking)
-   → `problem="prompt"` with a suggestion to add specifics.
-
-   **Minor-mismatch tolerance.** When the rendered expression is in
-   the same emotional neighbourhood as the concept (e.g., "serene"
-   rendered as a faint smile, "concerned" as "pensive", "calm" as
-   "neutral", "quietly amazed" as "softly smiling") AND every other
-   checklist item passes (cast, entity, environment, anatomy, style,
-   safety, composition), return `ok: true`. Failing the image for
-   nuance-level expression drift while all other axes pass burns
-   retry budget on a difference the next render is unlikely to
-   resolve cleanly. Only reject when the rendered expression
-   **contradicts** the concept's emotional beat (laughing when the
-   concept says crying; smug when the concept says grieving) or the
-   gesture/action itself is wrong (bow missing, hands in the wrong
-   place, wrong prop).
+   → `problem="prompt"` with a suggestion to add specifics. Stay strict
+   here: a rendered expression that is in the same emotional neighbourhood
+   as the concept but not actually the concept's beat (e.g. "serene" drawn
+   as a faint smile, "quietly amazed" drawn as "softly smiling", "concerned"
+   drawn as "pensive") is still a miss and must be rejected with
+   `problem="prompt"`. Mark such rejections with `nuance_only_failure: true`
+   (see § nuance-only flag below).
 4. The illustration is style-consistent: anime/MHA look, no realism, no
    off-style rendering.
 5. No anatomical deformities: extra/missing/fused fingers, distorted face,
@@ -101,16 +93,46 @@ The image is OK only when ALL of the following hold:
   (`rethink_environment`), the only agent allowed to swap the
   environment. Use this verdict sparingly.
 
+## `nuance_only_failure` flag
+
+In addition to `ok` / `problem` / `reasoning` / `suggestion`, every
+verdict carries a boolean `nuance_only_failure`. The rule:
+
+- On `ok: true`, ALWAYS emit `nuance_only_failure: false`.
+- On `ok: false`, emit `nuance_only_failure: true` ONLY when ALL of
+  the following hold:
+  1. `problem == "prompt"`.
+  2. The single failure axis is checklist item #3 — a rendered
+     expression / gesture in the **same emotional neighbourhood**
+     as the concept's beat but not actually it (e.g. "serene"
+     drawn as "faint smile", "quietly amazed" drawn as "softly
+     smiling", "concerned" drawn as "pensive").
+  3. Every OTHER axis passes cleanly: cast count (1a), entity
+     alignment (1b), character likeness (2), style (4), anatomy
+     (5), safety (6), composition (7), and environment feasibility
+     (8). No anatomy issues, no anti-creature contamination, no
+     wrong outfit, no extra figure, no environment miss.
+- On any other failure (problem ≠ "prompt"; or problem == "prompt"
+  but the expression is contradictory rather than neighbourly; or
+  any other axis is failing alongside the nuance), emit
+  `nuance_only_failure: false`.
+
+The flag does NOT change routing. The verdict still rejects the
+image and Agent 3 still revises. The flag is a downstream signal
+used after the auto pipeline exhausts its budget to identify
+historical attempts that were turned down on a near-miss the
+renderer is unlikely to ever close cleanly.
+
 ## Output format
 
 On success:
 
 ```json
-{ "ok": true, "problem": null, "reasoning": "...", "suggestion": "" }
+{ "ok": true, "problem": null, "reasoning": "...", "suggestion": "", "nuance_only_failure": false }
 ```
 
 On failure:
 
 ```json
-{ "ok": false, "problem": "prompt" | "concept" | "environment", "reasoning": "...", "suggestion": "actionable hint" }
+{ "ok": false, "problem": "prompt" | "concept" | "environment", "reasoning": "...", "suggestion": "actionable hint", "nuance_only_failure": true | false }
 ```

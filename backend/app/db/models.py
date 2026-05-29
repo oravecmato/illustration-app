@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -38,6 +38,7 @@ class IllustrationState(StrEnum):
     REVISING_PROMPTS = "REVISING_PROMPTS"
     RETHINKING_CONCEPT = "RETHINKING_CONCEPT"
     RETHINKING_ENVIRONMENT = "RETHINKING_ENVIRONMENT"
+    SALVAGE_REVIEW = "SALVAGE_REVIEW"
     MANUAL_CHATTING = "MANUAL_CHATTING"
     MANUAL_GENERATING_PROMPTS = "MANUAL_GENERATING_PROMPTS"
     MANUAL_RENDERING = "MANUAL_RENDERING"
@@ -181,6 +182,62 @@ class Illustration(Base):
         "ManualMessage",
         back_populates="illustration",
         order_by="ManualMessage.created_at",
+    )
+    attempt_history: Mapped[list["IllustrationAttemptHistory"]] = relationship(
+        "IllustrationAttemptHistory",
+        back_populates="illustration",
+        order_by="(IllustrationAttemptHistory.concept_attempt, "
+        "IllustrationAttemptHistory.prompt_attempt, "
+        "IllustrationAttemptHistory.created_at)",
+    )
+
+
+class IllustrationAttemptHistory(Base):
+    """Per-attempt snapshot written after every auto-pipeline Agent 2 verdict.
+
+    The salvage agent (§ 7.1 Call 8) reasons over these rows when the auto
+    pipeline has exhausted its budgets. Rows are immutable once written and
+    are never deleted by the application.
+    """
+
+    __tablename__ = "illustration_attempt_history"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    illustration_id: Mapped[str] = mapped_column(
+        String, ForeignKey("illustrations.id"), nullable=False, index=True
+    )
+    concept_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_path: Mapped[str] = mapped_column(String, nullable=False)
+    concept_used: Mapped[str] = mapped_column(Text, nullable=False)
+    concept_localized: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    paragraph_text: Mapped[str] = mapped_column(Text, nullable=False)
+    scene_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    paragraph_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment_label: Mapped[str] = mapped_column(Text, nullable=False)
+    environment_kind: Mapped[str] = mapped_column(String, nullable=False)
+    environment_aspect: Mapped[str] = mapped_column(String, nullable=False)
+    contains_entity_label: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    character_role: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    current_workflow: Mapped[str] = mapped_column(String, nullable=False)
+    positive_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    negative_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    verdict_json: Mapped[str] = mapped_column(Text, nullable=False)
+    nuance_only_failure: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    illustration: Mapped["Illustration"] = relationship(
+        "Illustration", back_populates="attempt_history"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_illustration_attempt_history_illustration_nuance",
+            "illustration_id",
+            "nuance_only_failure",
+        ),
     )
 
 

@@ -30,6 +30,7 @@ export default {
       REVISING_PROMPTS: 'Revising prompts',
       RETHINKING_CONCEPT: 'Rethinking concept',
       RETHINKING_ENVIRONMENT: 'Rethinking environment',
+      SALVAGE_REVIEW: 'Reviewing earlier attempts',
       MANUAL_CHATTING: 'Collaborative editing',
       MANUAL_GENERATING_PROMPTS: 'Preparing prompts (manual)',
       MANUAL_RENDERING: 'Rendering (manual)',
@@ -38,6 +39,8 @@ export default {
       CANCELLED: 'Cancelled',
     },
     currentConcept: 'Concept',
+    salvaged: 'This image was recovered from an earlier attempt by the AI.',
+    salvagedParagraphPatched: 'The surrounding story paragraph was also adjusted to match this image.',
     entity_subtitle: 'Also in the scene: {label}',
     attempt: 'attempt {current}/{max}',
     manual: {

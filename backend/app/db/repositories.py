@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Illustration,
+    IllustrationAttemptHistory,
     ManualIllustrationSession,
     ManualMessage,
     Run,
@@ -159,6 +160,68 @@ class RunRepository:
             select(Illustration).where(Illustration.id == illustration_id)
         )
         return result.scalar_one_or_none()
+
+    async def add_attempt_history(
+        self,
+        *,
+        illustration_id: str,
+        concept_attempt: int,
+        prompt_attempt: int,
+        image_path: str,
+        concept_used: str,
+        concept_localized: str | None,
+        paragraph_text: str,
+        scene_excerpt: str,
+        paragraph_index: int,
+        environment_label: str,
+        environment_kind: str,
+        environment_aspect: str,
+        contains_entity_label: str | None,
+        character_role: str | None,
+        current_workflow: str,
+        positive_prompt: str,
+        negative_prompt: str,
+        verdict_json: str,
+        nuance_only_failure: bool,
+    ) -> IllustrationAttemptHistory:
+        row = IllustrationAttemptHistory(
+            illustration_id=illustration_id,
+            concept_attempt=concept_attempt,
+            prompt_attempt=prompt_attempt,
+            image_path=image_path,
+            concept_used=concept_used,
+            concept_localized=concept_localized,
+            paragraph_text=paragraph_text,
+            scene_excerpt=scene_excerpt,
+            paragraph_index=paragraph_index,
+            environment_label=environment_label,
+            environment_kind=environment_kind,
+            environment_aspect=environment_aspect,
+            contains_entity_label=contains_entity_label,
+            character_role=character_role,
+            current_workflow=current_workflow,
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            verdict_json=verdict_json,
+            nuance_only_failure=nuance_only_failure,
+        )
+        self.session.add(row)
+        await self.session.commit()
+        await self.session.refresh(row)
+        return row
+
+    async def get_attempt_history(self, illustration_id: str) -> list[IllustrationAttemptHistory]:
+        """Return all attempt history rows for an illustration, newest-first."""
+        result = await self.session.execute(
+            select(IllustrationAttemptHistory)
+            .where(IllustrationAttemptHistory.illustration_id == illustration_id)
+            .order_by(
+                IllustrationAttemptHistory.concept_attempt.desc(),
+                IllustrationAttemptHistory.prompt_attempt.desc(),
+                IllustrationAttemptHistory.created_at.desc(),
+            )
+        )
+        return list(result.scalars().all())
 
 
 class ManualRepository:

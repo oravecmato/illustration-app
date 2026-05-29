@@ -97,6 +97,7 @@ export type IllustrationState =
   | "REVISING_PROMPTS"
   | "RETHINKING_CONCEPT"
   | "RETHINKING_ENVIRONMENT"
+  | "SALVAGE_REVIEW"
   | "MANUAL_CHATTING"
   | "MANUAL_GENERATING_PROMPTS"
   | "MANUAL_RENDERING"
@@ -207,6 +208,20 @@ export interface Illustration {
   contains_entity_label: string | null;
   manual_attempts?: number;
   manual_session?: ManualSessionSummary | null;
+  /** § 6 / § 7.1: populated by the `illustration_salvage_resolved`
+   *  SSE handler when the salvage agent (Agent 8) accepted a prior
+   *  attempt. Null otherwise. Live-only — not persisted across reloads
+   *  on this object (the historical attempt rows are the source of
+   *  truth in the DB; this field is a UI diagnostics surface). */
+  salvage?: IllustrationSalvage | null;
+}
+
+export interface IllustrationSalvage {
+  candidate_index: number;
+  reasoning: string;
+  /** Present when Agent 8 rewrote the surrounding paragraph to match
+   *  the salvaged image. */
+  paragraph_text_override?: string;
 }
 
 // SSE event payloads
@@ -332,6 +347,18 @@ export interface IllustrationManualEndedEvent {
   outcome: "completed" | "exhausted" | "cancelled";
 }
 
+export interface IllustrationSalvageResolvedEvent {
+  illustration_id: string;
+  scene_index: number;
+  outcome: "accepted" | "rejected_all";
+  /** Present when outcome === "accepted". */
+  candidate_index?: number;
+  reasoning: string;
+  /** Present when outcome === "accepted" AND the salvage agent rewrote
+   *  the framing paragraph to match the chosen image. */
+  paragraph_text_override?: string;
+}
+
 export type SseEvent =
   | { type: "snapshot"; data: SnapshotEvent }
   | { type: "illustration_state"; data: IllustrationStateEvent }
@@ -344,6 +371,7 @@ export type SseEvent =
   | { type: "manual_message_appended"; data: ManualMessageAppendedEvent }
   | { type: "manual_image_rendered"; data: ManualImageRenderedEvent }
   | { type: "illustration_manual_ended"; data: IllustrationManualEndedEvent }
+  | { type: "illustration_salvage_resolved"; data: IllustrationSalvageResolvedEvent }
   | { type: "translations_refreshed"; data: TranslationsRefreshedEvent }
   | { type: "paragraph_updated"; data: ParagraphUpdatedEvent }
   | { type: "run_completed"; data: RunCompletedEvent }

@@ -32,6 +32,20 @@
       <div class="concept-popover-body" data-testid="concept-popover-body">
         <div class="concept-label">{{ $t('illustration.currentConcept') }}</div>
         <div class="concept-text">{{ concept }}</div>
+        <div
+          v-if="salvage"
+          class="salvage-note"
+          data-testid="concept-popover-salvage-note"
+        >
+          {{ $t('illustration.salvaged') }}
+        </div>
+        <div
+          v-if="salvage?.paragraph_text_override"
+          class="salvage-note"
+          data-testid="concept-popover-salvage-paragraph-note"
+        >
+          {{ $t('illustration.salvagedParagraphPatched') }}
+        </div>
       </div>
     </template>
   </VDropdown>
@@ -39,8 +53,9 @@
 
 <script setup lang="ts">
 import { Dropdown as VDropdown } from "floating-vue";
+import type { IllustrationSalvage } from "@/types";
 
-defineProps<{ concept: string }>();
+defineProps<{ concept: string; salvage?: IllustrationSalvage | null }>();
 </script>
 
 <style scoped lang="scss">
@@ -85,5 +100,14 @@ defineProps<{ concept: string }>();
 
 .concept-text {
   white-space: normal;
+}
+
+.salvage-note {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed #ddd;
+  font-size: 0.82rem;
+  font-style: italic;
+  color: #5a5a5a;
 }
 </style>

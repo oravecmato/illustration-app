@@ -6,16 +6,18 @@ import logging
 import os
 
 from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
-from app.db.models import Illustration, IllustrationState
+from app.db.models import Illustration, IllustrationAttemptHistory, IllustrationState
 from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
 from app.schemas.claude import (
     Environment,
+    SalvageCandidate,
     StyleGuide,
     _normalize_entity_label,
+    _normalize_whitespace,
 )
 from app.services.claude import ClaudeClient
-from app.services.images import save_image
+from app.services.images import copy_image, save_history_image, save_image
 from app.services.manual import ManualService
 from app.services.runpod import RunPodClient
 from app.services.workflow import replace_placeholders
@@ -398,6 +400,30 @@ async def run_branch(
                 illustration, last_verdict_json=verdict.model_dump_json()
             )
 
+            # Persist the immutable attempt-history snapshot (§ 5).
+            # Done before the success branch so successful attempts are
+            # also recorded (verdict.ok=true rows exist for audit /
+            # parity even though they are filtered out of salvage).
+            history_image_path = await save_history_image(
+                image_bytes,
+                output_dir,
+                illustration.run_id,
+                illustration.id,
+                concept_attempt,
+                prompt_attempt,
+            )
+            await _persist_attempt_history(
+                repo=repo,
+                illustration=illustration,
+                blocks=blocks,
+                concept_attempt=concept_attempt,
+                prompt_attempt=prompt_attempt,
+                image_path=history_image_path,
+                character_role=character_role,
+                prompts=prompts,
+                verdict=verdict,
+            )
+
             if verdict.ok:
                 # Save image and mark as completed
                 image_path = await save_image(
@@ -483,10 +509,28 @@ async def run_branch(
 
         concept_attempt += 1
 
-    # All automatic attempts exhausted — enter the § 6A manual chat
-    # fallback instead of going straight to FAILED. The branch task ends
-    # here; the rest of the manual flow runs synchronously inside the
-    # POST /api/illustrations/{id}/manual/messages handler.
+    # All automatic attempts exhausted. Before handing off to § 6A
+    # manual, give the salvage agent (§ 7.1 Call 8) a chance to accept
+    # one of the historical attempts whose only failure was an
+    # expression-nuance drift inside the same emotional neighbourhood.
+    salvaged = await _do_salvage_review(
+        illustration=illustration,
+        blocks=blocks,
+        lock=lock,
+        repo=repo,
+        event_bus=event_bus,
+        claude=claude,
+        output_dir=output_dir,
+        source_language=source_language,
+        transition=transition,
+    )
+    if salvaged:
+        return
+
+    # Salvage agent did not rescue the branch — enter the § 6A manual
+    # chat fallback. The branch task ends here; the rest of the manual
+    # flow runs synchronously inside the POST /api/illustrations/{id}/
+    # manual/messages handler.
     manual_repo = ManualRepository(repo.session)
     manual_service = ManualService(
         run_repo=repo,
@@ -750,3 +794,316 @@ def _load_last_verdict(illustration: Illustration):
     return EvaluateImageResponse(
         ok=False, problem="concept", reasoning="Previous concept failed", suggestion=""
     )
+
+
+async def _persist_attempt_history(
+    *,
+    repo: RunRepository,
+    illustration: Illustration,
+    blocks: list[dict],
+    concept_attempt: int,
+    prompt_attempt: int,
+    image_path: str,
+    character_role: str | None,
+    prompts,
+    verdict,
+) -> None:
+    """Append one ``illustration_attempt_history`` row capturing the
+    current attempt's snapshot (§ 5). Called once per Agent 2 verdict,
+    regardless of ``verdict.ok``.
+    """
+    paragraph_text = (
+        blocks[illustration.paragraph_index]["text"]
+        if 0 <= illustration.paragraph_index < len(blocks)
+        else ""
+    )
+    # Resolve environment_kind from the live run row (only label +
+    # aspect are denormalised on the illustration; kind lives on
+    # runs.environments_json).
+    environment_kind = ""
+    run_obj = await repo.get_run(illustration.run_id)
+    if run_obj is not None and run_obj.environments_json:
+        envs = json.loads(run_obj.environments_json)
+        if 0 <= illustration.scene_index < len(envs):
+            environment_kind = envs[illustration.scene_index].get("kind", "")
+    await repo.add_attempt_history(
+        illustration_id=illustration.id,
+        concept_attempt=concept_attempt,
+        prompt_attempt=prompt_attempt,
+        image_path=image_path,
+        concept_used=illustration.current_concept,
+        concept_localized=None,
+        paragraph_text=paragraph_text,
+        scene_excerpt=illustration.scene_excerpt,
+        paragraph_index=illustration.paragraph_index,
+        environment_label=illustration.environment_label or "",
+        environment_kind=environment_kind,
+        environment_aspect=illustration.environment_aspect or "single",
+        contains_entity_label=illustration.contains_entity_label,
+        character_role=character_role,
+        current_workflow=illustration.current_workflow or "",
+        positive_prompt=prompts.positive,
+        negative_prompt=prompts.negative,
+        verdict_json=verdict.model_dump_json(),
+        nuance_only_failure=bool(verdict.nuance_only_failure),
+    )
+
+
+async def _do_salvage_review(
+    *,
+    illustration: Illustration,
+    blocks: list[dict],
+    lock: asyncio.Lock,
+    repo: RunRepository,
+    event_bus: EventBus,
+    claude: ClaudeClient,
+    output_dir: str,
+    source_language: str,
+    transition,
+) -> bool:
+    """Run Agent 8 over surviving attempt-history rows (§ 7.1 Call 8).
+
+    Returns ``True`` when the salvage path completed the illustration
+    (image promoted to canonical path, ``COMPLETED`` emitted); ``False``
+    when the branch should fall through to § 6A manual.
+
+    Pre-filter (§ 6): keep only rows with ``nuance_only_failure=true``
+    AND matching ``(environment_label, environment_aspect)``,
+    ``contains_entity_label`` (null-equal), and ``character_role``
+    against the live illustration row.
+    """
+    history = await repo.get_attempt_history(illustration.id)
+    if not history:
+        return False
+
+    live_entity_norm = (
+        _normalize_entity_label(illustration.contains_entity_label)
+        if illustration.contains_entity_label
+        else None
+    )
+    live_env_label_norm = (
+        _normalize_entity_label(illustration.environment_label)
+        if illustration.environment_label
+        else None
+    )
+
+    def _row_matches(row: IllustrationAttemptHistory) -> bool:
+        if not row.nuance_only_failure:
+            return False
+        row_env_norm = (
+            _normalize_entity_label(row.environment_label) if row.environment_label else None
+        )
+        if row_env_norm != live_env_label_norm:
+            return False
+        if row.environment_aspect != (illustration.environment_aspect or "single"):
+            return False
+        row_entity_norm = (
+            _normalize_entity_label(row.contains_entity_label)
+            if row.contains_entity_label
+            else None
+        )
+        if row_entity_norm != live_entity_norm:
+            return False
+        if row.character_role != illustration.character_role:
+            return False
+        return True
+
+    surviving = [row for row in history if _row_matches(row)]
+    if not surviving:
+        return False
+
+    # Build the current environment + entity context for Agent 8.
+    run_obj = await repo.get_run(illustration.run_id)
+    if run_obj is None:
+        return False
+    environments_raw = json.loads(run_obj.environments_json or "[]")
+    if illustration.scene_index >= len(environments_raw):
+        return False
+    current_env = Environment(**environments_raw[illustration.scene_index])
+
+    entities_raw = json.loads(run_obj.narrative_entities_json or "[]")
+    current_entity: dict | None = None
+    if illustration.contains_entity_label:
+        norm = _normalize_entity_label(illustration.contains_entity_label)
+        for e in entities_raw:
+            if _normalize_entity_label(e["label"]) == norm:
+                current_entity = e
+                break
+
+    # Prev / next paragraphs around this illustration's paragraph block.
+    paragraph_index = illustration.paragraph_index
+    prev_paragraph_text = ""
+    next_paragraph_text = ""
+    for idx in range(paragraph_index - 1, -1, -1):
+        if blocks[idx]["type"] == "paragraph":
+            prev_paragraph_text = blocks[idx]["text"]
+            break
+    for idx in range(paragraph_index + 1, len(blocks)):
+        if blocks[idx]["type"] == "paragraph":
+            next_paragraph_text = blocks[idx]["text"]
+            break
+    current_paragraph_text = (
+        blocks[paragraph_index]["text"] if 0 <= paragraph_index < len(blocks) else ""
+    )
+
+    # Build candidate list (newest-first — history already returns desc).
+    candidates: list[SalvageCandidate] = []
+    for idx, row in enumerate(surviving):
+        try:
+            verdict_data = json.loads(row.verdict_json)
+        except json.JSONDecodeError:
+            verdict_data = {"reasoning": "", "suggestion": ""}
+        candidates.append(
+            SalvageCandidate(
+                candidate_index=idx,
+                concept_attempt=row.concept_attempt,
+                prompt_attempt=row.prompt_attempt,
+                concept_used=row.concept_used,
+                paragraph_text=row.paragraph_text,
+                scene_excerpt=row.scene_excerpt,
+                environment=Environment(
+                    label=row.environment_label,
+                    kind=row.environment_kind,
+                    aspect=row.environment_aspect,
+                ),
+                contains_entity_label=row.contains_entity_label,
+                character_role=row.character_role,
+                verdict_reasoning=verdict_data.get("reasoning", ""),
+                verdict_suggestion=verdict_data.get("suggestion", ""),
+            )
+        )
+
+    await transition(IllustrationState.SALVAGE_REVIEW)
+
+    try:
+        salvage = await claude.salvage_review(
+            source_language=source_language,
+            candidates=candidates,
+            current_paragraph_text=current_paragraph_text,
+            previous_paragraph_text=prev_paragraph_text,
+            next_paragraph_text=next_paragraph_text,
+            current_environment=current_env,
+            current_entity=current_entity,
+        )
+    except Exception as e:
+        # Schema retries exhausted or other error — treat as reject_all
+        # so the frontend can leave the diagnostics state, then fall
+        # through to the manual flow.
+        logger.warning("salvage_review failed (treating as reject_all): %s", e)
+        await event_bus.publish(
+            "illustration_salvage_resolved",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "outcome": "rejected_all",
+                "reasoning": f"salvage agent failed: {e}",
+            },
+        )
+        return False
+
+    if salvage.decision == "reject_all":
+        await event_bus.publish(
+            "illustration_salvage_resolved",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "outcome": "rejected_all",
+                "reasoning": salvage.reasoning,
+            },
+        )
+        return False
+
+    # decision == "accept" — apply the candidate.
+    if not 0 <= salvage.candidate_index < len(candidates):
+        logger.warning(
+            "salvage_review returned out-of-range candidate_index=%d (have %d); rejecting",
+            salvage.candidate_index,
+            len(candidates),
+        )
+        await event_bus.publish(
+            "illustration_salvage_resolved",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "outcome": "rejected_all",
+                "reasoning": "candidate_index out of range",
+            },
+        )
+        return False
+
+    chosen = candidates[salvage.candidate_index]
+    chosen_row = surviving[salvage.candidate_index]
+
+    # If an override paragraph is supplied, validate the scene_excerpt
+    # substring rule before mutating anything. On failure, fall through
+    # to manual exactly like reject_all.
+    new_paragraph_text: str | None = None
+    if salvage.paragraph_text_override is not None:
+        if _normalize_whitespace(chosen.scene_excerpt) not in _normalize_whitespace(
+            salvage.paragraph_text_override
+        ):
+            logger.warning(
+                "salvage_review paragraph_text_override missing scene_excerpt verbatim; rejecting",
+            )
+            await event_bus.publish(
+                "illustration_salvage_resolved",
+                {
+                    "illustration_id": illustration.id,
+                    "scene_index": illustration.scene_index,
+                    "outcome": "rejected_all",
+                    "reasoning": "override missing scene_excerpt",
+                },
+            )
+            return False
+        new_paragraph_text = salvage.paragraph_text_override
+    else:
+        # Use the candidate's historical paragraph as-is.
+        new_paragraph_text = chosen.paragraph_text
+
+    # Copy the historical attempt image to the canonical scene slot.
+    canonical_relative = f"runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
+    await copy_image(chosen_row.image_path, output_dir, canonical_relative)
+
+    # Persist paragraph rewrite if it differs from the current text.
+    if new_paragraph_text != current_paragraph_text and 0 <= paragraph_index < len(blocks):
+        async with lock:
+            blocks[paragraph_index] = {"type": "paragraph", "text": new_paragraph_text}
+            run_obj_locked = await repo.get_run(illustration.run_id)
+            if run_obj_locked is not None:
+                await repo.update_run(
+                    run_obj_locked,
+                    story_blocks_json=json.dumps(blocks, ensure_ascii=False),
+                )
+        await event_bus.publish(
+            "paragraph_updated",
+            {"paragraph_index": paragraph_index, "text": new_paragraph_text},
+        )
+
+    # Promote the canonical image_path + mark COMPLETED.
+    await repo.update_illustration(
+        illustration,
+        state=IllustrationState.COMPLETED,
+        image_path=canonical_relative,
+    )
+
+    payload: dict = {
+        "illustration_id": illustration.id,
+        "scene_index": illustration.scene_index,
+        "outcome": "accepted",
+        "candidate_index": salvage.candidate_index,
+        "reasoning": salvage.reasoning,
+    }
+    if salvage.paragraph_text_override is not None:
+        payload["paragraph_text_override"] = salvage.paragraph_text_override
+    await event_bus.publish("illustration_salvage_resolved", payload)
+
+    image_url = f"/static/runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
+    await event_bus.publish(
+        "illustration_completed",
+        {
+            "illustration_id": illustration.id,
+            "scene_index": illustration.scene_index,
+            "image_url": image_url,
+        },
+    )
+    return True

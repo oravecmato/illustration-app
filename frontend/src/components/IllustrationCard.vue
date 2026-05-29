@@ -24,6 +24,7 @@
       <ConceptPopover
         v-if="illustration.current_concept"
         :concept="illustration.current_concept"
+        :salvage="illustration.salvage"
       />
     </div>
 

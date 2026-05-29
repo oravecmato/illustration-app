@@ -295,6 +295,26 @@ export const useRunStore = defineStore("run", () => {
         // explicit event lets the UI close the chat panel cleanly.
         break;
       }
+      case "illustration_salvage_resolved": {
+        // § 7.1: Agent 8 either accepted a prior attempt (write a
+        // diagnostics surface onto the existing illustration object so
+        // the popover can render the salvage note) or rejected all
+        // candidates (no-op here — the subsequent
+        // `illustration_manual_started` opens the manual flow).
+        if (event.data.outcome !== "accepted") break;
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          // Assign in place — reference survival lets the
+          // IllustrationCard / ConceptPopover re-render without
+          // remounting (§ 9.1A, § 11 popover-test contract).
+          ill.salvage = {
+            candidate_index: event.data.candidate_index ?? 0,
+            reasoning: event.data.reasoning,
+            paragraph_text_override: event.data.paragraph_text_override,
+          };
+        }
+        break;
+      }
       case "translations_refreshed": {
         // Agent 5 completed translations for a target language.
         // Write to cache and update live view if language matches current.

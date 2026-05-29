@@ -280,9 +280,12 @@ during development.
 
 ## 5. Data Model
 
-Seven tables (`sessions`, `session_messages`, `runs`, `illustrations`,
-`story_translations`, `story_block_translations`,
-`illustration_concept_translations`), managed by **Alembic** migrations.
+Eight tables (`sessions`, `session_messages`, `runs`, `illustrations`,
+`illustration_attempt_history`, `story_translations`,
+`story_block_translations`, `illustration_concept_translations`),
+plus the two manual-flow tables introduced in § 6A.6
+(`manual_illustration_sessions`, `manual_messages`), all managed by
+**Alembic** migrations.
 See § 5.0 for the migration workflow; the schema definitions below are
 the source of truth and the initial baseline migration must match them
 exactly. The three `*_translations` tables are described in § 5.5.
@@ -465,6 +468,62 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
 
+### `illustration_attempt_history`
+
+Per-attempt snapshot captured **after every auto-pipeline Agent 2
+verdict** in § 6. One row per `(illustration_id, concept_attempt,
+prompt_attempt)`. The snapshot is what the post-exhaustion **salvage
+agent** (§ 7.1 Call 8) reasons over — it does NOT see the image, only
+the attempt's metadata, prompts, verdict, and the paragraph /
+environment / entity that were in force at render time. The image
+bytes themselves live alongside the canonical `image_path` under
+`OUTPUT_DIR` so a salvageable attempt can be promoted in place
+without re-rendering.
+
+| Column                   | Type         | Notes                                                                     |
+|--------------------------|--------------|---------------------------------------------------------------------------|
+| `id`                     | TEXT (UUID4) | Primary key                                                               |
+| `illustration_id`        | TEXT FK      | → `illustrations.id`, indexed                                             |
+| `concept_attempt`        | INTEGER      | 1..(MAX_CONCEPT_ATTEMPTS+1) — matches the outer-loop counter at render time |
+| `prompt_attempt`         | INTEGER      | 1..MAX_PROMPT_ATTEMPTS_PER_CONCEPT — matches the inner-loop counter        |
+| `image_path`             | TEXT         | Relative path of THIS attempt's image under `OUTPUT_DIR`. Distinct from `illustrations.image_path` because the canonical one is only set on success; history rows preserve every attempt's image so salvage can promote it. Naming convention: `runs/<run_id>/history/<illustration_id>_<concept_attempt>_<prompt_attempt>.png`. |
+| `concept_used`           | TEXT         | Verbatim `illustrations.current_concept` at render time (English)         |
+| `concept_localized`      | TEXT NULL    | Localised mirror of `concept_used` resolved against `illustration_concept_translations` at write time (best-effort; null when no translation existed) |
+| `paragraph_text`         | TEXT         | Verbatim `runs.story_blocks_json[paragraph_index].text` at render time. Captured so the salvage agent can judge whether the historical paragraph still flows with the current prev/next. |
+| `scene_excerpt`          | TEXT         | Verbatim `illustrations.scene_excerpt` at render time — the substring of `paragraph_text` that anchors this illustration. Captured because Agent 4 may have rewritten the excerpt between render time and salvage time, and the salvage agent's `paragraph_text_override` must contain the candidate's historical excerpt verbatim. |
+| `paragraph_index`        | INTEGER      | The illustration's `paragraph_index` at render time (immutable per illustration, captured for join-free reads) |
+| `environment_label`      | TEXT         | Slot's locked environment label at render time                            |
+| `environment_kind`       | TEXT         | `indoor` / `outdoor` / `dual`                                             |
+| `environment_aspect`     | TEXT         | `single` / `inside` / `outside`                                           |
+| `contains_entity_label`  | TEXT NULL    | The slot's `contains_entity_label` at render time                         |
+| `character_role`         | TEXT NULL    | The slot's `character_role` at render time                                |
+| `current_workflow`       | TEXT         | The workflow used for this render (`single-lora.json` / `no-lora.json`)   |
+| `positive_prompt`        | TEXT         | The positive prompt sent to ComfyUI for this attempt                      |
+| `negative_prompt`        | TEXT         | The negative prompt sent to ComfyUI for this attempt                      |
+| `verdict_json`           | TEXT         | Verbatim `EvaluateImageResponse.model_dump_json()` (includes `ok`, `problem`, `reasoning`, `suggestion`, `nuance_only_failure`) |
+| `nuance_only_failure`    | BOOLEAN      | Denormalised mirror of `verdict_json.nuance_only_failure` — indexed for the cheap pre-filter query "any salvageable attempt for this illustration?" |
+| `created_at`             | DATETIME     |                                                                           |
+
+Indexes:
+
+- Primary key on `id`.
+- Index on `illustration_id` (the dominant access pattern: load all
+  history rows for one branch at salvage time).
+- Partial-style composite index on `(illustration_id,
+  nuance_only_failure)` so the pre-filter "does this illustration
+  have any nuance-only-failed attempts?" runs without scanning every
+  row.
+
+Rows are written by the orchestrator immediately after `evaluate_image`
+returns and the verdict has been persisted on `illustrations.last_
+verdict_json`. They are **never** rewritten — once a snapshot is
+captured it is immutable. They are **never** deleted by the
+application; truncation is a manual op-task if disk pressure ever
+matters. Successful attempts also produce a row (with `verdict_json.
+ok=true` and `nuance_only_failure=false`) so the history table is a
+faithful audit trail of every render the auto pipeline produced for
+the slot, not only failures.
+
 ### 5.5 Translation tables
 
 Localised copies of every piece of AI-generated text live in dedicated
@@ -612,7 +671,8 @@ needed to render run X in language L".
 | `REVISING_PROMPTS`     | "Upravujem prompty"          | Claude revises prompts after a bad image       |
 | `RETHINKING_CONCEPT`   | "Premýšľam koncept"          | Agent 4 proposes a new concept for the scene **inside the same locked environment** |
 | `RETHINKING_ENVIRONMENT` | "Prepracovanie prostredia" | Agent 4b is swapping the slot's locked environment (one-shot per branch; extends concept budget by +1). Only fires when the evaluator's verdict is `problem="environment"`. |
-| `COMPLETED`            | "Hotovo"                     | Image accepted (auto pipeline OR manual flow — § 6A) |
+| `SALVAGE_REVIEW`       | "Záchrana pokusu"            | All auto attempts exhausted; the salvage agent (§ 7.1 Call 8) is reviewing prior nuance-only-failed attempts to see if any historical render is acceptable as-is or with a light paragraph tweak. One-shot per branch; either promotes a historical attempt to `COMPLETED` or hands off to the § 6A manual chat fallback. |
+| `COMPLETED`            | "Hotovo"                     | Image accepted (auto pipeline OR manual flow OR salvage promotion — § 6A, § 7.1 Call 8) |
 | `MANUAL_CHATTING`      | "Spoločná tvorba"            | Auto pipeline exhausted; user is chatting with Agent 6 to design a feasible concept manually (§ 6A) |
 | `MANUAL_GENERATING_PROMPTS` | "Pripravujem prompty (manuál)" | Agent 1 is translating the agreed manual concept into Danbooru prompts (§ 6A) |
 | `MANUAL_RENDERING`     | "Kreslím (manuál, pokus K/5)" | ComfyUI job in flight for a manual attempt (§ 6A)   |
@@ -723,8 +783,56 @@ while concept_attempt <= MAX_CONCEPT_ATTEMPTS (3) + (1 if env_rethink_used else 
         state = REVISING_PROMPTS
         prompts = claude.revise_prompts(prompts, verdict, ...)
     concept_attempt += 1
-state = FAILED  # auto pipeline exhausted; § 6A manual fallback takes over
-return failure
+
+# Auto loop exhausted. BEFORE handing off to the § 6A manual flow, try
+# to salvage a historical attempt that the evaluator rejected only on
+# expression nuance.
+#
+# Backend pre-filter (cheap, no Claude call):
+#   1. Load every illustration_attempt_history row for this slot.
+#   2. Keep only rows where verdict.nuance_only_failure == True.
+#   3. For each candidate, check that the captured environment
+#      label/kind/aspect STILL equals runs.environments_json[scene_index]
+#      (Agent 4b may have rewritten the env after the candidate was
+#      rendered — in that case the candidate is unreachable).
+#   4. For each candidate, check that the entity state at render time
+#      is still achievable now — i.e. contains_entity_label is either
+#      unchanged or, if changed, can be rolled back without violating
+#      the entity-register quotas (entity not since claimed by another
+#      slot, etc.).
+# If the filtered candidate list is empty the salvage call is skipped
+# entirely and the branch transitions straight to MANUAL_CHATTING.
+candidates = pre_filter_history(illustration_id, scene_index)
+if candidates:
+    state = SALVAGE_REVIEW
+    salvage = claude.salvage_review(  # § 7.1 Call 8
+        candidates=<newest-first list of attempt summaries>,
+        current_paragraph_text=<runs.story_blocks_json[paragraph_index].text>,
+        previous_paragraph_text=<text of paragraph block immediately before paragraph_index>,
+        next_paragraph_text=<text of paragraph block immediately after paragraph_index>,
+        current_environment=<runs.environments_json[scene_index]>,
+        current_entity=<NarrativeEntity reserved for or attached to this slot, or null>,
+        source_language=runs.source_language,
+    )
+    if salvage.decision == "accept":
+        # The agent picked one candidate. Apply it: copy the
+        # captured image_path to the canonical scene_<n>.png slot,
+        # restore paragraph_text / contains_entity_label / character_role
+        # to the candidate's snapshot when needed, optionally apply
+        # salvage.paragraph_text_override (a light edit the agent
+        # proposes to make the historical paragraph flow with the
+        # current prev/next). Emit illustration_salvage_resolved
+        # (outcome="accepted") then transition to COMPLETED via the
+        # normal illustration_completed event.
+        apply_salvage(salvage)
+        state = COMPLETED
+        return success
+    # decision == "reject_all" — no candidate worked. Fall through to
+    # the manual flow exactly as if no candidates existed.
+    emit illustration_salvage_resolved(outcome="rejected_all")
+
+state = MANUAL_CHATTING  # § 6A manual fallback takes over
+return failure  # (in the sense that the auto loop did not succeed)
 ```
 
 Each state transition writes to DB and emits one SSE event. The new
@@ -2300,7 +2408,8 @@ aspect).
   "ok": true,
   "problem": null,
   "reasoning": "string",
-  "suggestion": ""
+  "suggestion": "",
+  "nuance_only_failure": false
 }
 ```
 or
@@ -2309,9 +2418,20 @@ or
   "ok": false,
   "problem": "prompt" | "concept" | "environment",
   "reasoning": "string",
-  "suggestion": "string (hint to be passed into the next call)"
+  "suggestion": "string (hint to be passed into the next call)",
+  "nuance_only_failure": true | false
 }
 ```
+
+`nuance_only_failure` MUST be `false` whenever `ok` is `true`. When
+`ok` is `false`, it MAY be `true` *only* when the rendered scene fails
+the checklist solely on item #3 expression/gesture nuance drift inside
+the same emotional neighbourhood as the concept, AND every other
+checklist axis (1a cast, 1b entity, 1c environment, 2 character
+recognition, 4 style, 5 anatomy, 6 safety, 7 composition) passes. The
+flag never alters Agent 2's per-attempt routing; it only marks
+attempts the salvage agent (§ 7.1 Call 8) may revisit after the auto
+loop exhausts. See § 7.3.5.
 
 **Routing semantics for `problem`:**
 
@@ -3074,6 +3194,143 @@ Hard rules enforced by the prompt:
    call; no Markdown fences, no prefatory text, no trailing
    commentary (same rule as Agents 0b–5).
 
+#### Call 8 — `salvage_review` (Agent 8, "the salvage reviewer")
+
+**Purpose:** After the auto pipeline has exhausted both
+`MAX_CONCEPT_ATTEMPTS` (3) and `MAX_PROMPT_ATTEMPTS_PER_CONCEPT` (3)
+for an illustration without a successful render, AND the backend
+pre-filter has identified at least one historical attempt the
+evaluator rejected only on expression / pose nuance (Agent 2's
+`nuance_only_failure=true` annotation; § 7.3.5), Agent 8 reviews the
+candidate attempts in newest-first order and decides whether any one
+of them is in fact acceptable today — either as-is, or after a light
+edit to the historical paragraph so it still flows with the
+**current** prev/next paragraphs (which may have been rewritten in
+the meantime by Agent 4 or Agent 4b in another scene's branch).
+
+Agent 8 is dispatched at most ONCE per illustration, immediately
+before the orchestrator would otherwise transition the branch to
+`MANUAL_CHATTING`. If Agent 8 accepts a candidate, that candidate's
+historical image is promoted to the canonical `image_path` and the
+branch goes to `COMPLETED`. If Agent 8 rejects all candidates, the
+branch proceeds to `MANUAL_CHATTING` as if Agent 8 had not been
+invoked.
+
+**Agent 8 does NOT see images.** It reasons over verdict metadata
+only. The image content was already judged by Agent 2 at render
+time; what Agent 8 evaluates is (a) whether the prior nuance-only
+verdict is still appropriate in the current story state (the
+paragraph may have changed, the environment may have changed, the
+entity may have changed), and (b) whether the historical paragraph
+remains coherent inside the current prev/next narrative. This split
+of responsibilities — Agent 2 owns visual judgement, Agent 8 owns
+narrative coherence — keeps the salvage decision cheap and avoids
+re-litigating the visual axes Agent 2 already deemed acceptable
+modulo nuance.
+
+**Input (to Claude):**
+
+- `source_language` — `runs.source_language` (drives the language of
+  any `paragraph_text_override` Agent 8 may emit).
+- `candidates` — a newest-first array of attempt summaries that
+  survived the backend pre-filter. Each entry has:
+  - `candidate_index` — stable 0-based position in this array (used
+    in the response).
+  - `concept_attempt`, `prompt_attempt` — the original attempt
+    counters, for the agent's situational awareness.
+  - `concept_used` — verbatim English concept that produced this
+    attempt.
+  - `paragraph_text` — the paragraph text in force at render time
+    (in `source_language`).
+  - `environment` — the `{label, kind, aspect}` triple in force at
+    render time. Pre-filter already guarantees this matches the
+    current slot environment; included for the agent's transparency.
+  - `contains_entity_label` — entity label in force at render time
+    (or `null`). Pre-filter already guarantees the entity state is
+    still achievable; included for transparency.
+  - `character_role` — cast role at render time.
+  - `verdict_reasoning`, `verdict_suggestion` — Agent 2's
+    explanation, captured verbatim. The agent uses this to
+    understand what exact nuance drift Agent 2 flagged.
+- `current_paragraph_text` — the **current** text of the paragraph at
+  `illustrations.paragraph_index`, possibly mutated since the
+  candidate rendered.
+- `previous_paragraph_text` — the **current** text of the paragraph
+  block immediately before `paragraph_index` in document order
+  (empty string when the illustration is the very first paragraph).
+- `next_paragraph_text` — the **current** text of the paragraph
+  block immediately after `paragraph_index` (empty string when the
+  illustration is the very last paragraph).
+- `current_environment` — the slot's current `{label, kind,
+  aspect}`. Always matches every candidate's `environment` (pre-
+  filter guarantee).
+- `current_entity` — the `NarrativeEntity` currently attached to or
+  reserved for the slot, or `null`.
+
+**Output schema:**
+```json
+{
+  "decision": "accept" | "reject_all",
+  "candidate_index": 0,
+  "paragraph_text_override": "string in source_language" | null,
+  "reasoning": "string (1–3 English sentences explaining the decision)"
+}
+```
+
+Field semantics:
+
+- `decision="accept"` — `candidate_index` MUST identify a candidate in
+  the input `candidates` array. The agent has decided that
+  candidate's image is acceptable as the canonical illustration.
+- `decision="reject_all"` — `candidate_index` MUST be `0` (a
+  placeholder; ignored by the server) and `paragraph_text_override`
+  MUST be `null`. No candidate worked.
+- `paragraph_text_override` — meaningful only with
+  `decision="accept"`. When non-null, the server replaces the
+  current paragraph at `illustrations.paragraph_index` with the
+  override before transitioning the branch to `COMPLETED`. Use this
+  ONLY when the candidate's `paragraph_text` no longer flows with
+  the current prev/next and a light edit fixes it. When the
+  candidate's historical paragraph still flows as-is (the common
+  case — most rewrites happen in other branches and don't touch
+  this paragraph) leave `paragraph_text_override` as `null`. The
+  override MUST stay faithful to the candidate's concept and to the
+  story's overall narrative — it is a continuity patch, not a
+  rewrite. Any `paragraph_text_override` text MUST contain the
+  candidate's `scene_excerpt` verbatim as a substring (server
+  re-checks; failure → reject the salvage and fall back to manual).
+
+Hard rules enforced by the prompt and re-checked server-side:
+
+1. **No image, no visual second-guessing.** Agent 8 never speculates
+   about visual content beyond what Agent 2's `verdict_reasoning`
+   describes. Accepting a candidate means "I trust Agent 2's
+   nuance-only verdict; the small drift is acceptable given the
+   remaining options".
+2. **Newest-first preference.** When multiple candidates are equally
+   acceptable, prefer the most recent one (lowest `candidate_index`)
+   — it was rendered against the most up-to-date story state and is
+   most likely to still fit.
+3. **Narrative coherence is the salvage axis.** A candidate's
+   `paragraph_text` may have been written for a slightly different
+   neighbouring context. If it no longer fits with
+   `previous_paragraph_text` / `next_paragraph_text`, either propose
+   a minimal `paragraph_text_override` or reject the candidate. Do
+   NOT accept a candidate whose paragraph contradicts the current
+   neighbours and leave `paragraph_text_override=null`.
+4. **No new environment, no new entity.** Agent 8 cannot move the
+   slot to a different environment or swap the entity. If the
+   current scene state has drifted that far from every candidate,
+   the right answer is `reject_all` (the manual flow can handle it).
+5. **No safety bypass.** If a candidate's `verdict_reasoning`
+   reveals a safety concern that Agent 2 missed, reject it. (In
+   practice Agent 2 emits `nuance_only_failure=true` only when every
+   other axis — including safety — passed, so this is a defensive
+   rule.)
+6. **Single output.** Agent 8 returns exactly one JSON object per
+   call; no Markdown fences, no prefatory text, no trailing
+   commentary (same rule as Agents 0b–5, 7).
+
 ### 7.2 RunPod ComfyUI Serverless
 
 The app ships **two** workflow files in `app/workflows/`, both in
@@ -3341,20 +3598,6 @@ checklist. The image is `ok` only when **all** of the following hold:
 3. **The character's expression, gesture, or action is clearly
    identifiable and matches the concept.** Vague or generic poses →
    `problem="prompt"` with a suggestion to add specifics.
-
-   **Minor-mismatch tolerance.** When the rendered expression is in
-   the same emotional neighbourhood as the concept (e.g., "serene"
-   rendered as a faint smile, "concerned" as "pensive", "calm" as
-   "neutral") AND every other checklist item passes (cast, entity,
-   environment, anatomy, style, safety, composition), accept the
-   image (`ok: true`). Failing the image for nuance-level expression
-   drift while all other axes pass burns retry budget on a difference
-   the next render is unlikely to resolve cleanly. Only reject when
-   the rendered expression *contradicts* the concept's emotional beat
-   (e.g., laughing when the concept says crying; smug when the
-   concept says grieving), or when the gesture/action itself is
-   wrong (e.g., the bow is missing, the hands are in the wrong
-   place).
 4. **The illustration is style-consistent** with `style_guide` — anime/MHA
    look, no realism, no off-style rendering.
 5. **No anatomical deformities** — extra fingers, fused limbs, distorted
@@ -3371,6 +3614,28 @@ concept, or repeated failure of the same kind across attempts.
 
 `problem="prompt"` is the default for fixable issues: missing or wrong
 expression, missing action, wrong environment, mild anatomy issues.
+
+**`nuance_only_failure` flag (auto pipeline salvage signal).** In
+addition to `ok`/`problem`/`reasoning`/`suggestion`, every Agent 2
+verdict carries a boolean `nuance_only_failure`. The evaluator stays
+strict — when an image is rejected the rejection stands and the
+pipeline proceeds normally with `problem` routing. The flag is a
+*post-hoc* annotation Agent 2 attaches when it rejected the image
+**solely** because the rendered expression / minor pose detail
+drifted into the same emotional neighbourhood as the concept (e.g.
+"serene" rendered as a faint smile, "concerned" as "pensive",
+"calm" as "neutral") AND every other checklist item passed (cast
+shape, entity alignment, environment, anatomy, style, safety,
+composition). When `ok=true` the field MUST be `false`. When `ok=
+false` it MAY be `true` only when the nuance-drift condition above
+is the *whole* reason for rejection — any cast/entity/environment/
+anatomy/style/safety/composition violation forces `false`.
+
+The flag does not change Agent 2's per-attempt routing in any way.
+Its sole purpose is to flag attempts that the **post-exhaustion
+salvage agent** (§ 7.1 Call 8) may later revisit when the auto
+pipeline runs out of retries. See § 6 (state machine, `SALVAGE_
+REVIEW`) and § 7.1 Call 8 for the salvage flow.
 
 #### 7.3.6 Negative prompt baseline
 
@@ -3654,7 +3919,7 @@ register.
 ### 7.4 Agent prompt files
 
 Each Claude agent's system prompt lives in its own Markdown file under
-`backend/app/agents/`. There are nine files, one per call in § 7.1:
+`backend/app/agents/`. There is one file per call in § 7.1:
 
 | File                        | Agent | Call name                |
 |-----------------------------|-------|--------------------------|
@@ -3664,9 +3929,11 @@ Each Claude agent's system prompt lives in its own Markdown file under
 | `evaluate_image.md`         | 2     | `evaluate_image`         |
 | `revise_prompts.md`         | 3     | `revise_prompts`         |
 | `rethink_concept.md`        | 4     | `rethink_concept`        |
+| `rethink_environment.md`    | 4b    | `rethink_environment`    |
 | `translate.md`              | 5     | `translate`              |
 | `manual_concept.md`         | 6     | `manual_concept`         |
 | `manual_revise_prompts.md`  | 7     | `manual_revise_prompts`  |
+| `salvage.md`                | 8     | `salvage_review`         |
 
 Loading rules:
 
@@ -4132,6 +4399,7 @@ SSE event types (`event:` field) and JSON payloads:
 | `illustration_role_updated` | `{ "illustration_id", "scene_index", "character_role": "male\|female\|mother\|null" }` — emitted only when Agent 4 swaps a scene's cast shape |
 | `translations_refreshed`    | `{ "language", "items": [ { "kind": "story_title\|story_topic_description\|paragraph\|illustration_concept", "paragraph_index"?: N, "scene_index"?: N, "text": "string" } ] }` — emitted to every subscriber after § 8.9 completes, so multi-tab views in the same language stay in sync |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
+| `illustration_salvage_resolved` | `{ "illustration_id", "scene_index", "outcome": "accepted\|rejected_all", "candidate_index"?: N, "paragraph_text_override"?: "string", "reasoning": "string" }` — emitted exactly once when the salvage agent (§ 7.1 Call 8) finishes reviewing. On `outcome="accepted"` the canonical illustration is updated in place (image promoted, paragraph optionally patched, entity/role rolled back to the candidate's snapshot) and `illustration_completed` follows immediately. On `outcome="rejected_all"` the branch proceeds to the § 6A manual flow exactly as if no salvage call had been made; `illustration_manual_started` follows. The frontend's default behaviour is to surface salvage-accepted images identically to normal auto-pipeline successes; the salvage origin (candidate_index, reasoning, paragraph override flag) is exposed only inside the diagnostics popover (§ 9.5). |
 | `illustration_failed`       | `{ "illustration_id", "scene_index", "error_message" }`                 |
 | `illustration_manual_started` | `{ "illustration_id", "scene_index", "welcome_message": { "role": "assistant", "content": "string (the localized welcome text in source_language, with `#…#` bold markers preserved)", "id": "string", "created_at": "ISO-8601" } }` — emitted once when an illustration transitions into `MANUAL_CHATTING` for the first time (§ 6A.3). |
 | `manual_message_appended`   | `{ "illustration_id", "scene_index", "message": { "id", "role": "user\|assistant", "content", "created_at" }, "phase": "gathering\|awaiting_concept_confirmation\|concept_confirmed\|gathering_feedback\|awaiting_feedback_confirmation\|feedback_confirmed\|restart_concept\|accepted\|null", "sub_phase": "concept_design\|feedback_gathering" }` — emitted whenever a new chat row is persisted in `manual_messages` (§ 6A.6). One event per row; user echoes are emitted just like assistant turns so other tabs stay in sync. `phase` carries Agent 6's reply phase when the row is assistant-authored (and is `null` for user echoes and for the static framing bubbles inserted by the backend like the welcome / render-failed / review-prompt bubbles). `sub_phase` is the post-event session sub-phase, included on every event so frontends can update affordances in lockstep with the message. |
@@ -4839,6 +5107,20 @@ re-renders in place. The popover component is provided by
 `<button type="button">` with an `aria-label` (e.g. "Zobraziť koncept"),
 the popover is keyboard-dismissible (Esc), and it is also openable on
 keyboard focus, not only on hover.
+
+**Salvage diagnostics (silent-fix surface).** When the displayed image
+was promoted by the salvage agent (§ 7.1 Call 8), the card body
+itself stays visually identical to a normal auto-pipeline success —
+the user sees an accepted image, no banner, no badge. The popover is
+the only place the salvage origin surfaces: a small extra line at the
+bottom, `i18n.t('illustration.salvaged')` (Slovak: "Obrázok bol
+zachránený zo skoršieho pokusu."; Czech: "Obrázek byl zachráněn z
+dřívějšího pokusu."; English: "Image salvaged from an earlier
+attempt."), and, when `paragraph_text_override` was applied, a
+follow-up line `i18n.t('illustration.salvagedParagraphPatched')`
+("Odsek bol jemne upravený pre plynulosť."). The flag is sourced
+from the same `illustration.last_verdict_json` / new `salvage_origin`
+shape (see § 9.2.2 amendment); it is purely diagnostic.
 
 **Each `IllustrationCard` shows (revised list):**
 
@@ -5788,6 +6070,26 @@ to chase 100 % line coverage.
     slot's locked label after the proposed swap (disjointness rule).
   - Rejects responses whose `entity_action` is inconsistent with
     `contains_entity_label` (same rule as Call 4).
+- **Claude IO schema — Call 8 (`salvage_review`):**
+  - Accepts a valid accept response
+    `{ decision: "accept", candidate_index: <int>, paragraph_text_override: null, reasoning: "..." }`.
+  - Accepts a valid accept response whose `paragraph_text_override`
+    is a non-empty string in the run's `source_language`.
+  - Accepts a valid reject response
+    `{ decision: "reject_all", candidate_index: null, paragraph_text_override: null, reasoning: "..." }`.
+  - Rejects responses missing any required field, with an unknown
+    `decision` value, or with `decision="accept"` and a missing /
+    out-of-range `candidate_index`.
+  - Server-side validator rejects `decision="reject_all"` responses
+    whose `candidate_index` or `paragraph_text_override` is non-null
+    (those fields are reserved for the accept branch).
+  - Server-side validator rejects `decision="accept"` responses whose
+    `candidate_index` does not point at one of the candidates the
+    pre-filter handed to the agent.
+  - When `paragraph_text_override` is non-null, the same
+    excerpt-substring rule as Agent 0b / Agent 4 applies: the
+    candidate's `scene_excerpt` (whitespace-tolerant) must appear in
+    the override text; otherwise the response is rejected.
 - **Narrative-entity schema rules (across Calls 0a / 0b / 4 / 4b):**
   - Call 0a's `collected_brief.non_human_entities` accepts an empty
     array and arrays of `{label, role_in_story}` entries; rejects
@@ -5898,6 +6200,89 @@ to chase 100 % line coverage.
     `dual` environment whose label collides with another slot's locked
     label in an incompatible way, the response is rejected and
     re-prompted up to `CLAUDE_JSON_RETRY` times.
+  - **Attempt history persistence (new):** every Agent 2 verdict in
+    the auto pipeline appends one `illustration_attempt_history` row
+    capturing `image_path`, `concept_used`, `paragraph_text`,
+    `paragraph_index`, `environment_label`, `environment_kind`,
+    `environment_aspect`, `contains_entity_label`, `character_role`,
+    `current_workflow`, `positive_prompt`, `negative_prompt`,
+    `verdict_json`, and the denormalised `nuance_only_failure`
+    boolean. The row is inserted regardless of `ok=true`/`false`,
+    keyed by the live `(concept_attempt, prompt_attempt)` counters
+    at render time. A multi-attempt branch produces one row per
+    attempt in ascending `(concept_attempt, prompt_attempt,
+    created_at)` order.
+  - **Salvage pre-filter (new):** with attempt history seeded for
+    one branch (mix of `ok=false, nuance_only_failure=true`,
+    `ok=false, nuance_only_failure=false`, and rows whose
+    `environment_label` no longer matches the current
+    `illustrations.environment_label` or whose
+    `contains_entity_label` no longer matches the live entity
+    register state), the pre-filter retains only rows that
+    simultaneously satisfy:
+      - `nuance_only_failure = true`,
+      - `environment_label`/`environment_aspect` match the live
+        `illustrations` row,
+      - `contains_entity_label` matches the live row (treating two
+        `null`s as equal),
+      - `character_role` matches the live row.
+    The remaining rows are passed to Agent 8 newest-first
+    (descending `(concept_attempt, prompt_attempt, created_at)`).
+    Empty pre-filter result skips Agent 8 entirely and falls
+    straight through to `MANUAL_CHATTING`.
+  - **Salvage accept path (new):** mock the auto pipeline to
+    exhaust prompt + concept budget (without 4b being used) on a
+    branch whose history contains at least one nuance-only
+    candidate. Mock Agent 8 to return
+    `{ decision: "accept", candidate_index: 0, paragraph_text_override: null, ... }`.
+    Assert:
+      - The historical `image_path` is copied to the canonical
+        `illustrations.image_path` location for the illustration
+        (file present on disk).
+      - The illustration transitions `SALVAGE_REVIEW → COMPLETED`.
+      - The entity register state and `character_role` are
+        rolled back to the values captured on the accepted
+        history row (when they differ from the live state).
+      - SSE emits `illustration_state{state="SALVAGE_REVIEW"}`,
+        then `illustration_salvage_resolved{outcome="accepted", candidate_index: K, reasoning: "..."}`,
+        then `illustration_completed`. § 6A manual flow is NOT
+        opened (no `illustration_manual_started` event).
+      - `runs.completed_count` increments by 1.
+  - **Salvage accept path with paragraph override:** as above but
+    Agent 8 returns a non-null `paragraph_text_override`. Assert:
+      - The substring validator passes (excerpt verbatim in the
+        override text) and the run's `story_blocks_json` paragraph
+        at the branch's `paragraph_index` is rewritten to the new
+        text.
+      - SSE emits `paragraph_updated{paragraph_index, text}`
+        before `illustration_salvage_resolved`.
+      - `illustration_salvage_resolved` payload carries the new
+        text in `paragraph_text_override`.
+  - **Salvage reject path (new):** as in the accept test but
+    Agent 8 returns `{ decision: "reject_all", ... }`. Assert:
+      - The illustration transitions
+        `SALVAGE_REVIEW → MANUAL_CHATTING` and the existing § 6A
+        flow opens.
+      - SSE emits `illustration_state{state="SALVAGE_REVIEW"}`,
+        then `illustration_salvage_resolved{outcome="rejected_all"}`,
+        then `illustration_state{state="MANUAL_CHATTING"}` plus
+        `illustration_manual_started`.
+      - No file copy occurs and no `paragraph_updated` is emitted.
+  - **Salvage skip when pre-filter empty:** drive the branch to
+    auto-exhaustion with all history rows failing the pre-filter
+    (e.g. none had `nuance_only_failure=true`). Agent 8 is NOT
+    invoked (assert via respx that no salvage HTTP call was made).
+    Branch transitions straight to `MANUAL_CHATTING` without
+    emitting `illustration_salvage_resolved`.
+  - **Salvage invalid response → retry → reject:** mock Agent 8 to
+    return responses violating its schema or the
+    candidate-index/excerpt validators `CLAUDE_JSON_RETRY + 1`
+    times in a row. The branch treats the salvage call as failed
+    and falls through to `MANUAL_CHATTING` (same end state as an
+    explicit `reject_all`), without copying any file and without
+    mutating the paragraph. An `illustration_salvage_resolved`
+    event with `outcome="rejected_all"` is still emitted so the
+    frontend can transition out of the diagnostics state.
 - **Pipeline / run creation** (`orchestrator/pipeline.py`):
   - Runs created with N=3 illustrations spawn 3 branches.
   - Runs created with N=5 succeed end-to-end (mocked clients).
@@ -6121,6 +6506,50 @@ as described in § 5.0.
   `illustration_state{state="GENERATING_PROMPTS"}`. Assert
   `GET /api/runs/{id}` returns the new environment on scene 0 and on
   the top-level `environments[0]`.
+- **Salvage path end-to-end (new):** drive a full run where one
+  branch's auto pipeline exhausts the prompt + concept budget with
+  Agent 2 mocked to return `ok=false, problem="prompt",
+  nuance_only_failure=true` on the last attempt and at least one
+  earlier attempt, and `nuance_only_failure=false` on intermediate
+  attempts. Assert:
+  - `illustration_attempt_history` accumulates one row per Agent 2
+    call across the branch (rendering + verdict), ordered by
+    ascending `(concept_attempt, prompt_attempt, created_at)`.
+  - On exhaustion, the branch transitions to `SALVAGE_REVIEW` and
+    Agent 8 is invoked exactly once with a candidate list that
+    excludes any history row whose `nuance_only_failure=false`,
+    whose `environment_label` differs from the live row, or whose
+    `contains_entity_label` differs from the live row.
+  - Mocked Agent 8 returns `decision="accept"` pointing at the most
+    recent nuance-only candidate; the SSE stream emits
+    `illustration_salvage_resolved{outcome="accepted"}` followed
+    by `illustration_completed`, the canonical `image_path` exists
+    on disk and matches the bytes of the historical attempt's
+    image file, and the run ends `COMPLETED` with
+    `completed_count` accounting for the salvaged branch.
+  - A subsequent `GET /api/runs/{id}` returns the salvaged
+    illustration in `COMPLETED` with `current_concept` unchanged
+    by Agent 8 (concept is not Agent 8's responsibility) and the
+    diagnostic popover payload exposes
+    `salvage = { candidate_index, reasoning, paragraph_text_override: null }`.
+- **Salvage reject → manual fallback end-to-end (new):** same setup
+  as above but mocked Agent 8 returns `decision="reject_all"`.
+  Assert the SSE stream emits
+  `illustration_salvage_resolved{outcome="rejected_all"}` followed by
+  the existing `illustration_manual_started` event, the
+  illustration ends up in `MANUAL_CHATTING`, no file copy occurred,
+  and POSTing a manual user message proceeds along the existing
+  § 6A flow.
+- **Salvage paragraph override end-to-end (new):** as in the accept
+  test but Agent 8 returns a non-null `paragraph_text_override`
+  whose text contains the candidate's `scene_excerpt` verbatim.
+  Assert the SSE stream emits `paragraph_updated{paragraph_index, text}`
+  before `illustration_salvage_resolved`, the persisted
+  `story_blocks_json` paragraph matches the override, the
+  illustration's `scene_excerpt` is unchanged (Agent 8 does not
+  modify the excerpt — only the surrounding paragraph), and a
+  subsequent `GET /api/runs/{id}?lang=sk` reports the affected
+  paragraph translation as `"stale"` (source hash changed).
 - **Agent 4 paragraph rewrite end-to-end:** run the pipeline with
   Agent 2 mocked to return `problem="concept"` on the first attempt
   for one branch, and Agent 4 mocked to return a valid
@@ -6326,6 +6755,27 @@ Pinia stores and components are tested with Vitest + @vue/test-utils.
     grid reflow when the image lands (assert the slot keeps the same
     bounding box height across the transition by checking computed
     `aspect-ratio` or padding-bottom).
+  - **Salvage diagnostics surface (new):** when the illustration's
+    `salvage` field is non-null (set by the
+    `illustration_salvage_resolved{outcome="accepted"}` SSE handler),
+    the popover renders an additional note resolved via
+    `i18n.t('illustration.salvaged')`. When
+    `salvage.paragraph_text_override` is a non-empty string, the
+    popover ALSO renders the
+    `i18n.t('illustration.salvagedParagraphPatched')` note. When
+    `salvage` is `null`, neither note is in the DOM. The card body,
+    image, and header otherwise render identically to a
+    non-salvaged `COMPLETED` illustration — salvage origin must not
+    leak outside the popover.
+- **runStore salvage event (new):**
+  - The `illustration_salvage_resolved{outcome="accepted", candidate_index, reasoning, paragraph_text_override}`
+    handler writes a `salvage` object onto the existing illustration
+    reactive object without remounting the card (reference survival
+    on the illustration object itself).
+  - The `illustration_salvage_resolved{outcome="rejected_all"}`
+    handler does NOT set `salvage` on the illustration; the manual
+    flow is expected to open via the subsequent
+    `illustration_manual_started` event.
 - **StoryParagraph** (new test file):
   - Mounts a `StoryParagraph` bound to a paragraph block at index `i`.
   - Initially renders the block's `text` in a `<p>`.

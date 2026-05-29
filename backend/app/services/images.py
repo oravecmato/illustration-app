@@ -38,6 +38,31 @@ async def save_manual_image(
     return relative_path
 
 
+async def save_history_image(
+    image_bytes: bytes,
+    output_dir: str,
+    run_id: str,
+    illustration_id: str,
+    concept_attempt: int,
+    prompt_attempt: int,
+) -> str:
+    """Save an auto-pipeline attempt's image for the history table (§ 5).
+
+    Path: ``OUTPUT_DIR/runs/<run_id>/history/<illustration_id>_<c>_<p>.png``.
+    Returns the relative path (relative to ``output_dir``). One row per
+    ``(illustration_id, concept_attempt, prompt_attempt)``; overwriting
+    the same (c, p) pair is treated as a re-render of the same attempt.
+    """
+    relative_path = (
+        f"runs/{run_id}/history/{illustration_id}_{concept_attempt}_{prompt_attempt}.png"
+    )
+    full_path = os.path.join(output_dir, relative_path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    async with aiofiles.open(full_path, "wb") as f:
+        await f.write(image_bytes)
+    return relative_path
+
+
 async def copy_image(source_relative_path: str, output_dir: str, dest_relative_path: str) -> str:
     """Copy an already-saved image to a new relative path under output_dir.
 

@@ -18,7 +18,11 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     id: "run-1",
     session_id: "sess-1",
     status: "RUNNING",
+    source_language: "sk",
+    language: "sk",
+    topic_short: "test",
     story_title: "Skúšobný príbeh",
+    story_topic_description: "Skúšobný popis",
     story_blocks: [
       { type: "paragraph", text: "Bol raz jeden chlapec." },
       { type: "illustration", scene_index: 0 },
@@ -557,7 +561,7 @@ describe("runStore", () => {
 
       store.handleSseEvent({
         type: "illustration_completed",
-        data: { illustration_id: "ill-1", image_url: "/static/x.png" },
+        data: { illustration_id: "ill-1", scene_index: 0, image_url: "/static/x.png" },
       });
       // Hide takes precedence so the new image is shown.
       expect(store.chatToggle["ill-1"]).toBe("hidden");

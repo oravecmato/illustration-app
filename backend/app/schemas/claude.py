@@ -457,12 +457,31 @@ class EvaluateImageResponse(BaseModel):
       blocker; concept revision in-place cannot help. Orchestrator
       routes to Agent 4b (rethink_environment), which is the only agent
       allowed to swap the environment for a slot.
+
+    ``nuance_only_failure`` is a post-hoc annotation that does NOT change
+    routing. It is only meaningful when ``ok=False`` and ``problem=
+    "prompt"`` AND the single failure axis was a near-miss expression
+    drift within the concept's emotional neighbourhood, with every
+    other checklist axis (cast, entity, environment, anatomy, style,
+    safety, composition) passing cleanly. The orchestrator persists it
+    on ``illustration_attempt_history`` so the salvage agent (§ 7.1
+    Call 8) can identify historical attempts the renderer is unlikely
+    to ever close cleanly. On success the flag MUST be ``False``.
     """
 
     ok: bool
     problem: Literal["prompt", "concept", "environment"] | None
     reasoning: str
     suggestion: str
+    nuance_only_failure: bool = False
+
+    @model_validator(mode="after")
+    def _validate_nuance(self) -> "EvaluateImageResponse":
+        if self.ok and self.nuance_only_failure:
+            raise ValueError("nuance_only_failure must be false when ok=true")
+        if self.nuance_only_failure and self.problem != "prompt":
+            raise ValueError("nuance_only_failure=true is only meaningful when problem='prompt'")
+        return self
 
 
 # Agent 3 output is same schema as Agent 1.
@@ -667,6 +686,71 @@ class ManualRevisePromptsResponse(BaseModel):
             raise ValueError("positive must be a non-empty string")
         if not self.negative or not self.negative.strip():
             raise ValueError("negative must be a non-empty string")
+        return self
+
+
+# ── Agent 8: salvage_review ──────────────────────────────────────────────────
+
+
+class SalvageCandidate(BaseModel):
+    """One historical attempt the salvage pre-filter handed to Agent 8.
+
+    The pre-filter has already verified that ``nuance_only_failure=true``,
+    that ``environment`` matches the live slot, and that
+    ``contains_entity_label`` / ``character_role`` are still achievable.
+    Agent 8 reasons over the metadata; it never sees the image bytes.
+    """
+
+    candidate_index: int
+    concept_attempt: int
+    prompt_attempt: int
+    concept_used: str
+    paragraph_text: str
+    scene_excerpt: str
+    environment: Environment
+    contains_entity_label: str | None = None
+    character_role: Literal["male", "female", "mother"] | None = None
+    verdict_reasoning: str
+    verdict_suggestion: str
+
+
+class SalvageReviewResponse(BaseModel):
+    """Agent 8 (salvage_review) output. See § 7.1 Call 8.
+
+    * ``decision="accept"`` — ``candidate_index`` MUST identify one of
+      the input candidates. ``paragraph_text_override`` is either
+      ``None`` (use the candidate's stored paragraph as-is) or a
+      ``source_language`` string that contains the candidate's
+      ``scene_excerpt`` verbatim (the server re-checks the substring
+      rule after dispatch using the candidate's recorded excerpt).
+    * ``decision="reject_all"`` — ``candidate_index`` MUST be ``0`` (a
+      placeholder; the server ignores it) and
+      ``paragraph_text_override`` MUST be ``None``.
+    """
+
+    decision: Literal["accept", "reject_all"]
+    candidate_index: int
+    paragraph_text_override: str | None = None
+    reasoning: str
+
+    @model_validator(mode="after")
+    def _validate(self) -> "SalvageReviewResponse":
+        if not self.reasoning.strip():
+            raise ValueError("reasoning must be a non-empty string")
+        if self.decision == "reject_all":
+            if self.candidate_index != 0:
+                raise ValueError(
+                    "candidate_index must be 0 when decision='reject_all' "
+                    "(placeholder; server ignores it)"
+                )
+            if self.paragraph_text_override is not None:
+                raise ValueError("paragraph_text_override must be null when decision='reject_all'")
+        else:  # accept
+            if self.candidate_index < 0:
+                raise ValueError("candidate_index must be a non-negative integer")
+            override = self.paragraph_text_override
+            if override is not None and not override.strip():
+                raise ValueError("paragraph_text_override must be a non-empty string when provided")
         return self
 
 

@@ -30,6 +30,7 @@ export default {
       REVISING_PROMPTS: 'Úprava promptů',
       RETHINKING_CONCEPT: 'Přepracování konceptu',
       RETHINKING_ENVIRONMENT: 'Přepracování prostředí',
+      SALVAGE_REVIEW: 'Přehodnocení dřívějších pokusů',
       MANUAL_CHATTING: 'Společná tvorba',
       MANUAL_GENERATING_PROMPTS: 'Připravuji prompty (manuál)',
       MANUAL_RENDERING: 'Kreslím (manuál)',
@@ -38,6 +39,8 @@ export default {
       CANCELLED: 'Zrušeno',
     },
     currentConcept: 'Koncept',
+    salvaged: 'Tento obrázek AI obnovila z dřívějšího pokusu.',
+    salvagedParagraphPatched: 'Také okolní odstavec příběhu byl upraven, aby obrázku odpovídal.',
     entity_subtitle: 'Ve scéně je také: {label}',
     attempt: 'pokus {current}/{max}',
     manual: {

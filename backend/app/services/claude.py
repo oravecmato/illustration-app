@@ -28,6 +28,8 @@ from app.schemas.claude import (
     RethinkConceptResponse,
     RethinkEnvironmentResponse,
     RevisePromptsResponse,
+    SalvageCandidate,
+    SalvageReviewResponse,
     StyleGuide,
     TranslateResponse,
 )
@@ -98,6 +100,7 @@ AGENT_FILES = {
     "translate": "translate.md",
     "manual_concept": "manual_concept.md",
     "manual_revise_prompts": "manual_revise_prompts.md",
+    "salvage_review": "salvage.md",
 }
 
 
@@ -847,5 +850,52 @@ class ClaudeClient:
             messages=[{"role": "user", "content": user_text}],
             response_model=ManualRevisePromptsResponse,
             system=self._prompts["manual_revise_prompts"],
+        )
+        return result  # type: ignore[return-value]
+
+    # ── Agent 8: salvage_review ──────────────────────────────────────────────
+
+    async def salvage_review(
+        self,
+        *,
+        source_language: str,
+        candidates: list[SalvageCandidate],
+        current_paragraph_text: str,
+        previous_paragraph_text: str,
+        next_paragraph_text: str,
+        current_environment: Environment,
+        current_entity: dict | None,
+    ) -> SalvageReviewResponse:
+        """Run Agent 8 to review nuance-only-failed historical attempts
+        after the auto pipeline exhausts its budget (§ 7.1 Call 8).
+
+        The caller has already run the pre-filter and the input
+        ``candidates`` are guaranteed to share the live slot's
+        environment + entity + role. Agent 8 never sees the image bytes
+        — it reasons over verdict metadata and narrative coherence only.
+        """
+        candidates_json = json.dumps(
+            [c.model_dump() for c in candidates], ensure_ascii=False, indent=2
+        )
+        current_env_json = json.dumps(current_environment.model_dump(), ensure_ascii=False)
+        current_entity_json = (
+            json.dumps(current_entity, ensure_ascii=False) if current_entity is not None else "null"
+        )
+
+        user_text = (
+            f"source_language: {source_language}\n\n"
+            f"candidates (newest-first):\n{candidates_json}\n\n"
+            f"current_paragraph_text: {current_paragraph_text}\n"
+            f"previous_paragraph_text: {previous_paragraph_text}\n"
+            f"next_paragraph_text: {next_paragraph_text}\n"
+            f"current_environment: {current_env_json}\n"
+            f"current_entity: {current_entity_json}\n\n"
+            "Respond with the JSON object specified in your instructions."
+        )
+        result = await self._call_with_retry(
+            messages=[{"role": "user", "content": user_text}],
+            response_model=SalvageReviewResponse,
+            system=self._prompts["salvage_review"],
+            max_tokens=2048,
         )
         return result  # type: ignore[return-value]
