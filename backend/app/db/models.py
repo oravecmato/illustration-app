@@ -167,6 +167,13 @@ class Illustration(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     manual_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     manual_state_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Auto-pipeline prompting notes — empirical renderer lessons curated by
+    # Agent 3 (revise_prompts) across retries. Analogue of the manual flow's
+    # ManualIllustrationSession.prompting_notes. Reset by Agent 4b when the
+    # environment is swapped (the lesson may have been env-bound). Nullable
+    # because notes are optional and only populated once Agent 3 has
+    # something worth recording.
+    prompting_notes: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

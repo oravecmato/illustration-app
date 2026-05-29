@@ -16,7 +16,12 @@ from app.config import Settings, get_settings
 from app.db.migrations import upgrade_to_head_async
 from app.db.session import init_db
 from app.services.character_config import CharacterConfigError, load_character_config
-from app.services.claude import ClaudeClient, ClaudeError, load_agent_prompts
+from app.services.claude import (
+    ClaudeClient,
+    ClaudeError,
+    load_agent_prompts,
+    load_reference_docs,
+)
 from app.services.runpod import RunPodClient
 
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         agents_dir = _resolve_relative_path(settings.agents_dir)
         try:
             agent_prompts = load_agent_prompts(agents_dir)
+            reference_docs = load_reference_docs(agents_dir)
         except ClaudeError as e:
             logger.error("Startup failed: %s", e)
             raise
@@ -69,7 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             workflow_template = {}
 
         claude_client = ClaudeClient(
-            api_key=settings.anthropic_api_key, agent_prompts=agent_prompts
+            api_key=settings.anthropic_api_key,
+            agent_prompts=agent_prompts,
+            reference_docs=reference_docs,
         )
         runpod_client = RunPodClient(
             api_key=settings.runpod_api_key,

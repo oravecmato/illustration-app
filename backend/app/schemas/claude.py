@@ -484,8 +484,27 @@ class EvaluateImageResponse(BaseModel):
         return self
 
 
-# Agent 3 output is same schema as Agent 1.
-RevisePromptsResponse = GeneratePromptsResponse
+class RevisePromptsResponse(BaseModel):
+    """Agent 3 output.
+
+    Same prompt fields as Agent 1, plus ``prompting_notes_update`` — the
+    auto-pipeline analogue of the manual flow's ``prompting_notes``
+    discipline (see ``ManualConceptResponse``). Agent 3 uses it to record
+    renderer-specific empirical lessons learned during retries so the
+    next iteration's Agent 3 (and Agent 1 on concept rewrites) can build
+    on them instead of rediscovering the same failure modes.
+    """
+
+    workflow: Literal["single-lora", "no-lora"]
+    positive: str
+    negative: str
+    prompting_notes_update: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_non_empty(self) -> "RevisePromptsResponse":
+        if self.prompting_notes_update is not None and not self.prompting_notes_update.strip():
+            raise ValueError("prompting_notes_update must be a non-empty string when provided")
+        return self
 
 
 class RethinkConceptResponse(BaseModel):

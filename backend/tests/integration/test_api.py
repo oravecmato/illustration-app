@@ -32,7 +32,7 @@ from app.db.models import Session as SessionModel
 from app.db.session import get_session_factory, init_db
 from app.main import create_app
 from app.services.character_config import load_character_config
-from app.services.claude import ClaudeClient, load_agent_prompts
+from app.services.claude import ClaudeClient, load_agent_prompts, load_reference_docs
 from app.services.runpod import RunPodClient
 
 IMAGE_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200).decode()
@@ -194,8 +194,13 @@ async def app_client(tmp_path):
     backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     agents_dir = os.path.join(backend_root, "app", "agents")
     agent_prompts = load_agent_prompts(agents_dir)
+    reference_docs = load_reference_docs(agents_dir)
 
-    claude_client = ClaudeClient(api_key=settings.anthropic_api_key, agent_prompts=agent_prompts)
+    claude_client = ClaudeClient(
+        api_key=settings.anthropic_api_key,
+        agent_prompts=agent_prompts,
+        reference_docs=reference_docs,
+    )
     runpod_client = RunPodClient(
         api_key=settings.runpod_api_key,
         endpoint_id=settings.runpod_endpoint_id,

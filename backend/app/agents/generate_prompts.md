@@ -102,21 +102,20 @@ it into tags.
 
 ### `kind == "non_human_character"`
 
-- **Numeric species tag.** Parse the species from `label`.
-  - If the species is one of the **well-known Danbooru categories**
-    — `1cat`, `1dog`, `1bird`, `1owl`, `1dragon`, `1fox`, `1wolf`,
-    `1rabbit`, `1robot` — use that specific tag.
-  - For **anything outside that short list** (stag, deer, hawk, lynx,
-    otter, jellyfish, chimerical beast, magical creature, …) use the
-    generic `1other` and then describe the species in 2–4 following
-    description tags. Example for `"a mysterious white stag"`:
-    `1other, stag, white deer, large antlers, cervid`. Made-up
-    numeric tags like `1stag`, `1deer`, `1hawk`, `1otter` are NOT
-    real Danbooru tags — the encoder ignores them and you lose the
-    count enforcer, which often produces the wrong species or
-    duplicates.
-  - Whichever you pick, include **exactly ONE** numeric tag
-    (`1cat` OR `1other`, never both, never two specific ones).
+- **No numeric species count tag.** Do NOT emit `1cat`, `1dog`,
+  `1bird`, `1stag`, `1other`, etc. for non-human characters. In
+  Danbooru taxonomy `1other` is the count tag for *humanoid*
+  unknowns; species-specific count tags rarely help and made-up
+  ones (`1stag`, `1deer`) are not real tags at all. The species
+  noun (`cat`, `dog`, `stag`, `dragon`, …) carried as a regular
+  positive tag, plus 2–4 description tags below, anchors the
+  entity reliably.
+- **Entity-alone scenes** (`character_role == null`): include
+  `no humans` in positive and `animal focus` (or `solo focus` for
+  non-animal creatures / robots) so the entity becomes the frame's
+  subject. Do NOT include `solo` (that is a human-count tag and
+  conflicts with `no humans`). The human-count enforcer (`1boy` /
+  `1girl` / `1woman`) is omitted for entity-alone scenes.
 - **Description tags.** Translate the salient visual features in `label`
   into 2–4 Danbooru-style adjective/noun tags (e.g. `"a small black
   tabby cat with a velvet ribbon"` → `black cat, tabby, small, velvet
@@ -132,8 +131,9 @@ it into tags.
   subject of the frame; the entity is secondary. Prefer positional tags
   like `on lap`, `at feet`, `on shoulder`, `behind`. When the entity is
   alone (`character_role == null`), make it the frame's subject — add
-  a centred-composition cue like `solo, centered, looking at viewer`
-  (omit `1girl`/`1boy`/`1woman`).
+  a centred-composition cue like `centered, looking at viewer` and the
+  `no humans` + `animal focus` (or `solo focus`) tags described above
+  (omit `solo`, `1girl`, `1boy`, `1woman`).
 - **Anti-anatomy negatives by category** — append these to the negative
   prompt according to species, to suppress humanoid contamination from
   the style LoRA:

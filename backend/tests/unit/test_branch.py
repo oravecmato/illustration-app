@@ -12,6 +12,7 @@ from app.schemas.claude import (
     GeneratePromptsResponse,
     RethinkConceptResponse,
     RethinkEnvironmentResponse,
+    RevisePromptsResponse,
     StyleGuide,
 )
 
@@ -23,6 +24,12 @@ STYLE_GUIDE = StyleGuide(
 )
 
 PROMPTS = GeneratePromptsResponse(
+    workflow="single-lora",
+    positive="brave knight, forest",
+    negative="blurry",
+)
+
+REVISED_PROMPTS = RevisePromptsResponse(
     workflow="single-lora",
     positive="brave knight, forest",
     negative="blurry",
@@ -137,7 +144,7 @@ def make_services(
     claude = AsyncMock()
     claude.generate_prompts.return_value = generate_prompts_return or PROMPTS
     claude.evaluate_image.return_value = evaluate_image_return or VERDICT_OK
-    claude.revise_prompts.return_value = revise_prompts_return or PROMPTS
+    claude.revise_prompts.return_value = revise_prompts_return or REVISED_PROMPTS
     claude.rethink_concept.return_value = rethink_concept_return or RETHOUGHT_CONCEPT
     claude.rethink_environment.return_value = rethink_environment_return or RETHOUGHT_ENVIRONMENT
 

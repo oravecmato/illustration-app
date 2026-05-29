@@ -10,11 +10,17 @@ this scene — same shape as in `generate_prompts.md`:
 `{ "label", "kind": "non_human_character"|"object", "importance" }` or
 `null`), plus:
 
+- `current_workflow` — the workflow the original prompt used. You MUST
+  keep this same workflow; Agent 3 never switches LoRA mode.
 - `current_positive` / `current_negative` — the prompts that produced the
   failing image.
 - `verdict_problem` — `"prompt"` (the issue is fixable here).
 - `verdict_reasoning` — why the image failed.
 - `verdict_suggestion` — actionable hint from the evaluator.
+- `prompting_notes` — OPTIONAL English-only memo of renderer-specific
+  prompt-level lessons accumulated across previous revisions of THIS
+  illustration. Treat it as authoritative. See "Prompting notes
+  discipline" below for the curation rules.
 
 If `contains_entity` is non-null, treat entity-related rules in this
 file exactly as the original `generate_prompts` call would — the
@@ -31,7 +37,12 @@ invent a different label or species.
    the missing expression/gesture/action tag, push the environment tags,
    harden anatomy negatives, raise object prominence, etc.
 3. Stay in Danbooru-style COMMA-SEPARATED TAGS. Never natural language.
-
+3a. **Use attention-weight syntax `(tag:1.x)` strategically** when a
+   specific tag is being under-rendered. `(tag:1.2)` → `(tag:1.4)` is
+   the typical operating range; `1.5+` distorts. Down-weight with
+   `(tag:0.7)`. Prefer raising the *most semantically central* tag
+   (the entity label, the key expression, the action verb) over
+   bloating the tag list. Weighting many tags at once cancels out.
 3b. **NEVER use natural-language negations** (`"no X"`, `"without X"`,
    `"not Y"`) in EITHER prompt. The SD/CLIP text encoder treats them
    as positive references to the noun — `"no cats"` reads as `cats`
@@ -41,6 +52,10 @@ invent a different label or species.
    - Bad (negative): `no cats, no felines, no dark animals`
    If `current_negative` contains such phrases (a legacy of an
    earlier attempt), strip them and replace with the bare-tag form.
+3c. **Keep the negative prompt tight.** Aim for roughly 30–45 tags;
+   stay well under the CLIP ~75-token cap. Beyond that, additions
+   start cancelling each other out and can backfire. Dedupe — do
+   not list the same anti-X concept three different ways.
 4. `positive` MUST still include:
    - every trigger tag for the character,
    - the human-count enforcer (`1boy` / `1girl` / `1woman`) for the role
@@ -49,24 +64,28 @@ invent a different label or species.
    - explicit action/pose tags,
    - the outfit baseline,
    - environment/atmosphere tags,
-   - when `contains_entity` is `null`: `solo` (only meaningful when a
-     human is present),
+   - when `contains_entity` is `null` AND a human is present: `solo`,
+   - when `contains_entity` is `null` AND `character_role` is `null`
+     (true no-subject scene — extremely rare): `no humans` plus the
+     relevant focus tag (`scenery`, `object focus`),
    - when `contains_entity` is non-null with `kind ==
-     "non_human_character"`: exactly one numeric species tag plus
-     2–4 entity-description tags derived from `contains_entity.label`
-     plus 1–3 interaction tags derived from `concept`. The numeric
-     tag is one of the well-known Danbooru categories (`1cat`,
-     `1dog`, `1bird`, `1owl`, `1dragon`, `1fox`, `1wolf`, `1rabbit`,
-     `1robot`) OR the generic `1other` for any other species
-     (`1other, stag, white deer, large antlers` for a stag, etc.).
-     Made-up numeric tags like `1stag`, `1deer`, `1hawk` are NOT
-     real Danbooru tags — prefer `1other` plus species description.
-     Do NOT include `solo` in this case.
+     "non_human_character"`: 3–5 entity-description tags derived
+     from `contains_entity.label` (species noun + distinguishing
+     features) and 1–3 interaction/placement tags derived from
+     `concept`. If `character_role` is null (entity-alone scene),
+     also include `no humans` and `animal focus` (for fauna) or the
+     appropriate focus tag. Do NOT include `solo` (it is a
+     human-count tag). Do NOT invent a numeric species count tag
+     like `1cat`, `1dog`, `1stag`, `1other`, etc. — those rarely
+     help and `1other` in particular is a Danbooru count tag for
+     humanoid unknowns, not for animals or creatures. The species
+     noun (`cat`, `dog`, `stag`, `dragon`, …) plus description tags
+     carries the entity reliably.
    - when `contains_entity` is non-null with `kind == "object"`:
      3–5 object-description tags derived from `contains_entity.label`,
      1–3 placement/interaction tags derived from `concept`, and a
-     prominence cue (`object focus`, `close-up`) when appropriate. No
-     numeric species tag.
+     prominence cue (`object focus`, `close-up`) when appropriate.
+     No numeric species tag.
 5. `negative` MUST still include the full negative baseline supplied in the
    user message (append scene-specific negatives after it).
    - When `contains_entity` is `null`: keep the anti-creature negatives
@@ -86,16 +105,71 @@ invent a different label or species.
      negatives are needed for objects.
 6. Vague tags alone are insufficient: `standing`, `looking`, `posing` must
    always be paired with concrete specifics.
+7. **Never move the central subject tag into the negative.** If a
+   verdict complains that the wrong number / wrong style of the
+   central entity rendered, the fix is to anchor or reweight the
+   entity in positive and add anti-duplicate tags in negative — not
+   to remove the entity tag from positive. A verdict saying "two
+   bows visible" does NOT mean drop `bow (weapon)` from positive; it
+   means add `2bows, multiple bows, duplicate weapon` to negative
+   and possibly raise `(bow \(weapon\):1.3)` in positive.
+
+## Prompting notes discipline
+
+The `prompting_notes` input is a running English-only memo of
+renderer-specific prompt-level lessons accumulated across previous
+revisions of THIS illustration. You curate it via the optional
+`prompting_notes_update` field in your JSON output. The memo is
+**never shown to anyone** — it is consumed only by the next call to
+this agent (or to Agent 1 on a concept rewrite). When the orchestrator
+runs Agent 4b and the locked environment is swapped, the memo is
+wiped, since environment-bound lessons may no longer apply.
+
+When you emit `prompting_notes_update`, you MUST give the **full
+replacement value** — the server overwrites the stored memo verbatim
+and does NOT merge. To preserve prior lessons, copy them into the new
+value and add your additions. Omit the field (or set it to `null`)
+when you have nothing new to record this turn.
+
+What the memo captures:
+
+- **Renderer weaknesses observed on this illustration.** Concrete
+  examples: "the stag keeps rendering with multiple antler racks
+  unless `2deer, multiple stags` is in negative"; "the bow weapon
+  drifts to a bow tie unless disambiguated as `bow \(weapon\),
+  longbow, drawn bowstring`"; "the LoRA biases this character toward
+  closed-eye smiles when paired with `looking up`".
+- **Prompt-level countermeasures that helped (or are worth trying
+  next).** Concrete examples: "force `(stag:1.3), antlers, brown
+  fur, four legs, quadruped` in positive plus `anthro, humanoid,
+  standing on two legs` in negative"; "raising `excited` to
+  `(excited:1.3)` finally landed the open-mouth smile".
+
+What the memo MUST NOT contain:
+
+- **Verdict text or concept content** — those live in their own
+  fields. The memo distils transferable *prompt-level* lessons.
+- **Translations or non-English text.** English only, regardless
+  of `source_language`.
+- **Long prose** — bullet-list-style, dense English, tens to a few
+  hundred tokens at most.
+
+When to emit `prompting_notes_update`:
+
+- The first time you discover a renderer blind spot that the next
+  revision (and Agent 1 on a possible future concept rewrite) needs
+  to remember.
+- When subsequent attempts confirm or refine a previously recorded
+  lesson — rewrite the relevant bullet rather than appending stale
+  guesses.
+- Skip the field on revisions that are routine tag tightening with
+  no new generalisable lesson.
 
 ## Workflow selection
 
-Your output MUST include a `workflow` field matching the current scene:
-
-- `"single-lora"` when the scene has a human character (character_role is non-null)
-- `"no-lora"` when the scene has no human (character_role is null)
-
-The workflow value should match what was used in the original generation;
-you are revising prompts, not changing the workflow file.
+Your output MUST include a `workflow` field. It MUST match
+`current_workflow` from the input — Agent 3 never switches LoRA mode.
+Workflow swaps are the exclusive responsibility of Agent 4 / Agent 4b.
 
 ## Output format
 
@@ -106,6 +180,7 @@ prose, no commentary:
 {
   "workflow": "single-lora" | "no-lora",
   "positive": "...",
-  "negative": "..."
+  "negative": "...",
+  "prompting_notes_update": "..." | null
 }
 ```

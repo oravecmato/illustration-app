@@ -144,16 +144,17 @@ Each call's user message contains:
    - when `contains_entity` is `null`: `solo` (only meaningful
      when a human is present),
    - when `contains_entity` is non-null with `kind ==
-     "non_human_character"`: exactly one numeric species tag plus
-     2–4 entity-description tags derived from `contains_entity.label`
-     plus 1–3 interaction tags derived from `last_agreed_concept`.
-     The numeric tag is one of the well-known Danbooru categories
-     (`1cat`, `1dog`, `1bird`, `1owl`, `1dragon`, `1fox`, `1wolf`,
-     `1rabbit`, `1robot`) OR the generic `1other` for any other
-     species (`1other, stag, white deer, large antlers`, etc.).
-     Made-up numeric tags like `1stag`, `1deer`, `1hawk` are NOT
-     real Danbooru tags — prefer `1other` plus species description.
-     Do NOT include `solo` in this case.
+     "non_human_character"`: 3–5 entity-description tags derived
+     from `contains_entity.label` (species noun + distinguishing
+     features) and 1–3 interaction tags derived from
+     `last_agreed_concept`. Do NOT emit a numeric species count
+     tag (`1cat`, `1dog`, `1stag`, `1other`, …) — `1other` is the
+     Danbooru count tag for humanoid unknowns and species-specific
+     count tags rarely help. The species noun plus description
+     tags carries the entity. Do NOT include `solo`. When the
+     entity is alone (`character_role == null`), also add
+     `no humans` plus `animal focus` (for fauna) or `solo focus`
+     (for non-animal creatures).
    - when `contains_entity` is non-null with `kind == "object"`:
      3–5 object-description tags derived from
      `contains_entity.label`, 1–3 placement / interaction tags

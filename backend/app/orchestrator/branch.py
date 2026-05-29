@@ -300,6 +300,7 @@ async def run_branch(
                 character_role=character_role,
                 character_config=char_config,
                 contains_entity=await _current_entity(),
+                prompting_notes=illustration.prompting_notes,
             )
             # Persist workflow to illustration (Agent 1 response)
             illustration = await repo.update_illustration(
@@ -315,6 +316,11 @@ async def run_branch(
             return
 
         concept_succeeded = False
+        # Newest-first English summaries of the previous rejected verdicts
+        # for THIS concept. Reset every outer (concept) iteration. Agent 2
+        # sees this list and is instructed to escalate to problem="concept"
+        # when the same failure mode repeats.
+        recent_failure_summaries: list[str] = []
         for prompt_attempt in range(1, MAX_PROMPT_ATTEMPTS_PER_CONCEPT + 1):
             if cancel_flag.is_set():
                 await transition(IllustrationState.CANCELLED)
@@ -387,6 +393,7 @@ async def run_branch(
                     character_role=character_role,
                     character_config=char_config,
                     contains_entity=await _current_entity(),
+                    recent_failure_summaries=recent_failure_summaries or None,
                 )
             except Exception as e:
                 logger.error("evaluate_image failed: %s", e)
@@ -399,6 +406,16 @@ async def run_branch(
             await repo.update_illustration(
                 illustration, last_verdict_json=verdict.model_dump_json()
             )
+            if not verdict.ok:
+                # Prepend so the list stays newest-first. Cap at 3 to
+                # keep the prompt compact; older context rarely matters
+                # since the inner loop tops out at 3 attempts per concept.
+                summary = (
+                    f"attempt {prompt_attempt}: problem={verdict.problem}; "
+                    f"reasoning={verdict.reasoning}"
+                )
+                recent_failure_summaries.insert(0, summary)
+                del recent_failure_summaries[3:]
 
             # Persist the immutable attempt-history snapshot (§ 5).
             # Done before the success branch so successful attempts are
@@ -487,7 +504,7 @@ async def run_branch(
                     prompt_attempt=prompt_attempt,
                 )
                 try:
-                    prompts = await claude.revise_prompts(
+                    revised = await claude.revise_prompts(
                         current_prompts=prompts,
                         verdict=verdict,
                         current_concept=illustration.current_concept,
@@ -495,6 +512,7 @@ async def run_branch(
                         character_role=character_role,
                         character_config=char_config,
                         contains_entity=await _current_entity(),
+                        prompting_notes=illustration.prompting_notes,
                     )
                 except Exception as e:
                     logger.error("revise_prompts failed: %s", e)
@@ -503,6 +521,14 @@ async def run_branch(
                         error_message=f"Prompt revision failed: {e}",
                     )
                     return
+                # Persist prompting_notes_update (auto-pipeline analogue of
+                # the manual flow's ManualConceptResponse.prompting_notes_update).
+                if revised.prompting_notes_update is not None:
+                    illustration = await repo.update_illustration(
+                        illustration,
+                        prompting_notes=revised.prompting_notes_update,
+                    )
+                prompts = revised
 
         if concept_succeeded:
             return
@@ -735,6 +761,8 @@ async def _do_environment_rethink(
             )
 
     role_changed = result.character_role != character_role
+    # Reset prompting_notes — any renderer lesson learned against the
+    # previous environment may not apply to the new one.
     await repo.update_illustration(
         illustration,
         character_role=result.character_role,
@@ -744,6 +772,7 @@ async def _do_environment_rethink(
         contains_entity_label=new_label,
         environment_label=result.environment.label,
         environment_aspect=result.environment.aspect,
+        prompting_notes=None,
     )
 
     await event_bus.publish(

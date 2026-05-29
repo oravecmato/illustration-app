@@ -93,6 +93,30 @@ The image is OK only when ALL of the following hold:
   (`rethink_environment`), the only agent allowed to swap the
   environment. Use this verdict sparingly.
 
+## Escalation rule (`recent_failures`)
+
+When the user message includes a `recent_failures` block, it lists the
+previous rejected verdicts within the CURRENT concept (newest first).
+This is the orchestrator's way of telling you: "tag revisions have been
+tried; here is what they revealed."
+
+Apply the following escalation rule:
+
+- If the current image fails for **the same root cause** as one or more
+  of the listed `recent_failures` (e.g. the entity keeps rendering with
+  the wrong anatomy, the expression keeps drifting in the same
+  direction, the renderer keeps drawing a different setting), emit
+  `problem="concept"` instead of `problem="prompt"`. The concept itself
+  needs to change — staying inside the same emotional / framing pocket
+  with bigger tag weights is unlikely to converge.
+- If the new failure is a clearly **different** axis from the listed
+  ones, stay with `problem="prompt"` — tag revision can still
+  meaningfully attack the new axis.
+
+Apply this rule sparingly when `recent_failures` is empty or has only
+one entry — at least two prior identical failures are a strong signal
+that the concept is the actual blocker, not the prompt.
+
 ## `nuance_only_failure` flag
 
 In addition to `ok` / `problem` / `reasoning` / `suggestion`, every

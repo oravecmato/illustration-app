@@ -166,3 +166,9 @@ NEGATIVE_PROMPT_BASELINE = (
     "low quality, blurry, watermark, signature, text, jpeg artifacts, "
     "multiple characters, crowd, two girls, two boys, 2girls, 2boys, group"
 )
+
+# Soft cap on number of comma-separated tags in the negative prompt. CLIP's
+# token window is ~75 and Illustrious models start cancelling out additions
+# beyond that. Hard validator on Agents 1 and 3 rejects responses that
+# exceed this (see `_validate_prompts` in services/claude.py).
+MAX_NEGATIVE_TAGS = 60

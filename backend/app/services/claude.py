@@ -7,6 +7,8 @@ import base64
 import json
 import logging
 import os
+import re
+from collections.abc import Callable
 
 from anthropic import AsyncAnthropic
 from pydantic import BaseModel, ValidationError
@@ -15,6 +17,7 @@ from app.constants import (
     ANTHROPIC_MODEL,
     CHARACTER_ROLE_MAP,
     CLAUDE_JSON_RETRY,
+    MAX_NEGATIVE_TAGS,
     NEGATIVE_PROMPT_BASELINE,
 )
 from app.schemas.claude import (
@@ -89,6 +92,143 @@ def _strip_json_fences(text: str) -> str:
     return stripped
 
 
+_TAG_WEIGHT_RE = re.compile(r"\(([^():]+?)(?::\s*-?\d+(?:\.\d+)?)?\)")
+_NON_WORD_RE = re.compile(r"[^a-z0-9 ]+")
+
+
+def _tag_list(prompt: str) -> list[str]:
+    """Split a Danbooru-style prompt into comma-separated tags.
+
+    Strips per-tag attention-weight parentheses (``(tag:1.3)``) so the
+    bare tag string is what we compare. Empty fragments are dropped.
+    """
+    tags: list[str] = []
+    for raw in prompt.split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        # Strip leading/trailing parens-with-weight wrappers.
+        m = _TAG_WEIGHT_RE.fullmatch(s)
+        if m:
+            s = m.group(1).strip()
+        tags.append(s)
+    return tags
+
+
+def _normalize_tag(tag: str) -> str:
+    """Normalise a tag for comparison: lowercase, strip weight parens,
+    drop punctuation/escapes, collapse whitespace, drop trailing
+    ``_(qualifier)`` Danbooru disambiguators.
+    """
+    s = tag.strip().lower()
+    # Unescape Danbooru parens like ``bow \(weapon\)`` first.
+    s = s.replace("\\(", "(").replace("\\)", ")")
+    # Collapse underscores to spaces (Danbooru → SD convention parity).
+    s = s.replace("_", " ")
+    s = _NON_WORD_RE.sub(" ", s)
+    s = " ".join(s.split())
+    return s
+
+
+def _validate_prompts(
+    *,
+    response: GeneratePromptsResponse | RevisePromptsResponse,
+    contains_entity: dict | None,
+    expected_workflow: str | None = None,
+) -> str | None:
+    """Hard validators applied to Agent 1 / Agent 3 prompt responses.
+
+    Returns ``None`` when the response is acceptable, or an English error
+    string describing what is wrong (fed back to the model on retry).
+
+    Checks:
+
+    1. ``workflow`` matches ``expected_workflow`` when provided
+       (Agent 3 must not switch LoRA mode).
+    2. Negative prompt has at most ``MAX_NEGATIVE_TAGS`` comma-separated
+       tags (CLIP token cap protection).
+    3. No duplicate tags in the negative prompt.
+    4. When ``contains_entity`` is non-null, the entity label noun MUST
+       appear as a tag (or as a substring of a tag) in the positive
+       prompt and MUST NOT appear in the negative prompt.
+    """
+    if expected_workflow is not None and response.workflow != expected_workflow:
+        return (
+            f"workflow must equal {expected_workflow!r} (the original "
+            f"workflow for this scene). Agent 3 never switches LoRA mode. "
+            f"You emitted {response.workflow!r}."
+        )
+
+    neg_tags = _tag_list(response.negative)
+    if len(neg_tags) > MAX_NEGATIVE_TAGS:
+        return (
+            f"negative prompt has {len(neg_tags)} comma-separated tags; "
+            f"the cap is {MAX_NEGATIVE_TAGS}. CLIP's token window is ~75 "
+            "and additions beyond this point cancel each other out and "
+            "can backfire. Tighten the negative prompt by dropping "
+            "duplicate or low-value anti-X tags."
+        )
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for raw in neg_tags:
+        norm = _normalize_tag(raw)
+        if not norm:
+            continue
+        if norm in seen and norm not in duplicates:
+            duplicates.append(norm)
+        seen.add(norm)
+    if duplicates:
+        sample = ", ".join(duplicates[:5])
+        return (
+            f"negative prompt contains duplicate tags: {sample}. Each "
+            "concept should be suppressed exactly once — dedupe and "
+            "re-emit."
+        )
+
+    if contains_entity is not None:
+        label = (contains_entity.get("label") or "").strip()
+        if label:
+            entity_norm = _normalize_tag(label)
+            # Use the longest meaningful word from the entity label as the
+            # anchor token (skips short connective words like "a", "the").
+            anchor_tokens = [t for t in entity_norm.split() if len(t) >= 3]
+            if not anchor_tokens:
+                anchor_tokens = entity_norm.split()
+            if anchor_tokens:
+                positive_norm = _normalize_tag(response.positive)
+                pos_tag_norms = [_normalize_tag(t) for t in _tag_list(response.positive)]
+                # The entity is "present" when at least one anchor token
+                # appears either as a standalone tag or as a substring of
+                # any positive tag (handles "black cat" vs "cat", or
+                # "stag" inside "white stag").
+                anchor_present = any(
+                    any(tok in pos_tag for pos_tag in pos_tag_norms) or tok in positive_norm
+                    for tok in anchor_tokens
+                )
+                if not anchor_present:
+                    return (
+                        f"contains_entity is set ({label!r}) but no tag in "
+                        "the positive prompt references the entity. The "
+                        "entity is the central subject — it MUST appear as "
+                        "a positive tag (species noun + description). "
+                        f"Expected at least one of these tokens: "
+                        f"{anchor_tokens}."
+                    )
+                neg_tag_norms = [_normalize_tag(t) for t in neg_tags]
+                if any(
+                    any(tok == nt or tok in nt for nt in neg_tag_norms) for tok in anchor_tokens
+                ):
+                    return (
+                        f"contains_entity is set ({label!r}) but the "
+                        "negative prompt references the entity. You must "
+                        "never suppress the central subject. Move any "
+                        "entity-related tags out of the negative."
+                    )
+
+    return None
+
+
 AGENT_FILES = {
     "chat": "chat.md",
     "build_story": "build_story.md",
@@ -101,6 +241,22 @@ AGENT_FILES = {
     "manual_concept": "manual_concept.md",
     "manual_revise_prompts": "manual_revise_prompts.md",
     "salvage_review": "salvage.md",
+}
+
+# Curated stable domain-knowledge reference docs prepended (with
+# ephemeral cache_control) to the system prompt of the listed agents.
+# Filename is relative to ``agents_dir/reference``.
+REFERENCE_FILES = {
+    "illustrious_sdxl": "reference/illustrious_sdxl.md",
+}
+
+# Which agents receive which reference docs prepended to their system
+# prompt. Prompt-engineering agents only — Agents 0a/0b/2/4/4b/5/6/8 do
+# not benefit from renderer-tag domain knowledge.
+AGENT_REFERENCE_USAGE: dict[str, tuple[str, ...]] = {
+    "generate_prompts": ("illustrious_sdxl",),
+    "revise_prompts": ("illustrious_sdxl",),
+    "manual_revise_prompts": ("illustrious_sdxl",),
 }
 
 
@@ -122,25 +278,98 @@ def load_agent_prompts(agents_dir: str) -> dict[str, str]:
     return prompts
 
 
+def load_reference_docs(agents_dir: str) -> dict[str, str]:
+    """Load curated reference docs (stable domain knowledge) prepended
+    to prompt-engineering agents' system prompts. Refuse to start on
+    any missing or empty doc.
+    """
+    docs: dict[str, str] = {}
+    for key, filename in REFERENCE_FILES.items():
+        path = os.path.join(agents_dir, filename)
+        if not os.path.isfile(path):
+            raise ClaudeError(f"Reference doc not found: {path}")
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+        if not text:
+            raise ClaudeError(f"Reference doc is empty: {path}")
+        docs[key] = text
+    return docs
+
+
 class ClaudeError(Exception):
     pass
 
 
 class ClaudeClient:
-    def __init__(self, api_key: str, agent_prompts: dict[str, str]):
+    def __init__(
+        self,
+        api_key: str,
+        agent_prompts: dict[str, str],
+        reference_docs: dict[str, str] | None = None,
+    ):
         self._client = AsyncAnthropic(api_key=api_key)
         missing = set(AGENT_FILES) - set(agent_prompts)
         if missing:
             raise ClaudeError(f"Missing agent prompts: {sorted(missing)}")
         self._prompts = agent_prompts
+        self._references = reference_docs or {}
+        # Validate that every reference doc the system claims to use is
+        # actually loaded — refuse to start on a misconfiguration. (When
+        # the caller passes ``None`` we treat references as disabled, so
+        # tests can stay terse without losing the prod invariant.)
+        if reference_docs is not None:
+            for agent_key, ref_keys in AGENT_REFERENCE_USAGE.items():
+                for rk in ref_keys:
+                    if rk not in reference_docs:
+                        raise ClaudeError(
+                            f"Reference doc {rk!r} used by agent {agent_key!r} is not loaded."
+                        )
+
+    def _system_for(self, agent_key: str) -> str | list[dict]:
+        """Build the system parameter for ``agent_key``.
+
+        When the agent uses one or more reference docs, returns a list
+        of system blocks with ``cache_control`` on the prepended
+        reference content (so the docs are cached across calls) and the
+        agent-specific prompt as the final, non-cached block. When the
+        agent uses no reference docs (or references are disabled),
+        returns the plain agent prompt string — same behaviour as
+        before.
+        """
+        agent_prompt = self._prompts[agent_key]
+        ref_keys = AGENT_REFERENCE_USAGE.get(agent_key, ())
+        ref_keys = tuple(rk for rk in ref_keys if rk in self._references)
+        if not ref_keys:
+            return agent_prompt
+        blocks: list[dict] = []
+        for rk in ref_keys:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": self._references[rk],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
+        blocks.append({"type": "text", "text": agent_prompt})
+        return blocks
 
     async def _call_with_retry(
         self,
         messages: list[dict],
         response_model: type[BaseModel],
-        system: str,
+        system: str | list[dict],
         max_tokens: int = 4096,
+        post_validator: Callable[[BaseModel], str | None] | None = None,
     ) -> BaseModel:
+        """Call Claude with structured-output retry.
+
+        ``post_validator`` is an optional hand-rolled validator that runs
+        after the response parses cleanly into ``response_model``. It
+        returns ``None`` to accept the response, or an English error
+        string describing what is wrong. On error, the response is fed
+        back to the model with the error message so it can self-correct
+        — same retry budget as JSON / pydantic failures.
+        """
         current_messages = list(messages)
         last_error: Exception | None = None
         last_raw: str = ""
@@ -168,7 +397,7 @@ class ClaudeClient:
 
             try:
                 data = json.loads(_strip_json_fences(raw_text))
-                return response_model(**data)
+                parsed = response_model(**data)
             except (json.JSONDecodeError, ValidationError) as e:
                 last_error = e
                 last_raw = raw_text
@@ -178,6 +407,21 @@ class ClaudeClient:
                     e,
                     raw_text[:500],
                 )
+                continue
+
+            if post_validator is not None:
+                validator_msg = post_validator(parsed)
+                if validator_msg is not None:
+                    last_error = ValueError(validator_msg)
+                    last_raw = raw_text
+                    logger.warning(
+                        "Claude response post-validation failed (attempt %d): %s",
+                        attempt + 1,
+                        validator_msg,
+                    )
+                    continue
+
+            return parsed
 
         raise ClaudeError(
             f"Failed to parse Claude response after {CLAUDE_JSON_RETRY + 1} attempts: {last_error}"
@@ -330,10 +574,20 @@ class ClaudeClient:
                 'Respond with JSON: {"workflow": "no-lora", "positive": "...", "negative": "..."}'
             )
 
+        expected_workflow = "single-lora" if character_role else "no-lora"
+
+        def _validator(parsed: BaseModel) -> str | None:
+            return _validate_prompts(
+                response=parsed,  # type: ignore[arg-type]
+                contains_entity=contains_entity,
+                expected_workflow=expected_workflow,
+            )
+
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=GeneratePromptsResponse,
-            system=self._prompts["generate_prompts"],
+            system=self._system_for("generate_prompts"),
+            post_validator=_validator,
         )
         return result  # type: ignore[return-value]
 
@@ -347,7 +601,18 @@ class ClaudeClient:
         character_role: str | None,
         character_config: dict,
         contains_entity: dict | None = None,
+        recent_failure_summaries: list[str] | None = None,
     ) -> EvaluateImageResponse:
+        """Evaluate an image against the 8-point checklist.
+
+        ``recent_failure_summaries`` is an optional newest-first list of
+        short English summaries of the previous rejected attempts for the
+        SAME concept in the current branch. When two or more recent
+        rejections share the same failure mode, Agent 2 is instructed (in
+        its system prompt) to escalate from ``problem="prompt"`` to
+        ``problem="concept"`` instead of asking for a third tag-revision
+        round on a clearly unreachable target.
+        """
         image_b64 = base64.standard_b64encode(image_bytes).decode()
         contains_entity_line = (
             f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
@@ -367,6 +632,19 @@ class ClaudeClient:
                 "Expected character: none (character_role: null — "
                 "no human should appear in this image)\n"
             )
+        if recent_failure_summaries:
+            joined = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(recent_failure_summaries))
+            recent_block = (
+                "\nrecent_failures (newest first, all within the current concept):\n"
+                f"{joined}\n"
+                "If the current image fails for the same reason as any of "
+                "the above and would call for the same prompt-level fix, "
+                'consider emitting problem="concept" instead of '
+                'problem="prompt" — repeated identical prompt revisions '
+                "have not been working.\n"
+            )
+        else:
+            recent_block = ""
         messages = [
             {
                 "role": "user",
@@ -386,7 +664,8 @@ class ClaudeClient:
                             f"{expected_block}"
                             f"Concept: {current_concept}\n"
                             f"{contains_entity_line}\n"
-                            f"Global style: {style_guide.overall_style_positive}\n\n"
+                            f"Global style: {style_guide.overall_style_positive}\n"
+                            f"{recent_block}\n"
                             "Respond with JSON per your instructions."
                         ),
                     },
@@ -411,11 +690,26 @@ class ClaudeClient:
         character_role: str | None,
         character_config: dict,
         contains_entity: dict | None = None,
+        prompting_notes: str | None = None,
     ) -> RevisePromptsResponse:
+        """Revise prompts after a failed verdict.
+
+        ``prompting_notes`` is the cumulative empirical memo for this
+        illustration. In the auto pipeline it is curated by Agent 3 itself
+        across retries via ``prompting_notes_update`` in the response. The
+        prompt treats it as authoritative renderer-specific guidance about
+        this scene's known blind spots. NULL on the first revision attempt
+        of a fresh concept.
+        """
         contains_entity_line = (
             f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
             if contains_entity is not None
             else "contains_entity: null"
+        )
+        notes_line = (
+            f"\nprompting_notes (English-only renderer hints, authoritative):\n{prompting_notes}\n"
+            if prompting_notes
+            else ""
         )
         if character_role:
             char_entry = character_config[character_role]
@@ -433,24 +727,42 @@ class ClaudeClient:
                 "character_role: null (no human in this scene)\n"
                 f"character_baseline_description: {style_guide.character_baseline_description}\n"
             )
+        workflow_line = (
+            f"current_workflow: {current_prompts.workflow}\n"
+            "(keep the same workflow; Agent 3 never switches LoRA mode)\n"
+        )
         user_text = (
             f"{character_block}"
+            f"{workflow_line}"
             f"style_positive: {style_guide.overall_style_positive}\n"
             f"style_negative: {style_guide.overall_style_negative}\n\n"
             f"concept: {current_concept}\n"
             f"{contains_entity_line}\n"
+            f"{notes_line}"
             f"current_positive: {current_prompts.positive}\n"
             f"current_negative: {current_prompts.negative}\n\n"
             f"verdict_problem: {verdict.problem}\n"
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
             f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
-            'Respond with JSON: {"positive": "...", "negative": "..."}'
+            'Respond with JSON: {"workflow": "single-lora"|"no-lora", '
+            '"positive": "...", "negative": "...", '
+            '"prompting_notes_update": "..." or null}'
         )
+        expected_workflow = current_prompts.workflow
+
+        def _validator(parsed: BaseModel) -> str | None:
+            return _validate_prompts(
+                response=parsed,  # type: ignore[arg-type]
+                contains_entity=contains_entity,
+                expected_workflow=expected_workflow,
+            )
+
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=RevisePromptsResponse,
-            system=self._prompts["revise_prompts"],
+            system=self._system_for("revise_prompts"),
+            post_validator=_validator,
         )
         return result  # type: ignore[return-value]
 
@@ -849,7 +1161,7 @@ class ClaudeClient:
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=ManualRevisePromptsResponse,
-            system=self._prompts["manual_revise_prompts"],
+            system=self._system_for("manual_revise_prompts"),
         )
         return result  # type: ignore[return-value]
 
