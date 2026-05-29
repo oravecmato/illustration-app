@@ -341,18 +341,29 @@ class ClaudeClient:
         image_bytes: bytes,
         current_concept: str,
         style_guide: StyleGuide,
-        character_role: str,
+        character_role: str | None,
         character_config: dict,
         contains_entity: dict | None = None,
     ) -> EvaluateImageResponse:
-        char_display = CHARACTER_ROLE_MAP[character_role]
-        char_entry = character_config[character_role]
         image_b64 = base64.standard_b64encode(image_bytes).decode()
         contains_entity_line = (
             f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
             if contains_entity is not None
             else "contains_entity: null"
         )
+        if character_role:
+            char_display = CHARACTER_ROLE_MAP[character_role]
+            char_entry = character_config[character_role]
+            expected_block = (
+                f"Expected character: {char_display} (role: {character_role})\n"
+                f"Expected trigger tags: {char_entry['trigger_tags']}\n"
+            )
+        else:
+            # Entity-alone or no-character scene — no human expected.
+            expected_block = (
+                "Expected character: none (character_role: null — "
+                "no human should appear in this image)\n"
+            )
         messages = [
             {
                 "role": "user",
@@ -369,8 +380,7 @@ class ClaudeClient:
                         "type": "text",
                         "text": (
                             f"Evaluate this anime illustration against the checklist.\n\n"
-                            f"Expected character: {char_display} (role: {character_role})\n"
-                            f"Expected trigger tags: {char_entry['trigger_tags']}\n"
+                            f"{expected_block}"
                             f"Concept: {current_concept}\n"
                             f"{contains_entity_line}\n"
                             f"Global style: {style_guide.overall_style_positive}\n\n"
@@ -395,25 +405,35 @@ class ClaudeClient:
         verdict: EvaluateImageResponse,
         current_concept: str,
         style_guide: StyleGuide,
-        character_role: str,
+        character_role: str | None,
         character_config: dict,
         contains_entity: dict | None = None,
     ) -> RevisePromptsResponse:
-        char_entry = character_config[character_role]
-        char_display = CHARACTER_ROLE_MAP[character_role]
         contains_entity_line = (
             f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
             if contains_entity is not None
             else "contains_entity: null"
         )
+        if character_role:
+            char_entry = character_config[character_role]
+            char_display = CHARACTER_ROLE_MAP[character_role]
+            character_block = (
+                f"character_display: {char_display}\n"
+                f"character_role: {character_role}\n"
+                f"trigger_tags: {char_entry['trigger_tags']}\n"
+                f"outfit_baseline: {char_entry['outfit_baseline']}\n"
+                f"character_baseline_description: {style_guide.character_baseline_description}\n"
+            )
+        else:
+            # Entity-alone or no-character scene — no human in the prompt.
+            character_block = (
+                "character_role: null (no human in this scene)\n"
+                f"character_baseline_description: {style_guide.character_baseline_description}\n"
+            )
         user_text = (
-            f"character_display: {char_display}\n"
-            f"character_role: {character_role}\n"
-            f"trigger_tags: {char_entry['trigger_tags']}\n"
-            f"outfit_baseline: {char_entry['outfit_baseline']}\n"
+            f"{character_block}"
             f"style_positive: {style_guide.overall_style_positive}\n"
-            f"style_negative: {style_guide.overall_style_negative}\n"
-            f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
+            f"style_negative: {style_guide.overall_style_negative}\n\n"
             f"concept: {current_concept}\n"
             f"{contains_entity_line}\n"
             f"current_positive: {current_prompts.positive}\n"
