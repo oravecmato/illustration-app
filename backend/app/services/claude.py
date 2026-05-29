@@ -40,6 +40,31 @@ STRICT_JSON_RETRY_SUFFIX = (
 )
 
 
+def _build_retry_message(previous_raw: str, error: Exception) -> str:
+    """Build a retry user-turn that gives the model the specific failure.
+
+    Distinguishes JSON-parse failures (generic suffix) from semantic
+    ValidationErrors (echo the validator's message back so the model can
+    fix the specific field). Includes a short echo of the previous raw
+    response so the model can self-correct rather than regenerate blindly.
+    """
+    truncated = previous_raw if len(previous_raw) <= 4000 else previous_raw[:4000] + " …[truncated]"
+    if isinstance(error, json.JSONDecodeError):
+        return f"{STRICT_JSON_RETRY_SUFFIX}\n\nYour previous response was:\n```\n{truncated}\n```"
+    # Pydantic ValidationError (or any other semantic failure): tell the
+    # model what specifically failed so it can fix that field. The JSON was
+    # valid — the problem is content, not formatting.
+    return (
+        "\n\nYour previous response was valid JSON but failed validation:\n"
+        f"{error}\n\n"
+        "Re-emit the full JSON object, fixing ONLY the field(s) that the "
+        "error above identifies. Keep every other field byte-for-byte "
+        "identical to your previous response unless fixing the error "
+        "requires changing it. Do not add any prose around the JSON.\n\n"
+        f"Your previous response was:\n```\n{truncated}\n```"
+    )
+
+
 def _strip_json_fences(text: str) -> str:
     """Best-effort recovery for agents that wrap JSON in Markdown fences.
 
@@ -115,14 +140,19 @@ class ClaudeClient:
     ) -> BaseModel:
         current_messages = list(messages)
         last_error: Exception | None = None
+        last_raw: str = ""
 
         for attempt in range(CLAUDE_JSON_RETRY + 1):
             if attempt > 0 and last_error:
                 current_messages = list(messages) + [
                     {
+                        "role": "assistant",
+                        "content": last_raw,
+                    },
+                    {
                         "role": "user",
-                        "content": STRICT_JSON_RETRY_SUFFIX,
-                    }
+                        "content": _build_retry_message(last_raw, last_error),
+                    },
                 ]
 
             response = await self._client.messages.create(
@@ -138,6 +168,7 @@ class ClaudeClient:
                 return response_model(**data)
             except (json.JSONDecodeError, ValidationError) as e:
                 last_error = e
+                last_raw = raw_text
                 logger.warning(
                     "Claude response parse failure (attempt %d): %s; raw=%r",
                     attempt + 1,

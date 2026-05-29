@@ -10,6 +10,17 @@ def _normalize_entity_label(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Collapse all runs of whitespace (incl. newlines) into single spaces.
+
+    Used by the ``scene_excerpt`` substring check across Calls 0b / 4 / 4b
+    (§ 7.1) so that an excerpt with slightly different line-wrap or
+    inter-word spacing than its paragraph source still passes — the spec
+    promises the match is whitespace-tolerant.
+    """
+    return " ".join(text.split())
+
+
 # ── Shared shapes ────────────────────────────────────────────────────────────
 
 
@@ -303,11 +314,12 @@ class BuildStoryResponse(BaseModel):
         if len(set(illus_indices)) != len(illus_indices):
             raise ValueError("illustration scene_index values must be unique")
 
-        # Each scene_excerpt must be a verbatim substring of *some* paragraph block.
+        # Each scene_excerpt must be a verbatim substring of *some* paragraph
+        # block, whitespace-tolerant (§ 7.1 Call 0b rule #3).
         paragraphs = [b.text for b in blocks if isinstance(b, ParagraphBlock)]
-        joined = "\n".join(paragraphs)
+        joined_normalized = _normalize_whitespace("\n".join(paragraphs))
         for ill in self.illustrations:
-            if ill.scene_excerpt not in joined:
+            if _normalize_whitespace(ill.scene_excerpt) not in joined_normalized:
                 raise ValueError(
                     f"scene_excerpt for scene_index={ill.scene_index} is not a verbatim "
                     "substring of any paragraph block"
@@ -505,7 +517,9 @@ class RethinkConceptResponse(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "RethinkConceptResponse":
-        if self.scene_excerpt not in self.paragraph_text:
+        if _normalize_whitespace(self.scene_excerpt) not in _normalize_whitespace(
+            self.paragraph_text
+        ):
             raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
         if not self.narrative_continuity_check.strip():
             raise ValueError("narrative_continuity_check must be a non-empty string")
@@ -546,7 +560,9 @@ class RethinkEnvironmentResponse(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "RethinkEnvironmentResponse":
-        if self.scene_excerpt not in self.paragraph_text:
+        if _normalize_whitespace(self.scene_excerpt) not in _normalize_whitespace(
+            self.paragraph_text
+        ):
             raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
         if not self.narrative_continuity_check.strip():
             raise ValueError("narrative_continuity_check must be a non-empty string")
