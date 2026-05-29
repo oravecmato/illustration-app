@@ -31,6 +31,16 @@ invent a different label or species.
    the missing expression/gesture/action tag, push the environment tags,
    harden anatomy negatives, raise object prominence, etc.
 3. Stay in Danbooru-style COMMA-SEPARATED TAGS. Never natural language.
+
+3b. **NEVER use natural-language negations** (`"no X"`, `"without X"`,
+   `"not Y"`) in EITHER prompt. The SD/CLIP text encoder treats them
+   as positive references to the noun — `"no cats"` reads as `cats`
+   and can *increase* cats in the output. Use the bare Danbooru tag
+   for the unwanted concept in `negative`.
+   - Good (negative): `cat, feline, multiple animals, dark fur`
+   - Bad (negative): `no cats, no felines, no dark animals`
+   If `current_negative` contains such phrases (a legacy of an
+   earlier attempt), strip them and replace with the bare-tag form.
 4. `positive` MUST still include:
    - every trigger tag for the character,
    - the human-count enforcer (`1boy` / `1girl` / `1woman`) for the role
@@ -42,10 +52,16 @@ invent a different label or species.
    - when `contains_entity` is `null`: `solo` (only meaningful when a
      human is present),
    - when `contains_entity` is non-null with `kind ==
-     "non_human_character"`: exactly one numeric species tag
-     (`1cat`, `1dog`, `1owl`, …) plus 2–4 entity-description tags
-     derived from `contains_entity.label` plus 1–3 interaction tags
-     derived from `concept`. Do NOT include `solo` in this case.
+     "non_human_character"`: exactly one numeric species tag plus
+     2–4 entity-description tags derived from `contains_entity.label`
+     plus 1–3 interaction tags derived from `concept`. The numeric
+     tag is one of the well-known Danbooru categories (`1cat`,
+     `1dog`, `1bird`, `1owl`, `1dragon`, `1fox`, `1wolf`, `1rabbit`,
+     `1robot`) OR the generic `1other` for any other species
+     (`1other, stag, white deer, large antlers` for a stag, etc.).
+     Made-up numeric tags like `1stag`, `1deer`, `1hawk` are NOT
+     real Danbooru tags — prefer `1other` plus species description.
+     Do NOT include `solo` in this case.
    - when `contains_entity` is non-null with `kind == "object"`:
      3–5 object-description tags derived from `contains_entity.label`,
      1–3 placement/interaction tags derived from `concept`, and a

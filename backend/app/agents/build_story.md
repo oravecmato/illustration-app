@@ -172,10 +172,35 @@ Treat your environment choice as a contract.
 ## Narrative entities — the unified register
 
 `narrative_entities` is the SINGLE source of truth for every non-human
-character or story-important object the story references. There is no
-separate "companions" list any more. Every non-human entity the story
-features must be declared here and referenced from at most ONE
-illustration slot.
+character or story-important object **that is visually depicted in an
+illustration**. There is no separate "companions" list any more. Every
+non-human entity that appears in any illustration must be declared
+here and referenced from exactly that one illustration slot.
+
+**Off-screen referents are NOT registered.** If a creature or object
+is only mentioned in the prose but no illustration depicts it, do NOT
+add it to `narrative_entities` and do NOT reserve a slot for it.
+Examples that must stay OUT of the register:
+
+- A bear roaring offstage in one paragraph and disappearing into the
+  forest in the next, while the illustrated moment shows only the
+  protagonist reacting — the bear is an off-screen referent. The
+  register has no bear entry; the illustration's
+  `contains_entity_label` is `null`.
+- A messenger pigeon mentioned as having delivered a note before the
+  story begins, where the only illustration is of the protagonist
+  reading the note — no pigeon entry. The note itself may or may
+  not be registered depending on whether the *note* is visually
+  emphasized in the illustration (a `kind="object"` entry).
+- The neighbour's dog that "always barks at dawn" as scene-setting
+  flavour — no entry if no illustration shows the dog.
+
+The register's purpose is to coordinate which slot owns which
+*depicted* entity, so the downstream pipeline knows where to expect
+it. Registering off-screen-only referents creates ghost reservations
+that confuse Agent 4 during concept rewrites and waste slot budget.
+When in doubt: if no illustration will visibly show the thing, leave
+it out of `narrative_entities`.
 
 Each entry has:
 

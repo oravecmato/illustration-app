@@ -2116,8 +2116,21 @@ Hard rules enforced by the prompt and re-checked server-side:
    the illustration level — every entity that appears in any scene
    is also present in `narrative_entities`.
 9. **Entity cadence + per-importance cardinality.** Agent 0b decides
-   which scenes feature an entity. The hard caps (re-checked by the
-   distribution validator, § 7.1 rule #14) are:
+   which scenes feature an entity. Critically, **the
+   `narrative_entities` register is the list of entities that are
+   *visually depicted* in an illustration — not the list of every
+   non-human noun mentioned in the prose.** Off-screen referents
+   (creatures or objects the narration mentions but no illustration
+   actually depicts) MUST NOT be added to the register. Example: a
+   story whose protagonist hears a distant bear roar in one paragraph,
+   reacts to it in the illustrated moment of the next, and then the
+   bear runs off in the following paragraph — without any illustration
+   ever showing the bear — has zero `narrative_entities` for the bear.
+   The character's reaction is depicted; the bear is not. Registering
+   off-screen referents is the leading cause of reserved-but-not-active
+   slots that confuse Agent 4 downstream (see § 7.1 Call 4 rule #7).
+   The hard caps (re-checked by the distribution validator, § 7.1
+   rule #14) are:
    - At most **one** entity with `importance="primary"`
      (`kind="non_human_character"`); when present it appears in
      exactly its `reserved_for_scene_index` and nowhere else.
@@ -2459,22 +2472,42 @@ Hard rules enforced by the prompt and re-checked server-side:
 7. **Entity placement via `entity_action`.** Agent 4 must classify
    what it is doing with this slot's narrative entity by setting the
    `entity_action` discriminator:
-   - `"keep"` — the entity reserved for this slot stays in the new
-     scene. `contains_entity_label` is non-null and matches
-     `current_entity.label`.
+   - `"keep"` — the entity whose `reserved_for_scene_index` equals
+     this slot's `scene_index` is depicted in the new scene.
+     `contains_entity_label` is non-null and matches that
+     reservation's label. **`"keep"` is the correct action whether
+     or not `current_entity_label` was previously non-null** — it
+     covers both "the slot was already showing this entity and the
+     rewrite still does" AND "the slot's reservation existed as a
+     ghost (Agent 0b reserved it but the failed concept didn't
+     depict it) and the rewrite now activates it". The server checks
+     only that the labelled entity is reserved for this slot.
    - `"drop"` — the entity reserved for this slot is intentionally
      removed from the new scene. `contains_entity_label` MUST be
      `null`. The slot stays *ghost-reserved* — the entity may never
      appear in any other slot (entity-side scene lock).
    - `"claim_floating"` — a floating supporting entity (one from
-     `floating_entities`, i.e. `reserved_for_scene_index=null`) is
-     being claimed for this slot. `contains_entity_label` is non-null
-     and matches one of the floating entries; on receipt, the server
-     permanently sets that entity's `reserved_for_scene_index` to
-     this slot.
-   - `"none"` — there is no entity at play (no reservation existed
-     and no claim is being made). `contains_entity_label` MUST be
-     `null`.
+     `floating_entities`, i.e. `reserved_for_scene_index=null` AND
+     `importance="supporting"`) is being claimed for this slot.
+     `contains_entity_label` is non-null and matches one of the
+     floating entries; on receipt, the server permanently sets that
+     entity's `reserved_for_scene_index` to this slot. **Do NOT use
+     `"claim_floating"` for an entity already reserved to this slot
+     — that is `"keep"`.** The server rejects `claim_floating` on a
+     non-supporting or non-floating entity.
+   - `"none"` — there is no entity at play in this rewrite. Use this
+     when (a) no entity is reserved to this slot AND no claim is
+     being made, OR (b) an entity *is* reserved to this slot but the
+     rewrite genuinely leaves it off-screen (purely-referential
+     beat). `contains_entity_label` MUST be `null`; the reservation,
+     if any, remains a ghost on this slot.
+
+   **Decision table for bucket 1 (entity reserved to THIS scene):**
+
+   | Rewrite depicts the reserved entity? | Correct action |
+   |---|---|
+   | Yes | `"keep"` (regardless of whether `current_entity_label` was null) |
+   | No (off-screen referent, dropped, or untouched ghost) | `"none"` if `current_entity_label` was null; `"drop"` if it was non-null |
 
    The server enforces the `entity_action` ↔ `contains_entity_label`
    coherence; mismatches re-prompt up to `CLAUDE_JSON_RETRY` times.
@@ -3308,6 +3341,20 @@ checklist. The image is `ok` only when **all** of the following hold:
 3. **The character's expression, gesture, or action is clearly
    identifiable and matches the concept.** Vague or generic poses →
    `problem="prompt"` with a suggestion to add specifics.
+
+   **Minor-mismatch tolerance.** When the rendered expression is in
+   the same emotional neighbourhood as the concept (e.g., "serene"
+   rendered as a faint smile, "concerned" as "pensive", "calm" as
+   "neutral") AND every other checklist item passes (cast, entity,
+   environment, anatomy, style, safety, composition), accept the
+   image (`ok: true`). Failing the image for nuance-level expression
+   drift while all other axes pass burns retry budget on a difference
+   the next render is unlikely to resolve cleanly. Only reject when
+   the rendered expression *contradicts* the concept's emotional beat
+   (e.g., laughing when the concept says crying; smug when the
+   concept says grieving), or when the gesture/action itself is
+   wrong (e.g., the bow is missing, the hands are in the wrong
+   place).
 4. **The illustration is style-consistent** with `style_guide` — anime/MHA
    look, no realism, no off-style rendering.
 5. **No anatomical deformities** — extra fingers, fused limbs, distorted
@@ -3342,6 +3389,21 @@ baseline includes at minimum:
 
 The exact baseline string lives in `backend/app/constants.py` so it is
 reusable and consistent across agents 1 and 3.
+
+**Hard rule — bare Danbooru tags only; never natural-language
+negations.** Both `positive` and `negative` must contain comma-
+separated bare tags. Natural-language negation phrases like
+`"no cats"`, `"no felines"`, `"no humans"`, `"no dark animals"`,
+`"no trees"` are FORBIDDEN. SD/CLIP text encoders treat such phrases
+as positive references to the noun (the leading `"no"` is largely
+ignored), which can *amplify* the unwanted concept rather than
+suppress it. The correct form is the bare tag of the unwanted
+concept: `cat, feline, dog, multiple animals, dark fur, trees,
+forest`. This rule applies to Agents 1, 3, and 7 in all output, and
+applies to every other agent that emits prompt strings (e.g. when
+Agent 4 sketches a concept it must not paste natural-language
+negations into the concept text either, even though concept text is
+not a prompt).
 
 **Conditional adjustments when `contains_entity_label` is non-null**
 (Agents 1, 3, and 7 apply these on top of the baseline above when the
@@ -3516,12 +3578,29 @@ inanimate items) as supplied in the run's `narrative_entities`
 register.
 
 - **Numeric tagging.** Use Danbooru-style numeric tags for the entity
-  where applicable. For `kind="non_human_character"` use the animal /
-  creature form (`1cat`, `1dog`, `1dragon`, `1robot`). For
-  `kind="object"` use a singular object tag mirroring the label
-  (`1watch`, `1locket`, `1book`, `1lantern`). The human is still tagged
-  with its `1girl` / `1boy` form per role. Do not use `solo` when an
-  entity is present, regardless of kind.
+  where applicable. For `kind="non_human_character"`:
+    - Use a **specific** count tag (`1cat`, `1dog`, `1bird`, `1owl`,
+      `1dragon`, `1fox`, `1wolf`, `1rabbit`, `1robot`) **only** when
+      the species is in this short list of well-trained Danbooru
+      categories.
+    - For everything else — stags, deer, hawks, lynx, otters,
+      jellyfish, chimerical beasts, magical creatures, etc. — use
+      the generic `1other` and then describe the species in 2–4
+      following tags (e.g. `1other, stag, white deer, large antlers,
+      cervid` for "a mysterious white stag"). Made-up numeric tags
+      like `1stag`, `1deer`, `1hawk`, `1otter` are NOT real Danbooru
+      tags; the encoder ignores them and the prompt loses its count
+      enforcer, often producing the wrong species or duplicates.
+    - Whichever numeric tag you use, include exactly ONE (`1cat` OR
+      `1other`, never both).
+
+  For `kind="object"` use a singular object tag mirroring the label
+  (`1watch`, `1locket`, `1book`, `1lantern`). When in doubt about
+  whether the object-count form is a real Danbooru tag, fall back to
+  bare object-description tags without a numeric prefix and rely on
+  the prominence cues below. The human is still tagged with its
+  `1girl` / `1boy` form per role. Do not use `solo` when an entity is
+  present, regardless of kind.
 - **Interaction / placement tagging.** Translate the human-entity
   relationship implied by the concept into concrete Danbooru-style
   tags. For animate entities, examples of the *form* expected (not

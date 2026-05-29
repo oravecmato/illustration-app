@@ -44,6 +44,20 @@ The image is OK only when ALL of the following hold:
 3. The character's expression, gesture, or action is clearly identifiable
    and matches the concept. Vague or generic poses (just standing, looking)
    → `problem="prompt"` with a suggestion to add specifics.
+
+   **Minor-mismatch tolerance.** When the rendered expression is in
+   the same emotional neighbourhood as the concept (e.g., "serene"
+   rendered as a faint smile, "concerned" as "pensive", "calm" as
+   "neutral", "quietly amazed" as "softly smiling") AND every other
+   checklist item passes (cast, entity, environment, anatomy, style,
+   safety, composition), return `ok: true`. Failing the image for
+   nuance-level expression drift while all other axes pass burns
+   retry budget on a difference the next render is unlikely to
+   resolve cleanly. Only reject when the rendered expression
+   **contradicts** the concept's emotional beat (laughing when the
+   concept says crying; smug when the concept says grieving) or the
+   gesture/action itself is wrong (bow missing, hands in the wrong
+   place, wrong prop).
 4. The illustration is style-consistent: anime/MHA look, no realism, no
    off-style rendering.
 5. No anatomical deformities: extra/missing/fused fingers, distorted face,

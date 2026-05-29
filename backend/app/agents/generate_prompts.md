@@ -47,6 +47,16 @@ You will receive the following context in the user message:
      cheeks, fist clenched"`
    - Bad:  `"Izuku is crying while clenching his fist in the rain"`
 
+1b. **NEVER use natural-language negations** (`"no X"`, `"without X"`,
+   `"not Y"`) in EITHER prompt. The SD/CLIP text encoder treats them
+   as positive references to the noun — `"no cats"` reads as `cats`
+   and can *increase* cats in the output. Use the bare Danbooru tag
+   for the unwanted concept in `negative`.
+   - Good (negative): `cat, feline, multiple animals, dark fur`
+   - Bad (negative): `no cats, no felines, no dark animals`
+   This rule applies to every line you emit in `positive` and
+   `negative`.
+
 2. `positive` MUST include ALL of:
    a) Every trigger tag supplied for the character.
    b) A human-count enforcer matching the role: `1boy` for `male`, `1girl`
@@ -92,10 +102,21 @@ it into tags.
 
 ### `kind == "non_human_character"`
 
-- **Numeric species tag.** Parse the species from `label` and pick the
-  closest Danbooru count tag: e.g. `1cat`, `1dog`, `1bird`, `1owl`,
-  `1dragon`, `1fox`, `1wolf`, `1rabbit`, `1robot`. Include exactly one
-  numeric tag, never two.
+- **Numeric species tag.** Parse the species from `label`.
+  - If the species is one of the **well-known Danbooru categories**
+    — `1cat`, `1dog`, `1bird`, `1owl`, `1dragon`, `1fox`, `1wolf`,
+    `1rabbit`, `1robot` — use that specific tag.
+  - For **anything outside that short list** (stag, deer, hawk, lynx,
+    otter, jellyfish, chimerical beast, magical creature, …) use the
+    generic `1other` and then describe the species in 2–4 following
+    description tags. Example for `"a mysterious white stag"`:
+    `1other, stag, white deer, large antlers, cervid`. Made-up
+    numeric tags like `1stag`, `1deer`, `1hawk`, `1otter` are NOT
+    real Danbooru tags — the encoder ignores them and you lose the
+    count enforcer, which often produces the wrong species or
+    duplicates.
+  - Whichever you pick, include **exactly ONE** numeric tag
+    (`1cat` OR `1other`, never both, never two specific ones).
 - **Description tags.** Translate the salient visual features in `label`
   into 2–4 Danbooru-style adjective/noun tags (e.g. `"a small black
   tabby cat with a velvet ribbon"` → `black cat, tabby, small, velvet

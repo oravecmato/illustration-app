@@ -71,10 +71,28 @@ Every entity in `narrative_entities` falls into one of these buckets, and
 each bucket dictates what you may do:
 
 1. **Reserved to THIS scene** (`reserved_for_scene_index ==
-   current_scene_index`): the entity is locked to your slot. This is your
-   default scene anchor. You SHOULD keep it unless there is a strong
-   reason to drop it (in which case the slot becomes entity-less for the
-   remainder of the run — entities are scene-locked and cannot be moved).
+   current_scene_index`): the entity is locked to your slot. Two
+   sub-cases matter:
+   - **Active** — `current_entity_label` matches this entity's label
+     (the failed concept already depicted it). Your default move is
+     `entity_action="keep"` with the same label; you MAY use
+     `entity_action="drop"` (clearing the slot to a ghost) when the
+     entity itself caused the renderer trouble and the rewrite is
+     better off without it.
+   - **Reserved but not yet active** — `current_entity_label` is
+     `null` even though this entity sits in the register reserved to
+     your scene_index (Agent 0b set up the reservation but the
+     failed concept didn't actually depict the entity, often because
+     it was treated as an off-screen referent). Your choices are:
+     `entity_action="keep"` with this entity's label (you decide the
+     rewrite WILL now depict it — activate the reservation), OR
+     `entity_action="none"` (the rewrite still leaves it off-screen
+     and the reservation remains a ghost on this slot).
+     **`claim_floating` is WRONG here** — that action is reserved
+     for floating supporting entities (bucket 3 below), not for
+     entities already reserved to your slot. If you pick
+     `claim_floating` on a non-floating reserved entity, the server
+     rejects the rewrite and the branch fails.
 
 2. **Reserved to a DIFFERENT scene** (`reserved_for_scene_index` is an
    integer ≠ `current_scene_index`): the entity belongs to another slot.
@@ -145,18 +163,35 @@ A single JSON object with NINE fields:
    `"none"`. This is a discriminator the server uses to validate
    `contains_entity_label` against the live `narrative_entities` register
    atomically. Pick it according to:
-   - `"keep"` — `current_entity_label` is non-null AND your rewrite still
-     contains the same entity. `contains_entity_label` MUST equal
-     `current_entity_label`.
+   - `"keep"` — the entity in `narrative_entities` whose
+     `reserved_for_scene_index == current_scene_index` is depicted
+     in your rewrite. `contains_entity_label` MUST equal that
+     entity's label. **This is the correct action whether
+     `current_entity_label` was previously non-null (the slot was
+     already showing the entity) OR `null` (the reservation existed
+     as a ghost and the rewrite now activates it).** The server
+     check only verifies that the labelled entity's reservation
+     matches this slot.
    - `"drop"` — `current_entity_label` is non-null AND your rewrite no
      longer contains that entity (and you are not claiming a different
      one). `contains_entity_label` MUST be `null`.
-   - `"claim_floating"` — your rewrite contains a floating supporting
-     entity (bucket 3 above). `contains_entity_label` MUST be that
-     entity's verbatim label. Note: you may claim regardless of whether
+   - `"claim_floating"` — your rewrite contains a **floating
+     supporting** entity (bucket 3 above:
+     `importance="supporting"` AND `reserved_for_scene_index == null`).
+     `contains_entity_label` MUST be that entity's verbatim label.
+     Note: you may claim regardless of whether
      `current_entity_label` was null or non-null (slot recycling).
-   - `"none"` — `current_entity_label` is `null` AND your rewrite has no
-     entity. `contains_entity_label` MUST be `null`.
+     **Do NOT use this action for an entity already reserved to your
+     scene_index** — that's `"keep"`. The server rejects
+     `claim_floating` on a non-supporting or already-reserved
+     entity.
+   - `"none"` — your rewrite has no entity. Use this when:
+     (a) no entity is reserved to this slot AND no claim is being
+     made (no entity at play), OR
+     (b) an entity IS reserved to this slot but your rewrite
+     genuinely leaves it off-screen (the bucket 1 "reserved but
+     not active" sub-case where you choose to keep it ghosted).
+     `contains_entity_label` MUST be `null`.
 8. `contains_entity_label` — either `null` or the VERBATIM `label` of an
    entry in `narrative_entities`. Must be consistent with
    `entity_action` per the table above. The server validates this

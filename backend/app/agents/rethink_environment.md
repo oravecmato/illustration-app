@@ -63,7 +63,20 @@ and concept rethinks must honour it.
 Identical to Agent 4. Each entity in `narrative_entities` is one of:
 
 1. **Reserved to THIS scene** (`reserved_for_scene_index ==
-   current_scene_index`): default anchor, SHOULD keep, MAY drop.
+   current_scene_index`):
+   - **Active** (`current_entity_label` matches this entity):
+     default anchor, SHOULD keep (`entity_action="keep"`), MAY drop.
+   - **Reserved but not active** (`current_entity_label` is `null`
+     even though the entity sits in the register reserved to your
+     `scene_index`): choose `entity_action="keep"` with this
+     entity's label (your rewrite WILL depict it — activates the
+     reservation) OR `entity_action="none"` (rewrite leaves it
+     off-screen; the reservation stays a ghost).
+     **`claim_floating` is WRONG in either sub-case** — that action
+     is reserved for floating supporting entities (bucket 3), not
+     for entities already reserved to your slot. The server rejects
+     `claim_floating` on a non-supporting or already-reserved
+     entity.
 2. **Reserved to a DIFFERENT scene**: MUST NOT include.
 3. **Floating supporting** (`importance == "supporting"` AND
    `reserved_for_scene_index == null`): MAY claim. Claiming locks the
