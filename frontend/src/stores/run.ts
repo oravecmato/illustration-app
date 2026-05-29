@@ -98,7 +98,9 @@ export const useRunStore = defineStore("run", () => {
 
   function isParagraphRegenerating(paragraphIndex: number): boolean {
     const ill = illustrationByParagraph.value.get(paragraphIndex);
-    return ill?.state === "RETHINKING_CONCEPT";
+    return (
+      ill?.state === "RETHINKING_CONCEPT" || ill?.state === "RETHINKING_ENVIRONMENT"
+    );
   }
 
   function isParagraphTranslating(paragraphIndex: number): boolean {
@@ -167,19 +169,27 @@ export const useRunStore = defineStore("run", () => {
         }
         break;
       }
-      case "illustration_companion_updated": {
-        // Agent 4 may keep/drop/swap the companion during a rewrite.
-        // Mutate the existing illustration object in place so the
-        // IllustrationCard re-renders the companion subtitle without
-        // remounting. (§ 9.2.2)
+      case "illustration_entity_updated": {
+        // Agent 4 / 4b may keep / drop / claim_floating the scene's
+        // entity during a rewrite. Mutate the illustration's
+        // contains_entity_label in place so the IllustrationCard
+        // re-renders the entity subtitle without remounting. (§ 9.2.2)
         const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {
-          ill.companion = event.data.companion;
+          ill.contains_entity_label = event.data.contains_entity_label;
         }
         break;
       }
+      case "illustration_environment_updated": {
+        // Agent 4b swapped the locked environment for this slot. The
+        // visible scene_excerpt / current_concept arrive via the next
+        // illustration_state event; nothing to mutate on the local
+        // Illustration model here (the env label lives on the Run row
+        // and is not surfaced through IllustrationResponse).
+        break;
+      }
       case "illustration_role_updated": {
-        // Agent 4 changed character_role (e.g., human → companion-alone).
+        // Agent 4 / 4b changed character_role (e.g., human → entity-alone).
         // Update the illustration's role in place.
         const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {

@@ -29,7 +29,7 @@ function makeIllustration(messages: ManualMessage[]): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    companion: null,
+    contains_entity_label: null,
     manual_attempts: messages.filter((m) => m.role === "image").length,
     manual_session: {
       messages,

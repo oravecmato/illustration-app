@@ -47,7 +47,8 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    companion: null,
+    contains_entity_label: null,
+    current_workflow: null,
     ...overrides,
   };
 }
@@ -356,39 +357,39 @@ describe("runStore", () => {
     expect(store.isParagraphRegenerating(0)).toBe(true);
   });
 
-  it("illustration_companion_updated sets companion on the matching illustration", () => {
+  it("illustration_entity_updated sets contains_entity_label on the matching illustration", () => {
     const store = useRunStore();
     store.handleSseEvent({
       type: "snapshot",
       data: {
         run: makeRun(),
-        illustrations: [makeIllustration({ id: "ill-1", companion: null })],
+        illustrations: [makeIllustration({ id: "ill-1", contains_entity_label: null })],
       },
     });
 
     const originalRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
 
     store.handleSseEvent({
-      type: "illustration_companion_updated",
+      type: "illustration_entity_updated",
       data: {
         illustration_id: "ill-1",
         scene_index: 0,
-        companion: {
-          description: "a small black cat",
-          interaction: "curled on her lap",
+        contains_entity_label: "a small black cat",
+        entity: {
+          label: "a small black cat",
+          kind: "non_human_character",
+          importance: "primary",
+          reserved_for_scene_index: 0,
         },
       },
     });
 
     const afterRef = store.illustrations.find((i: Illustration) => i.id === "ill-1");
     expect(afterRef).toBe(originalRef); // same object identity
-    expect(afterRef?.companion).toEqual({
-      description: "a small black cat",
-      interaction: "curled on her lap",
-    });
+    expect(afterRef?.contains_entity_label).toBe("a small black cat");
   });
 
-  it("illustration_companion_updated can drop a companion to null", () => {
+  it("illustration_entity_updated can drop the scene entity (label → null)", () => {
     const store = useRunStore();
     store.handleSseEvent({
       type: "snapshot",
@@ -397,19 +398,24 @@ describe("runStore", () => {
         illustrations: [
           makeIllustration({
             id: "ill-1",
-            companion: { description: "a cat", interaction: "asleep" },
+            contains_entity_label: "a small black cat",
           }),
         ],
       },
     });
 
     store.handleSseEvent({
-      type: "illustration_companion_updated",
-      data: { illustration_id: "ill-1", scene_index: 0, companion: null },
+      type: "illustration_entity_updated",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        contains_entity_label: null,
+        entity: null,
+      },
     });
 
     const ill = store.illustrations.find((i: Illustration) => i.id === "ill-1");
-    expect(ill?.companion).toBeNull();
+    expect(ill?.contains_entity_label).toBeNull();
   });
 
   it("reset() clears run and illustrations", () => {

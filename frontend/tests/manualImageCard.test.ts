@@ -17,7 +17,7 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    companion: null,
+    contains_entity_label: null,
     manual_attempts: 1,
     ...overrides,
   };

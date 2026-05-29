@@ -31,7 +31,8 @@ function makeIllustration(overrides: Partial<Illustration> = {}): Illustration {
     concept_attempt: 1,
     prompt_attempt: 1,
     image_url: null,
-    companion: null,
+    current_workflow: null,
+    contains_entity_label: null,
     ...overrides,
   };
 }
@@ -198,25 +199,22 @@ describe("IllustrationCard", () => {
     expect(skeleton.exists()).toBe(true);
   });
 
-  it("does not render companion subtitle when companion is null", () => {
+  it("does not render entity subtitle when contains_entity_label is null", () => {
     const wrapper = mountCard({
-      props: { illustration: makeIllustration({ companion: null }) },
+      props: { illustration: makeIllustration({ contains_entity_label: null }) },
     });
-    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
+    expect(wrapper.find(".entity-subtitle").exists()).toBe(false);
   });
 
-  it("renders companion subtitle when companion is present", () => {
+  it("renders entity subtitle when contains_entity_label is set", () => {
     const wrapper = mountCard({
       props: {
         illustration: makeIllustration({
-          companion: {
-            description: "a small black cat",
-            interaction: "curled on her lap",
-          },
+          contains_entity_label: "a small black cat",
         }),
       },
     });
-    const subtitle = wrapper.find(".companion-subtitle");
+    const subtitle = wrapper.find(".entity-subtitle");
     expect(subtitle.exists()).toBe(true);
     expect(subtitle.text()).toContain("V scéne je tiež");
     expect(subtitle.text()).toContain("a small black cat");
@@ -291,26 +289,23 @@ describe("IllustrationCard", () => {
     expect(wrapper.findComponent({ name: "ManualChatPanel" }).exists()).toBe(false);
   });
 
-  it("reactively updates companion subtitle when companion changes in place", async () => {
-    // Mirrors the runStore behavior for illustration_companion_updated:
-    // the same object's companion field is mutated; the card should
-    // re-render the subtitle without remounting.
-    const illustration = reactive(makeIllustration({ companion: null }));
+  it("reactively updates entity subtitle when contains_entity_label changes in place", async () => {
+    // Mirrors the runStore behavior for illustration_entity_updated:
+    // the same object's contains_entity_label field is mutated; the
+    // card should re-render the subtitle without remounting.
+    const illustration = reactive(makeIllustration({ contains_entity_label: null }));
     const wrapper = mountCard({
       props: { illustration },
     });
-    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
+    expect(wrapper.find(".entity-subtitle").exists()).toBe(false);
 
-    illustration.companion = {
-      description: "a brass clockwork owl",
-      interaction: "perched on his shoulder",
-    };
+    illustration.contains_entity_label = "a brass clockwork owl";
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".companion-subtitle").exists()).toBe(true);
+    expect(wrapper.find(".entity-subtitle").exists()).toBe(true);
     expect(wrapper.text()).toContain("a brass clockwork owl");
 
-    illustration.companion = null;
+    illustration.contains_entity_label = null;
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".companion-subtitle").exists()).toBe(false);
+    expect(wrapper.find(".entity-subtitle").exists()).toBe(false);
   });
 });

@@ -23,13 +23,23 @@ export interface BriefCharacter {
   short_description: string;
 }
 
-export interface BriefCompanion {
-  description: string;
+export interface NonHumanEntityHint {
+  /** Concrete, visualizable English label (e.g. "a small black cat",
+   *  "the gold pocket watch"). For animate beings the label must be
+   *  non-humanoid; objects are exempt from that rule. */
+  label: string;
+  /** Short free-form English phrase the storyteller uses to decide
+   *  importance (e.g. "ally", "antagonist", "sentimental keepsake"). */
+  role_in_story: string;
 }
 
 export interface CollectedBrief {
   characters: BriefCharacter[];
-  companions: BriefCompanion[];
+  /** Optional pool of non-human entity hints (animals, creatures,
+   *  story-important objects). Promoted by Agent 0b into the run-level
+   *  narrative_entities register. */
+  non_human_entities: NonHumanEntityHint[];
+  main_character_role: CharacterRole;
   topic: string;
   notes: string;
 }
@@ -86,6 +96,7 @@ export type IllustrationState =
   | "EVALUATING"
   | "REVISING_PROMPTS"
   | "RETHINKING_CONCEPT"
+  | "RETHINKING_ENVIRONMENT"
   | "MANUAL_CHATTING"
   | "MANUAL_GENERATING_PROMPTS"
   | "MANUAL_RENDERING"
@@ -163,9 +174,18 @@ export interface Run {
   error_message: string | null;
 }
 
-export interface Companion {
-  description: string;
-  interaction: string;
+export interface Environment {
+  /** Short locale-specific label (e.g. "obývačka", "auto"). */
+  label: string;
+  kind: "indoor" | "outdoor" | "dual";
+  aspect: "single" | "inside" | "outside";
+}
+
+export interface NarrativeEntity {
+  label: string;
+  kind: "non_human_character" | "object";
+  importance: "primary" | "secondary" | "supporting";
+  reserved_for_scene_index: number | null;
 }
 
 export interface Illustration {
@@ -182,7 +202,9 @@ export interface Illustration {
   concept_attempt: number;
   prompt_attempt: number;
   image_url: string | null;
-  companion: Companion | null;
+  /** Label of the NarrativeEntity (non-human character or object)
+   *  visually present in this scene; null when the scene has no entity. */
+  contains_entity_label: string | null;
   manual_attempts?: number;
   manual_session?: ManualSessionSummary | null;
 }
@@ -220,10 +242,19 @@ export interface IllustrationFailedEvent {
   error_message: string;
 }
 
-export interface IllustrationCompanionUpdatedEvent {
+export interface IllustrationEntityUpdatedEvent {
   illustration_id: string;
   scene_index: number;
-  companion: Companion | null;
+  contains_entity_label: string | null;
+  /** Full entity dict from the run's narrative_entities register, or
+   *  null when the scene's entity was dropped. */
+  entity: NarrativeEntity | null;
+}
+
+export interface IllustrationEnvironmentUpdatedEvent {
+  illustration_id: string;
+  scene_index: number;
+  environment: Environment;
 }
 
 export interface IllustrationRoleUpdatedEvent {
@@ -306,7 +337,8 @@ export type SseEvent =
   | { type: "illustration_state"; data: IllustrationStateEvent }
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
-  | { type: "illustration_companion_updated"; data: IllustrationCompanionUpdatedEvent }
+  | { type: "illustration_entity_updated"; data: IllustrationEntityUpdatedEvent }
+  | { type: "illustration_environment_updated"; data: IllustrationEnvironmentUpdatedEvent }
   | { type: "illustration_role_updated"; data: IllustrationRoleUpdatedEvent }
   | { type: "illustration_manual_started"; data: IllustrationManualStartedEvent }
   | { type: "manual_message_appended"; data: ManualMessageAppendedEvent }

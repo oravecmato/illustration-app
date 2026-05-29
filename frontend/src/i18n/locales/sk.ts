@@ -29,6 +29,7 @@ export default {
       EVALUATING: 'Hodnotenie',
       REVISING_PROMPTS: 'Úprava promptov',
       RETHINKING_CONCEPT: 'Prepracovanie konceptu',
+      RETHINKING_ENVIRONMENT: 'Prepracovanie prostredia',
       MANUAL_CHATTING: 'Spoločná tvorba',
       MANUAL_GENERATING_PROMPTS: 'Pripravujem prompty (manuál)',
       MANUAL_RENDERING: 'Kreslím (manuál)',
@@ -37,7 +38,7 @@ export default {
       CANCELLED: 'Zrušené',
     },
     currentConcept: 'Koncept',
-    companion_subtitle: 'V scéne je tiež: {description}',
+    entity_subtitle: 'V scéne je tiež: {label}',
     attempt: 'pokus {current}/{max}',
     manual: {
       title: 'Spoločná tvorba',

@@ -31,8 +31,8 @@
       {{ t('illustration.attempt', { current: attemptNumber, max: 3 }) }}
     </div>
 
-    <div v-if="illustration.companion" class="companion-subtitle">
-      {{ t('illustration.companion_subtitle', { description: illustration.companion.description }) }}
+    <div v-if="illustration.contains_entity_label" class="entity-subtitle">
+      {{ t('illustration.entity_subtitle', { label: illustration.contains_entity_label }) }}
     </div>
 
     <div v-if="viewMode !== 'chat'" class="image-slot">
@@ -83,7 +83,12 @@ const runStore = useRunStore();
 
 const TERMINAL_STATES: IllustrationState[] = ["COMPLETED", "FAILED", "CANCELLED"];
 
-const ATTEMPT_STATES: IllustrationState[] = ["RENDERING", "REVISING_PROMPTS", "RETHINKING_CONCEPT"];
+const ATTEMPT_STATES: IllustrationState[] = [
+  "RENDERING",
+  "REVISING_PROMPTS",
+  "RETHINKING_CONCEPT",
+  "RETHINKING_ENVIRONMENT",
+];
 
 const MANUAL_STATES: IllustrationState[] = [
   "MANUAL_CHATTING",
@@ -179,7 +184,10 @@ const showHeaderSpinner = computed(
 const showAttemptCounter = computed(() => ATTEMPT_STATES.includes(props.illustration.state));
 
 const attemptNumber = computed(() => {
-  if (props.illustration.state === "RETHINKING_CONCEPT") {
+  if (
+    props.illustration.state === "RETHINKING_CONCEPT" ||
+    props.illustration.state === "RETHINKING_ENVIRONMENT"
+  ) {
     return props.illustration.concept_attempt;
   }
   return props.illustration.prompt_attempt;
@@ -251,7 +259,7 @@ const attemptNumber = computed(() => {
   margin-bottom: 6px;
 }
 
-.companion-subtitle {
+.entity-subtitle {
   font-size: 0.8em;
   color: #777;
   margin-bottom: 12px;

@@ -49,9 +49,10 @@ function makeBrief(): CollectedBrief {
     characters: [
       { role: "male", name_in_story: "Adam", short_description: "chlapec so zelenými vlasmi" },
     ],
+    main_character_role: "male",
     topic: "prvý deň v škole",
     notes: "",
-    companions: [],
+    non_human_entities: [],
   };
 }
 
