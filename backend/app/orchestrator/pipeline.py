@@ -35,11 +35,9 @@ async def run_pipeline(
     cancel_flag: asyncio.Event,
     character_config: dict | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-    companions_pool: list[str] | None = None,
 ) -> None:
     """Orchestrate the per-illustration branches for an already-authored run."""
     char_config = character_config or {}
-    pool = companions_pool or []
 
     try:
         style_guide = StyleGuide(**json.loads(run.style_guide_json))
@@ -102,7 +100,6 @@ async def run_pipeline(
                             source_language=run.source_language,
                             story_blocks=story_blocks,
                             story_lock=story_lock,
-                            companions_pool=pool,
                         )
                         # Sync state back to the in-memory illustration for counting
                         ill.state = branch_ill.state
@@ -122,7 +119,6 @@ async def run_pipeline(
                         source_language=run.source_language,
                         story_blocks=story_blocks,
                         story_lock=story_lock,
-                        companions_pool=companions_pool,
                     )
 
         await asyncio.gather(*[run_with_semaphore(ill) for ill in illustrations])
@@ -210,14 +206,7 @@ def _update_snapshot(event_bus: EventBus, run: Run, illustrations) -> None:
                     "concept_attempt": ill.concept_attempt,
                     "prompt_attempt": ill.prompt_attempt,
                     "image_url": None,
-                    "companion": (
-                        {
-                            "description": ill.companion_description,
-                            "interaction": ill.companion_interaction,
-                        }
-                        if ill.companion_description is not None
-                        else None
-                    ),
+                    "contains_entity_label": ill.contains_entity_label,
                 }
                 for ill in illustrations
             ],

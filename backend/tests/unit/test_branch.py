@@ -117,8 +117,11 @@ def make_illustration(run_id="run-1", scene_index=0, character_role="male"):
     ill.prompt_attempt = 1
     ill.image_path = None
     ill.error_message = None
-    ill.companion_description = None
-    ill.companion_interaction = None
+    ill.contains_entity_label = None
+    ill.last_verdict_json = None
+    ill.current_prompts_json = None
+    ill.environment_label = None
+    ill.environment_aspect = None
     ill.current_workflow = None
     return ill
 
@@ -150,6 +153,16 @@ async def run_branch(illustration, style_guide, claude, runpod, cancel_flag=None
 
     repo = AsyncMock()
     repo.update_illustration = AsyncMock(side_effect=lambda ill, **kwargs: _apply(ill, **kwargs))
+    # branch._load_entities() reads run_obj.narrative_entities_json; give it a
+    # real string so json.loads() works during rethink_concept paths.
+    stub_run = MagicMock()
+    stub_run.narrative_entities_json = "[]"
+    stub_run.environments_json = "[]"
+    stub_run.story_blocks_json = None
+    stub_run.main_character_role = "male"
+    repo.get_run = AsyncMock(return_value=stub_run)
+    repo.update_run = AsyncMock(return_value=stub_run)
+    repo.session = MagicMock()
     event_bus = AsyncMock()
 
     if cancel_flag is None:
@@ -298,6 +311,14 @@ async def test_character_lora_from_character_config():
 
     repo = AsyncMock()
     repo.update_illustration = AsyncMock(side_effect=lambda i, **kwargs: _apply(i, **kwargs))
+    stub_run = MagicMock()
+    stub_run.narrative_entities_json = "[]"
+    stub_run.environments_json = "[]"
+    stub_run.story_blocks_json = None
+    stub_run.main_character_role = "female"
+    repo.get_run = AsyncMock(return_value=stub_run)
+    repo.update_run = AsyncMock(return_value=stub_run)
+    repo.session = MagicMock()
     event_bus = AsyncMock()
 
     workflow_template = {
@@ -353,7 +374,7 @@ async def test_character_lora_from_character_config():
 def _make_env_repo():
     """Build a repo mock whose ``get_run`` returns a run with locked envs.
 
-    The run-level fields ``environments_json``, ``reserved_entities_json``,
+    The run-level fields ``environments_json``, ``narrative_entities_json``,
     and ``main_character_role`` are what ``_do_environment_rethink``
     reads from the DB.
     """
@@ -369,7 +390,7 @@ def _make_env_repo():
             {"label": "záhrada", "kind": "outdoor", "aspect": "single"},
         ]
     )
-    fake_run.reserved_entities_json = "[]"
+    fake_run.narrative_entities_json = "[]"
     fake_run.story_blocks_json = None
 
     repo = AsyncMock()

@@ -20,7 +20,6 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     CollectedBrief,
-    companion_in_pool,
     validate_illustration_distribution,
 )
 from app.services.claude import ClaudeClient, ClaudeError
@@ -50,7 +49,9 @@ class FinalizeResult:
     story_blocks: list[dict]
     style_guide: dict
     illustrations: list[dict]
-    companions_pool: list[str]
+    # Full register of NarrativeEntity dicts (label, kind, importance,
+    # reserved_for_scene_index) — replaces the legacy companions_pool.
+    narrative_entities: list[dict]
 
 
 class SessionService:
@@ -218,7 +219,7 @@ class SessionService:
             "topic_short": topic_short,
             "characters": brief.characters,
             "main_character_role": brief.main_character_role,
-            "companions": brief.companions,
+            "non_human_entities": brief.non_human_entities,
             "topic": brief.topic,
             "notes": brief.notes,
         }
@@ -228,7 +229,6 @@ class SessionService:
         # correct course. Total attempts = 1 + BUILD_STORY_VALIDATOR_RETRY.
         # Network/parse failures (ClaudeError) are NOT retried here — the
         # Anthropic call already retries internally for JSON parse issues.
-        pool = [c.description for c in brief.companions]
         story: BuildStoryResponse | None = None
         last_validator_msg: str | None = None
         max_attempts = 1 + BUILD_STORY_VALIDATOR_RETRY
@@ -246,41 +246,23 @@ class SessionService:
                 )
                 raise SessionError("STORY_BUILD_FAILED", str(e)) from e
 
-            # Server-side pool fidelity: every companion attached to an
-            # illustration must reference an entry in the brief's
-            # companions pool. The pool may be empty, in which case no
-            # illustration may have a companion.
-            pool_violation: str | None = None
-            for ill in story.illustrations:
-                if ill.companion is None:
-                    continue
-                if not companion_in_pool(ill.companion.description, pool):
-                    pool_violation = (
-                        f"Illustration scene_index={ill.scene_index} proposes "
-                        f"companion '{ill.companion.description}' which is not "
-                        f"in the agreed companions pool {pool}. Use only "
-                        f"companions from that pool, or omit companion."
-                    )
-                    break
-
+            # Cross-illustration distribution rules (auto pipeline only):
+            # every cast role >= 1, main >= 2, no side > main, no-human
+            # cap of 1/5, narrative_entity quotas + scene lock. See
+            # ``validate_illustration_distribution`` in schemas.claude
+            # for the full list.
             distribution_violation: str | None = None
-            if pool_violation is None:
-                # Cross-illustration distribution rules (auto pipeline
-                # only): every cast role >= 1, main >= 2, no side > main,
-                # no-human cap of 1/5, primary/secondary NH-character
-                # placement. See ``validate_illustration_distribution``
-                # in schemas.claude for the full list.
-                try:
-                    validate_illustration_distribution(
-                        brief, story.illustrations, story.reserved_entities
-                    )
-                except ValueError as e:
-                    distribution_violation = str(e)
+            try:
+                validate_illustration_distribution(
+                    brief, story.illustrations, story.narrative_entities
+                )
+            except ValueError as e:
+                distribution_violation = str(e)
 
-            if pool_violation is None and distribution_violation is None:
+            if distribution_violation is None:
                 break  # Valid output — proceed to persistence.
 
-            last_validator_msg = pool_violation or distribution_violation
+            last_validator_msg = distribution_violation
             logger.warning(
                 "Agent 0b attempt %d/%d rejected by server-side validator: %s",
                 attempt,
@@ -288,10 +270,7 @@ class SessionService:
                 last_validator_msg,
             )
             if attempt == max_attempts:
-                if pool_violation is not None:
-                    msg = f"Agent 0b output violates pool fidelity: {pool_violation}"
-                else:
-                    msg = f"Agent 0b output violates distribution rules: {distribution_violation}"
+                msg = f"Agent 0b output violates distribution rules: {distribution_violation}"
                 await self.repo.update_session(
                     s,
                     state=SessionState.FAILED,
@@ -332,8 +311,8 @@ class SessionService:
             environments_json=_json.dumps(
                 [e.model_dump() for e in story.environments], ensure_ascii=False
             ),
-            reserved_entities_json=_json.dumps(
-                [e.model_dump() for e in story.reserved_entities], ensure_ascii=False
+            narrative_entities_json=_json.dumps(
+                [e.model_dump() for e in story.narrative_entities], ensure_ascii=False
             ),
             id=run_id,
         )
@@ -348,12 +327,7 @@ class SessionService:
                 paragraph_index=paragraph_index_by_scene[ill.scene_index],
                 concept=ill.concept_localized if ill.concept_localized else ill.concept,
                 character_role=ill.character_role,
-                companion_description=(
-                    ill.companion.description if ill.companion is not None else None
-                ),
-                companion_interaction=(
-                    ill.companion.interaction if ill.companion is not None else None
-                ),
+                contains_entity_label=ill.contains_entity_label,
                 environment_label=env.label,
                 environment_aspect=env.aspect,
             )
@@ -369,14 +343,7 @@ class SessionService:
                     "concept_attempt": row.concept_attempt,
                     "prompt_attempt": row.prompt_attempt,
                     "image_url": None,
-                    "companion": (
-                        {
-                            "description": row.companion_description,
-                            "interaction": row.companion_interaction,
-                        }
-                        if row.companion_description is not None
-                        else None
-                    ),
+                    "contains_entity_label": row.contains_entity_label,
                 }
             )
 
@@ -392,5 +359,5 @@ class SessionService:
             story_blocks=[b.model_dump() for b in story.story_blocks],
             style_guide=story.style_guide.model_dump(),
             illustrations=illustrations,
-            companions_pool=[c.description for c in brief.companions],
+            narrative_entities=[e.model_dump() for e in story.narrative_entities],
         )

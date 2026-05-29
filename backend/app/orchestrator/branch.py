@@ -10,11 +10,9 @@ from app.db.models import Illustration, IllustrationState
 from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
 from app.schemas.claude import (
-    Companion,
     Environment,
     StyleGuide,
-    _normalize_env_label,
-    companion_in_pool,
+    _normalize_entity_label,
 )
 from app.services.claude import ClaudeClient
 from app.services.images import save_image
@@ -40,22 +38,41 @@ async def run_branch(
     source_language: str = "sk",
     story_blocks: list[dict] | None = None,
     story_lock: asyncio.Lock | None = None,
-    companions_pool: list[str] | None = None,
 ) -> None:
-    """Run the state machine for a single illustration branch."""
+    """Run the state machine for a single illustration branch.
+
+    The unified narrative_entities register is read from the Run row on
+    every iteration (no in-process cache) so concurrent branches see each
+    other's ``claim_floating`` writes immediately. Mutations to the
+    register are serialised by ``story_lock``.
+    """
     char_config = character_config or {}
     character_role = illustration.character_role
     blocks = story_blocks if story_blocks is not None else []
     lock = story_lock or asyncio.Lock()
-    pool = companions_pool or []
 
-    def _current_companion() -> Companion | None:
-        if illustration.companion_description and illustration.companion_interaction:
-            return Companion(
-                description=illustration.companion_description,
-                interaction=illustration.companion_interaction,
-            )
+    async def _load_entities() -> list[dict]:
+        """Read the current narrative_entities list from the run row."""
+        run_obj = await repo.get_run(illustration.run_id)
+        if run_obj is None or run_obj.narrative_entities_json is None:
+            return []
+        return json.loads(run_obj.narrative_entities_json)
+
+    def _find_entity(entities: list[dict], label: str | None) -> dict | None:
+        if label is None:
+            return None
+        norm = _normalize_entity_label(label)
+        for e in entities:
+            if _normalize_entity_label(e["label"]) == norm:
+                return e
         return None
+
+    async def _current_entity() -> dict | None:
+        """The NarrativeEntity dict currently attached to this slot, or None."""
+        if not illustration.contains_entity_label:
+            return None
+        entities = await _load_entities()
+        return _find_entity(entities, illustration.contains_entity_label)
 
     async def transition(state: IllustrationState, **extra) -> None:
         await repo.update_illustration(illustration, state=state, **extra)
@@ -113,10 +130,12 @@ async def run_branch(
                 concept_attempt=concept_attempt,
                 prompt_attempt=1,
             )
-            prev_companion = _current_companion()
+            prev_entity_label = illustration.contains_entity_label
+            entities_snapshot = await _load_entities()
             try:
                 rethink_result = await claude.rethink_concept(
                     source_language=source_language,
+                    current_scene_index=illustration.scene_index,
                     current_concept=illustration.current_concept,
                     verdict=_load_last_verdict(illustration),
                     current_scene_excerpt=illustration.scene_excerpt,
@@ -124,8 +143,8 @@ async def run_branch(
                     story_blocks=blocks,
                     current_paragraph_index=illustration.paragraph_index,
                     character_role=character_role,
-                    current_companion=prev_companion,
-                    companions_pool=pool,
+                    current_entity_label=prev_entity_label,
+                    narrative_entities=entities_snapshot,
                 )
             except Exception as e:
                 logger.error("rethink_concept failed: %s", e)
@@ -135,7 +154,7 @@ async def run_branch(
                 )
                 return
 
-            # Check if character_role changed (e.g., human scene → companion-alone)
+            # Check if character_role changed
             role_changed = rethink_result.character_role != character_role
             if role_changed:
                 # Update local character_role and emit event
@@ -149,32 +168,79 @@ async def run_branch(
                     },
                 )
 
-            # Server-side pool fidelity: Agent 4 may only set a companion
-            # whose description is present in the agreed pool. If the pool
-            # is empty, the companion must be null.
-            new_companion: Companion | None = rethink_result.companion
-            if new_companion is not None and not companion_in_pool(new_companion.description, pool):
-                msg = (
-                    f"Agent 4 proposed companion '{new_companion.description}' that is "
-                    f"not in the agreed pool {pool}."
-                )
-                logger.error(msg)
-                await transition(
-                    IllustrationState.FAILED,
-                    error_message=msg,
-                )
-                return
-
-            # Apply rewrite: mutate the shared in-memory story_blocks,
-            # persist the new story_blocks_json on the run, update the
-            # illustration's excerpt + concept + companion, then publish
-            # paragraph_updated BEFORE the next illustration_state event
-            # so the frontend renders the new paragraph before clearing
-            # its regenerating-skeleton (§ 9.5). Publish
-            # illustration_companion_updated only when the companion
-            # actually changed.
+            # Defence-in-depth: validate entity_action ↔ entity state under
+            # the story lock (so a concurrent claim_floating on the same
+            # entity cannot race with us), then apply the run-level
+            # narrative_entities mutation atomically with the paragraph
+            # rewrite. The Pydantic validator already enforced action ↔
+            # contains_entity_label coherence; here we check against the
+            # actual registry state at apply time.
             paragraph_index = illustration.paragraph_index
             async with lock:
+                live_entities = await _load_entities()
+                action = rethink_result.entity_action
+                new_label = rethink_result.contains_entity_label
+
+                err: str | None = None
+                if action == "keep":
+                    ent = _find_entity(live_entities, new_label)
+                    if ent is None:
+                        err = (
+                            f"Agent 4 entity_action='keep' references unknown entity {new_label!r}."
+                        )
+                    elif ent.get("reserved_for_scene_index") != illustration.scene_index:
+                        err = (
+                            f"Agent 4 entity_action='keep' but entity {new_label!r} "
+                            f"is not reserved for this slot "
+                            f"(reserved_for_scene_index="
+                            f"{ent.get('reserved_for_scene_index')})."
+                        )
+                elif action == "drop":
+                    ent = _find_entity(live_entities, prev_entity_label)
+                    if ent is None or ent.get("reserved_for_scene_index") != (
+                        illustration.scene_index
+                    ):
+                        err = (
+                            "Agent 4 entity_action='drop' but this slot has no "
+                            "active entity reservation to drop."
+                        )
+                elif action == "claim_floating":
+                    ent = _find_entity(live_entities, new_label)
+                    if ent is None:
+                        err = (
+                            f"Agent 4 entity_action='claim_floating' references "
+                            f"unknown entity {new_label!r}."
+                        )
+                    elif ent.get("importance") != "supporting":
+                        err = (
+                            f"Agent 4 may only claim 'supporting' entities; "
+                            f"{new_label!r} is {ent.get('importance')!r}."
+                        )
+                    elif ent.get("reserved_for_scene_index") is not None:
+                        err = (
+                            f"Agent 4 tried to claim entity {new_label!r} but it "
+                            f"is already reserved for scene_index="
+                            f"{ent.get('reserved_for_scene_index')}."
+                        )
+                # action == "none" requires no further checks.
+
+                if err is not None:
+                    logger.error(err)
+                    await transition(
+                        IllustrationState.FAILED,
+                        error_message=err,
+                    )
+                    return
+
+                if action == "claim_floating":
+                    for e in live_entities:
+                        if _normalize_entity_label(e["label"]) == _normalize_entity_label(
+                            new_label
+                        ):
+                            e["reserved_for_scene_index"] = illustration.scene_index
+                            break
+
+                # Apply rewrite: mutate shared blocks + persist run row.
                 if 0 <= paragraph_index < len(blocks):
                     blocks[paragraph_index] = {
                         "type": "paragraph",
@@ -185,6 +251,7 @@ async def run_branch(
                     await repo.update_run(
                         run_obj,
                         story_blocks_json=json.dumps(blocks, ensure_ascii=False),
+                        narrative_entities_json=json.dumps(live_entities, ensure_ascii=False),
                     )
             await repo.update_illustration(
                 illustration,
@@ -192,12 +259,7 @@ async def run_branch(
                 current_workflow=f"{rethink_result.workflow}.json",
                 current_concept=rethink_result.concept_localized,
                 scene_excerpt=rethink_result.scene_excerpt,
-                companion_description=(
-                    new_companion.description if new_companion is not None else None
-                ),
-                companion_interaction=(
-                    new_companion.interaction if new_companion is not None else None
-                ),
+                contains_entity_label=new_label,
             )
             await event_bus.publish(
                 "paragraph_updated",
@@ -206,28 +268,16 @@ async def run_branch(
                     "text": rethink_result.paragraph_text,
                 },
             )
-            companion_changed = (prev_companion is None) != (new_companion is None) or (
-                prev_companion is not None
-                and new_companion is not None
-                and (
-                    prev_companion.description != new_companion.description
-                    or prev_companion.interaction != new_companion.interaction
-                )
-            )
-            if companion_changed:
+            entity_changed = prev_entity_label != new_label
+            if entity_changed:
+                new_entity_dict = _find_entity(live_entities, new_label) if new_label else None
                 await event_bus.publish(
-                    "illustration_companion_updated",
+                    "illustration_entity_updated",
                     {
                         "illustration_id": illustration.id,
                         "scene_index": illustration.scene_index,
-                        "companion": (
-                            {
-                                "description": new_companion.description,
-                                "interaction": new_companion.interaction,
-                            }
-                            if new_companion is not None
-                            else None
-                        ),
+                        "contains_entity_label": new_label,
+                        "entity": new_entity_dict,
                     },
                 )
 
@@ -247,7 +297,7 @@ async def run_branch(
                 style_guide=style_guide,
                 character_role=character_role,
                 character_config=char_config,
-                companion=_current_companion(),
+                contains_entity=await _current_entity(),
             )
             # Persist workflow to illustration (Agent 1 response)
             illustration = await repo.update_illustration(
@@ -334,7 +384,7 @@ async def run_branch(
                     style_guide=style_guide,
                     character_role=character_role,
                     character_config=char_config,
-                    companion=_current_companion(),
+                    contains_entity=await _current_entity(),
                 )
             except Exception as e:
                 logger.error("evaluate_image failed: %s", e)
@@ -388,11 +438,10 @@ async def run_branch(
                     style_guide=style_guide,
                     character_role=character_role,
                     verdict=verdict,
-                    pool=pool,
                     transition=transition,
                     concept_attempt=concept_attempt,
                 )
-                # Refresh local character_role + companion from the row
+                # Refresh local character_role from the row
                 # (A4b may have changed them).
                 character_role = illustration.character_role
                 env_rethink_used = True
@@ -419,7 +468,7 @@ async def run_branch(
                         style_guide=style_guide,
                         character_role=character_role,
                         character_config=char_config,
-                        companion=_current_companion(),
+                        contains_entity=await _current_entity(),
                     )
                 except Exception as e:
                     logger.error("revise_prompts failed: %s", e)
@@ -466,17 +515,17 @@ async def _do_environment_rethink(
     style_guide: StyleGuide,
     character_role: str | None,
     verdict,
-    pool: list[str],
     transition,
     concept_attempt: int,
 ) -> None:
     """Run Agent 4b for this illustration: swap the locked environment.
 
-    Reads the run-level context (full environment list, reserved
+    Reads the run-level context (full environment list, narrative
     entities, main character role) from the DB, calls Agent 4b, then
     persists the resulting changes to the run + illustration + shared
     story_blocks. Publishes the same event sequence Agent 4 publishes
-    so the frontend reactively re-renders.
+    so the frontend reactively re-renders. Entity handling mirrors
+    Agent 4 (see ``run_branch`` for action ↔ registry coherence rules).
     """
     await transition(
         IllustrationState.RETHINKING_ENVIRONMENT,
@@ -490,7 +539,7 @@ async def _do_environment_rethink(
         raise RuntimeError("run row vanished mid-branch")
 
     environments_raw = json.loads(run_obj.environments_json or "[]")
-    reserved_raw = json.loads(run_obj.reserved_entities_json or "[]")
+    entities_raw = json.loads(run_obj.narrative_entities_json or "[]")
     main_character_role = run_obj.main_character_role or ""
 
     if not environments_raw or illustration.scene_index >= len(environments_raw):
@@ -502,21 +551,17 @@ async def _do_environment_rethink(
 
     # Labels of every OTHER slot, normalised. The new env must avoid these.
     used_environments = [
-        _normalize_env_label(env["label"])
+        _normalize_entity_label(env["label"])
         for idx, env in enumerate(environments_raw)
         if idx != illustration.scene_index
     ]
 
-    prev_companion = None
-    if illustration.companion_description and illustration.companion_interaction:
-        prev_companion = Companion(
-            description=illustration.companion_description,
-            interaction=illustration.companion_interaction,
-        )
+    prev_entity_label = illustration.contains_entity_label
 
     try:
         result = await claude.rethink_environment(
             source_language=source_language,
+            current_scene_index=illustration.scene_index,
             current_concept=illustration.current_concept,
             verdict=verdict,
             current_scene_excerpt=illustration.scene_excerpt,
@@ -527,9 +572,8 @@ async def _do_environment_rethink(
             main_character_role=main_character_role,
             current_environment=current_env,
             used_environments=used_environments,
-            current_companion=prev_companion,
-            companions_pool=pool,
-            reserved_entities=reserved_raw,
+            current_entity_label=prev_entity_label,
+            narrative_entities=entities_raw,
         )
     except Exception as e:
         logger.error("rethink_environment failed: %s", e)
@@ -540,10 +584,8 @@ async def _do_environment_rethink(
         )
         raise
 
-    # Reject env labels that collide with another slot's normalised label
-    # (defence in depth: the prompt forbids it but the agent might still
-    # produce a clash).
-    new_norm = _normalize_env_label(result.environment.label)
+    # Reject env labels that collide with another slot's normalised label.
+    new_norm = _normalize_entity_label(result.environment.label)
     if new_norm in used_environments:
         msg = (
             f"Agent 4b proposed environment label "
@@ -558,38 +600,94 @@ async def _do_environment_rethink(
         )
         raise RuntimeError(msg)
 
-    # Pool fidelity for the (optional) companion.
-    new_companion: Companion | None = result.companion
-    if new_companion is not None and not companion_in_pool(new_companion.description, pool):
-        msg = (
-            f"Agent 4b proposed companion '{new_companion.description}' "
-            f"not in the agreed pool {pool}."
-        )
-        logger.error(msg)
-        await repo.update_illustration(
-            illustration,
-            state=IllustrationState.FAILED,
-            error_message=msg,
-        )
-        raise RuntimeError(msg)
-
-    # Persist: replace the environment at scene_index in the run-level
-    # array, write back environments_json + story_blocks_json under the
-    # shared lock.
+    # Atomic persist: env + entity registry mutation + paragraph rewrite
+    # all under the shared lock. Validate entity_action against the live
+    # registry first to avoid races with concurrent claim_floating moves
+    # from other branches.
     paragraph_index = illustration.paragraph_index
     async with lock:
+        run_obj_locked = await repo.get_run(illustration.run_id)
+        live_entities = (
+            json.loads(run_obj_locked.narrative_entities_json or "[]")
+            if run_obj_locked is not None
+            else []
+        )
+
+        def _find(label: str | None) -> dict | None:
+            if label is None:
+                return None
+            norm = _normalize_entity_label(label)
+            for e in live_entities:
+                if _normalize_entity_label(e["label"]) == norm:
+                    return e
+            return None
+
+        action = result.entity_action
+        new_label = result.contains_entity_label
+
+        err: str | None = None
+        if action == "keep":
+            ent = _find(new_label)
+            if ent is None:
+                err = f"Agent 4b entity_action='keep' references unknown entity {new_label!r}."
+            elif ent.get("reserved_for_scene_index") != illustration.scene_index:
+                err = (
+                    f"Agent 4b entity_action='keep' but entity {new_label!r} "
+                    f"is not reserved for this slot."
+                )
+        elif action == "drop":
+            ent = _find(prev_entity_label)
+            if ent is None or ent.get("reserved_for_scene_index") != illustration.scene_index:
+                err = (
+                    "Agent 4b entity_action='drop' but this slot has no "
+                    "active entity reservation to drop."
+                )
+        elif action == "claim_floating":
+            ent = _find(new_label)
+            if ent is None:
+                err = (
+                    f"Agent 4b entity_action='claim_floating' references "
+                    f"unknown entity {new_label!r}."
+                )
+            elif ent.get("importance") != "supporting":
+                err = (
+                    f"Agent 4b may only claim 'supporting' entities; "
+                    f"{new_label!r} is {ent.get('importance')!r}."
+                )
+            elif ent.get("reserved_for_scene_index") is not None:
+                err = (
+                    f"Agent 4b tried to claim entity {new_label!r} but it "
+                    f"is already reserved for scene_index="
+                    f"{ent.get('reserved_for_scene_index')}."
+                )
+
+        if err is not None:
+            logger.error(err)
+            await repo.update_illustration(
+                illustration,
+                state=IllustrationState.FAILED,
+                error_message=err,
+            )
+            raise RuntimeError(err)
+
+        if action == "claim_floating":
+            for e in live_entities:
+                if _normalize_entity_label(e["label"]) == _normalize_entity_label(new_label):
+                    e["reserved_for_scene_index"] = illustration.scene_index
+                    break
+
         environments_raw[illustration.scene_index] = result.environment.model_dump()
         if 0 <= paragraph_index < len(blocks):
             blocks[paragraph_index] = {
                 "type": "paragraph",
                 "text": result.paragraph_text,
             }
-        run_obj_locked = await repo.get_run(illustration.run_id)
         if run_obj_locked is not None:
             await repo.update_run(
                 run_obj_locked,
                 environments_json=json.dumps(environments_raw, ensure_ascii=False),
                 story_blocks_json=json.dumps(blocks, ensure_ascii=False),
+                narrative_entities_json=json.dumps(live_entities, ensure_ascii=False),
             )
 
     role_changed = result.character_role != character_role
@@ -599,8 +697,7 @@ async def _do_environment_rethink(
         current_workflow=f"{result.workflow}.json",
         current_concept=result.concept_localized,
         scene_excerpt=result.scene_excerpt,
-        companion_description=(new_companion.description if new_companion is not None else None),
-        companion_interaction=(new_companion.interaction if new_companion is not None else None),
+        contains_entity_label=new_label,
         environment_label=result.environment.label,
         environment_aspect=result.environment.aspect,
     )
@@ -616,6 +713,22 @@ async def _do_environment_rethink(
                 "illustration_id": illustration.id,
                 "scene_index": illustration.scene_index,
                 "character_role": result.character_role,
+            },
+        )
+    if prev_entity_label != new_label:
+        new_entity_dict = None
+        if new_label:
+            for e in live_entities:
+                if _normalize_entity_label(e["label"]) == _normalize_entity_label(new_label):
+                    new_entity_dict = e
+                    break
+        await event_bus.publish(
+            "illustration_entity_updated",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "contains_entity_label": new_label,
+                "entity": new_entity_dict,
             },
         )
     await event_bus.publish(

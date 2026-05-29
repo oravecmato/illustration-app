@@ -20,7 +20,6 @@ from app.constants import (
 from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
-    Companion,
     Environment,
     EvaluateImageResponse,
     GeneratePromptsResponse,
@@ -180,20 +179,24 @@ class ClaudeClient:
                 - topic_short: str (brief topic for skeleton UI)
                 - characters: list of Character dicts
                 - main_character_role: str (one of 'male'|'female'|'mother')
-                - companions: list of Companion dicts
+                - non_human_entities: list of NonHumanEntityHint dicts
+                  (free-form ``role_in_story`` text from the chat that
+                  Agent 0b promotes into NarrativeEntity entries)
                 - topic: str (full topic description)
                 - notes: str (optional notes)
             validator_feedback: Optional plain-English description of why the
                 previous Agent 0b attempt was rejected by server-side
-                validators (pool fidelity or distribution rules). When
+                validators (distribution / quota / scene-lock rules). When
                 non-empty, it is appended to the user message so the agent
                 can correct course on the retry.
         """
         characters_json = json.dumps(
             [c.model_dump() for c in input_dict["characters"]], ensure_ascii=False, indent=2
         )
-        companions_json = json.dumps(
-            [c.model_dump() for c in input_dict["companions"]], ensure_ascii=False, indent=2
+        non_human_entities_json = json.dumps(
+            [e.model_dump() for e in input_dict["non_human_entities"]],
+            ensure_ascii=False,
+            indent=2,
         )
         feedback_block = (
             (
@@ -210,7 +213,7 @@ class ClaudeClient:
             f"topic_short: {input_dict['topic_short']}\n\n"
             f"characters:\n{characters_json}\n\n"
             f"main_character_role: {input_dict['main_character_role']}\n\n"
-            f"companions:\n{companions_json}\n\n"
+            f"non_human_entities:\n{non_human_entities_json}\n\n"
             f"topic: {input_dict['topic']}\n\n"
             f"notes: {input_dict.get('notes') or '(none)'}\n"
             f"{feedback_block}\n"
@@ -232,12 +235,18 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str | None,
         character_config: dict,
-        companion: Companion | None = None,
+        contains_entity: dict | None = None,
         prompting_notes: str | None = None,
     ) -> GeneratePromptsResponse:
         """Generate prompts for illustration.
 
-        When character_role is None (companion-alone scenes), workflow will be 'no-lora'.
+        When character_role is None (no-human scene), workflow will be 'no-lora'.
+
+        ``contains_entity`` is the full NarrativeEntity dict (label, kind,
+        importance, reserved_for_scene_index) for the entity visually
+        present in this scene, or ``None`` for a clean scene. The label
+        is the noun phrase the renderer must depict; importance + kind
+        guide tag weighting.
 
         `prompting_notes` is the optional English-only cumulative memo curated by
         Agent 6 in the collaboration mode (§ 6A.2 rule #12, § 7.1 Call 1). NULL in
@@ -245,10 +254,10 @@ class ClaudeClient:
         prompt-level guidance about this illustration's known renderer blind
         spots.
         """
-        companion_line = (
-            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
-            if companion is not None
-            else "companion: null"
+        contains_entity_line = (
+            f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
+            if contains_entity is not None
+            else "contains_entity: null"
         )
         notes_line = (
             f"\nprompting_notes (English-only renderer hints, authoritative):\n{prompting_notes}\n"
@@ -268,20 +277,20 @@ class ClaudeClient:
                 f"style_negative: {style_guide.overall_style_negative}\n"
                 f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
                 f"concept: {current_concept}\n"
-                f"{companion_line}\n"
+                f"{contains_entity_line}\n"
                 f"{notes_line}\n"
                 f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
                 'Respond with JSON: {"workflow": "single-lora", '
                 '"positive": "...", "negative": "..."}'
             )
         else:
-            # Companion-alone scene (no character)
+            # No-human scene (no cast character)
             user_text = (
                 f"character_role: null\n"
                 f"style_positive: {style_guide.overall_style_positive}\n"
                 f"style_negative: {style_guide.overall_style_negative}\n\n"
                 f"concept: {current_concept}\n"
-                f"{companion_line}\n"
+                f"{contains_entity_line}\n"
                 f"{notes_line}\n"
                 f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
                 'Respond with JSON: {"workflow": "no-lora", "positive": "...", "negative": "..."}'
@@ -303,15 +312,15 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str,
         character_config: dict,
-        companion: Companion | None = None,
+        contains_entity: dict | None = None,
     ) -> EvaluateImageResponse:
         char_display = CHARACTER_ROLE_MAP[character_role]
         char_entry = character_config[character_role]
         image_b64 = base64.standard_b64encode(image_bytes).decode()
-        companion_line = (
-            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
-            if companion is not None
-            else "companion: null"
+        contains_entity_line = (
+            f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
+            if contains_entity is not None
+            else "contains_entity: null"
         )
         messages = [
             {
@@ -332,7 +341,7 @@ class ClaudeClient:
                             f"Expected character: {char_display} (role: {character_role})\n"
                             f"Expected trigger tags: {char_entry['trigger_tags']}\n"
                             f"Concept: {current_concept}\n"
-                            f"{companion_line}\n"
+                            f"{contains_entity_line}\n"
                             f"Global style: {style_guide.overall_style_positive}\n\n"
                             "Respond with JSON per your instructions."
                         ),
@@ -357,14 +366,14 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str,
         character_config: dict,
-        companion: Companion | None = None,
+        contains_entity: dict | None = None,
     ) -> RevisePromptsResponse:
         char_entry = character_config[character_role]
         char_display = CHARACTER_ROLE_MAP[character_role]
-        companion_line = (
-            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
-            if companion is not None
-            else "companion: null"
+        contains_entity_line = (
+            f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
+            if contains_entity is not None
+            else "contains_entity: null"
         )
         user_text = (
             f"character_display: {char_display}\n"
@@ -375,7 +384,7 @@ class ClaudeClient:
             f"style_negative: {style_guide.overall_style_negative}\n"
             f"character_baseline_description: {style_guide.character_baseline_description}\n\n"
             f"concept: {current_concept}\n"
-            f"{companion_line}\n"
+            f"{contains_entity_line}\n"
             f"current_positive: {current_prompts.positive}\n"
             f"current_negative: {current_prompts.negative}\n\n"
             f"verdict_problem: {verdict.problem}\n"
@@ -396,6 +405,7 @@ class ClaudeClient:
     async def rethink_concept(
         self,
         source_language: str,
+        current_scene_index: int,
         current_concept: str,
         verdict: EvaluateImageResponse,
         current_scene_excerpt: str,
@@ -403,24 +413,31 @@ class ClaudeClient:
         story_blocks: list[dict],
         current_paragraph_index: int,
         character_role: str | None,
-        current_companion: Companion | None = None,
-        companions_pool: list[str] | None = None,
+        current_entity_label: str | None = None,
+        narrative_entities: list[dict] | None = None,
     ) -> RethinkConceptResponse:
         """Rethink concept with Agent 4.
 
         Args:
             source_language: Language of the story (sk, cs, en)
+            current_scene_index: Slot Agent 4 is rewriting (drives lock checks)
             current_concept: The failed concept
             verdict: Evaluation verdict from Agent 2
             current_scene_excerpt: Current scene excerpt
             story_title: Story title
             story_blocks: All story blocks
             current_paragraph_index: Index of paragraph for this illustration
-            character_role: Character role (nullable for companion-alone scenes)
-            current_companion: Current companion (if any)
-            companions_pool: Pool of allowed companions
+            character_role: Character role (nullable for no-human scenes)
+            current_entity_label: Label of the NarrativeEntity currently
+                attached to this slot (or None for a clean scene).
+            narrative_entities: Full unified register (every entry has
+                label, kind, importance, reserved_for_scene_index).
+                Agent 4 may only depict: (a) the entity reserved for
+                ``current_scene_index``, (b) a floating supporting
+                entity (``reserved_for_scene_index=None``) it claims for
+                this slot, or (c) nothing.
         """
-        pool = companions_pool or []
+        entities = narrative_entities or []
         # Render the full story for the agent: paragraph texts inline,
         # illustration blocks as numbered markers so the agent can see where
         # in the arc each illustration sits.
@@ -434,12 +451,12 @@ class ClaudeClient:
         full_story = "\n\n".join(rendered_blocks)
         current_paragraph_text = story_blocks[current_paragraph_index]["text"]
 
-        current_companion_json = (
-            json.dumps(current_companion.model_dump(), ensure_ascii=False)
-            if current_companion is not None
+        current_entity_label_json = (
+            json.dumps(current_entity_label, ensure_ascii=False)
+            if current_entity_label is not None
             else "null"
         )
-        companions_pool_json = json.dumps(pool, ensure_ascii=False)
+        narrative_entities_json = json.dumps(entities, ensure_ascii=False)
 
         # Build user text with optional character fields
         if character_role:
@@ -450,29 +467,31 @@ class ClaudeClient:
                 f"character_role: {character_role}\n\n"
                 f"story_title: {story_title}\n\n"
                 f"full_story:\n{full_story}\n\n"
+                f"current_scene_index: {current_scene_index}\n"
                 f"current_paragraph_index: {current_paragraph_index}\n"
                 f"current_paragraph_text: {current_paragraph_text}\n"
                 f"current_scene_excerpt: {current_scene_excerpt}\n"
                 f"failed_concept: {current_concept}\n"
-                f"current_companion: {current_companion_json}\n"
-                f"companions_pool: {companions_pool_json}\n"
+                f"current_entity_label: {current_entity_label_json}\n"
+                f"narrative_entities: {narrative_entities_json}\n"
                 f"verdict_reasoning: {verdict.reasoning}\n"
                 f"verdict_suggestion: {verdict.suggestion}\n\n"
                 "Respond with the JSON object specified in your instructions."
             )
         else:
-            # Companion-alone scene
+            # No-human scene (no cast character)
             user_text = (
                 f"source_language: {source_language}\n"
                 f"character_role: null\n\n"
                 f"story_title: {story_title}\n\n"
                 f"full_story:\n{full_story}\n\n"
+                f"current_scene_index: {current_scene_index}\n"
                 f"current_paragraph_index: {current_paragraph_index}\n"
                 f"current_paragraph_text: {current_paragraph_text}\n"
                 f"current_scene_excerpt: {current_scene_excerpt}\n"
                 f"failed_concept: {current_concept}\n"
-                f"current_companion: {current_companion_json}\n"
-                f"companions_pool: {companions_pool_json}\n"
+                f"current_entity_label: {current_entity_label_json}\n"
+                f"narrative_entities: {narrative_entities_json}\n"
                 f"verdict_reasoning: {verdict.reasoning}\n"
                 f"verdict_suggestion: {verdict.suggestion}\n\n"
                 "Respond with the JSON object specified in your instructions."
@@ -490,6 +509,7 @@ class ClaudeClient:
         self,
         *,
         source_language: str,
+        current_scene_index: int,
         current_concept: str,
         verdict: EvaluateImageResponse,
         current_scene_excerpt: str,
@@ -500,16 +520,15 @@ class ClaudeClient:
         main_character_role: str,
         current_environment: Environment,
         used_environments: list[str],
-        current_companion: Companion | None = None,
-        companions_pool: list[str] | None = None,
-        reserved_entities: list[dict] | None = None,
+        current_entity_label: str | None = None,
+        narrative_entities: list[dict] | None = None,
     ) -> RethinkEnvironmentResponse:
         """Call Agent 4b to swap the locked environment for a slot.
 
         Only invoked when Agent 2 emits ``problem='environment'``.
+        Entity rules mirror ``rethink_concept`` (see its docstring).
         """
-        pool = companions_pool or []
-        reserved = reserved_entities or []
+        entities = narrative_entities or []
 
         rendered_blocks: list[str] = []
         for idx, block in enumerate(story_blocks):
@@ -533,13 +552,12 @@ class ClaudeClient:
                 next_paragraph_text = story_blocks[idx]["text"]
                 break
 
-        current_companion_json = (
-            json.dumps(current_companion.model_dump(), ensure_ascii=False)
-            if current_companion is not None
+        current_entity_label_json = (
+            json.dumps(current_entity_label, ensure_ascii=False)
+            if current_entity_label is not None
             else "null"
         )
-        companions_pool_json = json.dumps(pool, ensure_ascii=False)
-        reserved_json = json.dumps(reserved, ensure_ascii=False)
+        narrative_entities_json = json.dumps(entities, ensure_ascii=False)
         used_envs_json = json.dumps(used_environments, ensure_ascii=False)
         current_env_json = json.dumps(current_environment.model_dump(), ensure_ascii=False)
 
@@ -554,6 +572,7 @@ class ClaudeClient:
             f"main_character_role: {main_character_role}\n\n"
             f"story_title: {story_title}\n\n"
             f"full_story:\n{full_story}\n\n"
+            f"current_scene_index: {current_scene_index}\n"
             f"current_paragraph_index: {current_paragraph_index}\n"
             f"current_paragraph_text: {current_paragraph_text}\n"
             f"previous_paragraph_text: {prev_paragraph_text}\n"
@@ -562,9 +581,8 @@ class ClaudeClient:
             f"used_environments: {used_envs_json}\n"
             f"current_scene_excerpt: {current_scene_excerpt}\n"
             f"failed_concept: {current_concept}\n"
-            f"current_companion: {current_companion_json}\n"
-            f"companions_pool: {companions_pool_json}\n"
-            f"reserved_entities: {reserved_json}\n"
+            f"current_entity_label: {current_entity_label_json}\n"
+            f"narrative_entities: {narrative_entities_json}\n"
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
             "Respond with the JSON object specified in your instructions."
@@ -616,7 +634,7 @@ class ClaudeClient:
         current_scene_excerpt: str,
         original_concept: str,
         character_role: str | None,
-        current_companion: Companion | None,
+        current_entity: dict | None,
         manual_attempts_consumed: int,
         manual_attempts_remaining: int,
         last_concept_candidate: str | None,
@@ -656,10 +674,8 @@ class ClaudeClient:
                 rendered_blocks.append(f"[BLOCK {idx} ILLUSTRATION {block['scene_index']}]")
         full_story = "\n\n".join(rendered_blocks)
 
-        current_companion_json = (
-            json.dumps(current_companion.model_dump(), ensure_ascii=False)
-            if current_companion is not None
-            else "null"
+        current_entity_json = (
+            json.dumps(current_entity, ensure_ascii=False) if current_entity is not None else "null"
         )
         char_display = CHARACTER_ROLE_MAP[character_role] if character_role else "null"
 
@@ -689,7 +705,7 @@ class ClaudeClient:
             f"original_concept: {original_concept}\n"
             f"character_role: {character_role or 'null'}\n"
             f"character_display: {char_display}\n"
-            f"current_companion: {current_companion_json}\n"
+            f"current_entity: {current_entity_json}\n"
             f"manual_attempts_consumed: {manual_attempts_consumed}\n"
             f"manual_attempts_remaining: {manual_attempts_remaining}\n"
             f"last_concept_candidate: {last_candidate_blob}\n"
@@ -728,7 +744,7 @@ class ClaudeClient:
         style_guide: StyleGuide,
         character_role: str | None,
         character_config: dict,
-        companion: Companion | None = None,
+        contains_entity: dict | None = None,
         prompting_notes: str | None = None,
     ) -> ManualRevisePromptsResponse:
         """Run Agent 7 to translate the user's post-image feedback into
@@ -737,10 +753,10 @@ class ClaudeClient:
         Workflow choice is NOT decided here — the caller carries forward
         ``illustrations.current_workflow`` (see § 6A.4 step 5.5).
         """
-        companion_line = (
-            f"companion: {json.dumps(companion.model_dump(), ensure_ascii=False)}"
-            if companion is not None
-            else "companion: null"
+        contains_entity_line = (
+            f"contains_entity: {json.dumps(contains_entity, ensure_ascii=False)}"
+            if contains_entity is not None
+            else "contains_entity: null"
         )
 
         if character_role:
@@ -768,7 +784,7 @@ class ClaudeClient:
             f"style_positive: {style_guide.overall_style_positive}\n"
             f"style_negative: {style_guide.overall_style_negative}\n\n"
             f"last_agreed_concept: {last_agreed_concept}\n"
-            f"{companion_line}\n\n"
+            f"{contains_entity_line}\n\n"
             f"last_positive_prompt: {last_positive_prompt}\n"
             f"last_negative_prompt: {last_negative_prompt}\n\n"
             f"user_feedback (raw post-image user prose, may be noisy):\n{user_feedback}\n\n"

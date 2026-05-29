@@ -120,11 +120,13 @@ class Run(Base):
     # JSON-encoded list of 5 Environment objects, position == scene_index.
     # See app.schemas.claude.Environment for shape. Nullable for legacy rows.
     environments_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    # JSON-encoded list of ReservedEntity objects (story-important non-human
-    # characters and objects, with optional scene_index reservations).
-    # Updated by Agent 4b (rethink_environment) only via the environments_json
-    # path. Nullable for legacy rows.
-    reserved_entities_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # JSON-encoded list of NarrativeEntity objects — the unified register of
+    # story-important non-human characters and objects (replaces the legacy
+    # companion / reserved_entities split). Each entry has importance
+    # (primary|secondary|supporting), kind (non_human_character|object), and
+    # optional reserved_for_scene_index (scene lock). See
+    # app.schemas.claude.NarrativeEntity. Nullable for legacy rows.
+    narrative_entities_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     illustrations: Mapped[list["Illustration"]] = relationship(
         "Illustration", back_populates="run", order_by="Illustration.scene_index"
@@ -149,8 +151,12 @@ class Illustration(Base):
     current_prompts_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     last_verdict_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     image_path: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
-    companion_description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    companion_interaction: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Label of the NarrativeEntity (non-human character or object) visually
+    # present in this scene. Null when the scene contains no narrative
+    # entity. Source-of-truth for the unified entity register; the actual
+    # entity record lives on Run.narrative_entities_json (matched by
+    # normalized label). See app.schemas.claude.IllustrationConcept.
+    contains_entity_label: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Denormalised environment label + aspect for this slot (Run.environments_json
     # is the source of truth; these columns make per-illustration reads cheap
     # and let Agent 4 receive the constraint without joining). Mutated only by

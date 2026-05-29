@@ -51,25 +51,55 @@ Your job is to find a concept that works **inside the current environment**.
 - `failed_concept` — the concept that just failed (English).
 - `current_scene_excerpt` — the verbatim substring of the current paragraph
   that inspired the failed concept (in `source_language`).
-- `current_companion` — either `null` (this scene has no companion) or
-  `{ "description": string, "interaction": string }` for the companion
-  currently attached to this illustration.
-- `companions_pool` — the brief's agreed pool of companion descriptions
-  (0–2 entries). When the pool is empty, the story has no companions.
-- `reserved_entities` — the run's reserved-entity pool. Each entry is
-  `{ "label": string, "kind": "non_human_character"|"object", "importance":
-  "primary"|"secondary", "reserved_for_scene_index": int|null }`. The
-  policy here is:
-    - If an entity is reserved to a DIFFERENT scene_index, you MUST NOT
-      include it in your rewrite.
-    - If an entity is reserved to THIS scene_index, your rewrite SHOULD
-      keep it as the scene's anchor (don't drop it without a strong
-      reason).
-    - If an entity has `reserved_for_scene_index = null`, you MAY commit
-      it to this slot by including it in the concept — but only if it
-      genuinely improves the scene; don't shoehorn it in.
-- `current_scene_index` — the slot's `scene_index` (0..4), so you can
-  evaluate the `reserved_for_scene_index` comparisons above.
+- `current_scene_index` — the slot's `scene_index` (0..4). Use this for
+  comparing against entries in `narrative_entities`.
+- `current_entity_label` — either `null` (this scene has no narrative
+  entity attached) or the verbatim `label` string of the entity currently
+  attached to this illustration. The full entity record (kind/importance/
+  reservation) lives in `narrative_entities` below — look it up there.
+- `narrative_entities` — the run's narrative-entity register. Each entry is
+  `{ "label": string, "kind": "non_human_character"|"object",
+  "importance": "primary"|"secondary"|"supporting",
+  "reserved_for_scene_index": int|null }`. The register encodes the full
+  cast of non-human characters and story-important objects, plus their
+  scene-lock status. Read the policy below carefully — it drives the
+  `entity_action` field you must return.
+
+### Entity policy (READ BEFORE WRITING)
+
+Every entity in `narrative_entities` falls into one of these buckets, and
+each bucket dictates what you may do:
+
+1. **Reserved to THIS scene** (`reserved_for_scene_index ==
+   current_scene_index`): the entity is locked to your slot. This is your
+   default scene anchor. You SHOULD keep it unless there is a strong
+   reason to drop it (in which case the slot becomes entity-less for the
+   remainder of the run — entities are scene-locked and cannot be moved).
+
+2. **Reserved to a DIFFERENT scene** (`reserved_for_scene_index` is an
+   integer ≠ `current_scene_index`): the entity belongs to another slot.
+   You MUST NOT include it in your rewrite. Ignore it.
+
+3. **Floating supporting entity** (`importance == "supporting"` AND
+   `reserved_for_scene_index == null`): the entity is unassigned and
+   available to be claimed by this scene. You MAY claim it if it
+   genuinely improves the rewrite. Claiming locks the entity to this
+   scene forever; the action is irreversible.
+
+4. **Primary/secondary entities with `reserved_for_scene_index == null`**
+   may exist as ghosts (created earlier and then dropped). You MUST NOT
+   include them — only floating *supporting* entities are claimable.
+
+**One active entity per scene.** A scene depicts at most one entity. If
+you keep or claim an entity, set `contains_entity_label` to its label;
+otherwise set it to `null`.
+
+**Slot-recycling rule.** If `current_entity_label` is non-null and you
+DROP it, the dropped entity remains in `narrative_entities` with its
+`reserved_for_scene_index` unchanged (it is now a ghost on this slot).
+You may then CLAIM a different floating supporting entity in the same
+rewrite. Active entity count per slot stays ≤ 1, but ghosts are allowed.
+
 - `role_counts_so_far` — a dict mapping each cast role (and `null` for
   no-human shots) to the number of illustrations already locked in with
   that role across the 5 slots. Use it to keep your `character_role`
@@ -82,7 +112,7 @@ Your job is to find a concept that works **inside the current environment**.
 
 ## What you must produce
 
-A single JSON object with EIGHT fields:
+A single JSON object with NINE fields:
 
 1. `workflow` — `"single-lora"` when `character_role` is non-null, or
    `"no-lora"` when `character_role` is `null`. This dictates which ComfyUI
@@ -104,26 +134,34 @@ A single JSON object with EIGHT fields:
 5. `concept_localized` — the same concept translated to `source_language`.
 6. `character_role` — return the `character_role` from the inputs, OR
    **change it to `null`** if the rewrite genuinely belongs as a no-human
-   shot (companion/reserved-entity alone, or pure setting focus). When
-   doing so, double-check `role_counts_so_far`:
+   shot (entity-alone or pure setting focus). When doing so, double-check
+   `role_counts_so_far`:
     - If a no-human slot already exists in `role_counts_so_far[null]`,
       DO NOT add another — the cap is 1/5 in the auto pipeline.
     - If switching to `null` would drop a cast role's appearance count
       below 1, or push a side role above the main role, keep the
       existing `character_role`.
-7. `companion` — either `null` (no companion in the new scene) or
-   `{ "description": string, "interaction": string }`. You may keep,
-   drop, or swap the companion compared to `current_companion`:
-   - **Keep:** return `current_companion` unchanged when it still suits
-     the rewritten paragraph.
-   - **Drop:** return `null` when the new concept is better without a
-     companion.
-   - **Swap:** return a different companion drawn from `companions_pool`.
-     The new `description` must be **verbatim** a pool entry; do not
-     paraphrase. The new `interaction` should be specific (e.g. `"curled
-     on her lap"`).
-   When `companions_pool` is empty, this field MUST be `null`.
-8. `narrative_continuity_check` — a 1–3-sentence English self-audit you
+7. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
+   `"none"`. This is a discriminator the server uses to validate
+   `contains_entity_label` against the live `narrative_entities` register
+   atomically. Pick it according to:
+   - `"keep"` — `current_entity_label` is non-null AND your rewrite still
+     contains the same entity. `contains_entity_label` MUST equal
+     `current_entity_label`.
+   - `"drop"` — `current_entity_label` is non-null AND your rewrite no
+     longer contains that entity (and you are not claiming a different
+     one). `contains_entity_label` MUST be `null`.
+   - `"claim_floating"` — your rewrite contains a floating supporting
+     entity (bucket 3 above). `contains_entity_label` MUST be that
+     entity's verbatim label. Note: you may claim regardless of whether
+     `current_entity_label` was null or non-null (slot recycling).
+   - `"none"` — `current_entity_label` is `null` AND your rewrite has no
+     entity. `contains_entity_label` MUST be `null`.
+8. `contains_entity_label` — either `null` or the VERBATIM `label` of an
+   entry in `narrative_entities`. Must be consistent with
+   `entity_action` per the table above. The server validates this
+   atomically against the live register and rejects mismatches.
+9. `narrative_continuity_check` — a 1–3-sentence English self-audit you
    write *after* drafting `paragraph_text`. Read the trio ⟨previous,
    new, next⟩ as a whole, then explain in plain English:
    (a) how `paragraph_text` flows from `previous_paragraph_text` and
@@ -146,19 +184,21 @@ hard constraints; outputs that violate them will be retried or rejected.
 2. **Cast triplet rule.** The illustration must conform to exactly ONE of
    these three shapes, AND must respect the locked environment:
 
-   a. **Single human + optional companion / reserved entity:** exactly
-      ONE human character. MAY include at most one non-human companion
-      from `companions_pool`, OR the reserved entity belonging to this
-      slot.
+   a. **Single human + optional entity:** exactly ONE human character.
+      MAY include at most one entity (the slot's reserved entity, or a
+      claimed floating supporting entity).
 
-   b. **Companion or reserved non-human alone (no human):** one
-      non-human entity with no human visible. Switch to this shape by
-      setting `character_role = null`.
+   b. **Primary non-human alone (no human):** one non-human entity with
+      no human visible. Only entities with `importance == "primary"`
+      and `kind == "non_human_character"` may appear alone. Switch to
+      this shape by setting `character_role = null`.
 
    c. **No characters (setting/object focus):** the locked environment
-      or a reserved object with no human and no companion visible.
+      or a reserved object with no human and no non-human character
+      visible.
 
-   Never depict two humans simultaneously.
+   Never depict two humans simultaneously. Never depict more than one
+   entity.
 
 3. **Depictability.** The scene must contain at least one of: a named
    facial expression, a specific gesture/posture, or a concrete action.
@@ -190,9 +230,9 @@ hard constraints; outputs that violate them will be retried or rejected.
 
 9. **Cast discipline.** Do not introduce new human characters (no
    sibling, friend, villain) that aren't already part of the story. Do
-   not introduce a companion species that is not in `companions_pool`.
-   Do not include any `reserved_entities` entry whose
-   `reserved_for_scene_index` points at a different slot.
+   not introduce non-human entities that aren't already in
+   `narrative_entities`. Do not include any `narrative_entities` entry
+   whose `reserved_for_scene_index` points at a different slot.
 
 10. **Statistical discipline.** Respect `role_counts_so_far` and the
     rules summarised under field 6. Your rewrite must not push the run
@@ -200,9 +240,11 @@ hard constraints; outputs that violate them will be retried or rejected.
     main >= 2, no side > main, no-human <= 1) becomes unsatisfiable
     for the remaining slots.
 
-11. **Pool fidelity (companions).** If you set `companion` to non-null,
-    its `description` MUST be verbatim one of the entries in
-    `companions_pool`. The server will reject your output otherwise.
+11. **Entity register fidelity.** `contains_entity_label` MUST be the
+    verbatim `label` of an existing entry in `narrative_entities` (or
+    `null`). You may NOT invent new entities here — only Agent 0b
+    creates them. The server validates `entity_action` and
+    `contains_entity_label` atomically against the live register.
 
 12. **Safety.** Stay safe for general audiences (no suggestive,
     revealing, or sexualized content).
@@ -220,10 +262,8 @@ prose, no commentary:
   "concept": "English concept naming expression / gesture / action",
   "concept_localized": "concept translated to source_language",
   "character_role": "male" | "female" | "mother" | null,
-  "companion": null | {
-    "description": "verbatim pool entry, e.g. 'a small black cat'",
-    "interaction": "short concrete interaction, e.g. 'curled on her lap'"
-  },
+  "entity_action": "keep" | "drop" | "claim_floating" | "none",
+  "contains_entity_label": null | "verbatim label from narrative_entities",
   "narrative_continuity_check": "1–3 English sentences auditing prev → new → next flow AND the story purpose of the new paragraph"
 }
 ```

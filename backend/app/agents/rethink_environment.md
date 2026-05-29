@@ -47,18 +47,38 @@ and concept rethinks must honour it.
 - `failed_concept` — the concept that just failed.
 - `current_scene_excerpt` — verbatim excerpt that inspired the failed
   concept.
-- `current_companion`, `companions_pool` — companion context, same as
-  Agent 4.
-- `reserved_entities` — same as Agent 4. Apply the same policy: respect
-  reservations to other slots; you may keep / drop / commit entities
-  assigned to this slot; you may fill an unassigned entity if it
-  genuinely improves the scene.
+- `current_scene_index` — the slot's `scene_index` (0..4). Use this for
+  the `narrative_entities` policy below.
+- `current_entity_label` — either `null` (this scene has no narrative
+  entity attached) or the verbatim `label` string of the entity
+  currently attached to this illustration. Look up the full record in
+  `narrative_entities`.
+- `narrative_entities` — the run's narrative-entity register (same shape
+  and policy as in Agent 4). See "Entity policy" below.
 - `verdict_reasoning`, `verdict_suggestion` — why the environment is
   unrenderable; use it to guide your replacement choice.
 
+### Entity policy (READ BEFORE WRITING)
+
+Identical to Agent 4. Each entity in `narrative_entities` is one of:
+
+1. **Reserved to THIS scene** (`reserved_for_scene_index ==
+   current_scene_index`): default anchor, SHOULD keep, MAY drop.
+2. **Reserved to a DIFFERENT scene**: MUST NOT include.
+3. **Floating supporting** (`importance == "supporting"` AND
+   `reserved_for_scene_index == null`): MAY claim. Claiming locks the
+   entity to this scene forever.
+4. **Primary/secondary entities with `reserved_for_scene_index ==
+   null`** are ghosts: MUST NOT include.
+
+**One active entity per scene.** Entities are scene-locked: a dropped
+entity does NOT free up to another slot. Slot recycling is allowed
+(drop current + claim a floating supporting entity in the same
+rewrite), with the dropped entity becoming a ghost of this slot.
+
 ## What you must produce
 
-A single JSON object with NINE fields:
+A single JSON object with TEN fields:
 
 1. `workflow` — `"single-lora"` or `"no-lora"`, consistent with
    `character_role`.
@@ -79,13 +99,15 @@ A single JSON object with NINE fields:
 7. `character_role` — one of `male`, `female`, `mother`, or `null`.
    The same statistical-discipline rules as Agent 4 apply: do not push
    the run into an unsatisfiable validator state.
-8. `companion` — `null` or `{ "description": string, "interaction":
-   string }`. Pool-fidelity rules as in Agent 4.
-9. `narrative_continuity_check` — 1–3 English sentences auditing
-   (a) the flow from `previous_paragraph_text` to the new
-   `paragraph_text` to `next_paragraph_text` (the environment change
-   must not feel like a teleport), and (b) the story-level purpose of
-   the rewrite. Non-empty.
+8. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
+   `"none"`. Semantics identical to Agent 4 (see that prompt's table).
+9. `contains_entity_label` — `null` or the VERBATIM `label` of an entry
+   in `narrative_entities`. Must be consistent with `entity_action`.
+10. `narrative_continuity_check` — 1–3 English sentences auditing
+    (a) the flow from `previous_paragraph_text` to the new
+    `paragraph_text` to `next_paragraph_text` (the environment change
+    must not feel like a teleport), and (b) the story-level purpose of
+    the rewrite. Non-empty.
 
 ## Story-design principles (MANDATORY)
 
@@ -94,8 +116,9 @@ delta vs. Agent 4 is that you (Agent 4b) MAY — and must — change the
 environment.
 
 1. **Psychological framing over plot mechanics.**
-2. **Cast triplet rule** (single human + optional companion / reserved
-   entity; companion-or-reserved alone; or no characters).
+2. **Cast triplet rule** (single human + optional entity; primary
+   non-human alone; or no characters). Never two humans, never two
+   entities.
 3. **Depictability.**
 4. **No regional prompting and no inpainting.**
 5. **Meaningfully different from the failed setup.** The new environment
@@ -111,7 +134,9 @@ environment.
 8. **No filler rewrites.** Same ban as Agent 4.
 9. **Cast discipline.** Same as Agent 4.
 10. **Statistical discipline.** Same as Agent 4.
-11. **Pool fidelity (companions).** Same as Agent 4.
+11. **Entity register fidelity.** `contains_entity_label` MUST be the
+    verbatim `label` of an existing entry in `narrative_entities` (or
+    `null`). You may NOT invent new entities here.
 12. **Safety.**
 
 ## Output format
@@ -132,10 +157,8 @@ prose, no commentary:
   "concept": "English concept naming expression / gesture / action",
   "concept_localized": "concept translated to source_language",
   "character_role": "male" | "female" | "mother" | null,
-  "companion": null | {
-    "description": "verbatim pool entry, e.g. 'a small black cat'",
-    "interaction": "short concrete interaction, e.g. 'curled on her lap'"
-  },
+  "entity_action": "keep" | "drop" | "claim_floating" | "none",
+  "contains_entity_label": null | "verbatim label from narrative_entities",
   "narrative_continuity_check": "1–3 English sentences auditing prev → new → next flow AND the story purpose of the rewrite"
 }
 ```

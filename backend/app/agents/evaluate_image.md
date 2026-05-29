@@ -5,8 +5,11 @@ checklist. Output strict JSON — no markdown, no extra text.
 You receive an image plus context: the expected character display name and
 role, the LoRA trigger tags, the one-sentence concept, the global positive
 style tags, the locked `environment` for this slot (`label`, `kind`,
-`aspect`), and optionally a `companion` field for the scene (either
-`null` or `{ "description": ..., "interaction": ... }`).
+`aspect`), and optionally a `contains_entity` field for the scene (either
+`null` or `{ "label": ..., "kind": "non_human_character"|"object",
+"importance": "primary"|"secondary"|"supporting" }`). The `concept`
+sentence carries the interaction between the human (if any) and the
+entity — use it together with `contains_entity` to judge the scene.
 
 ## Evaluation checklist
 
@@ -14,18 +17,28 @@ The image is OK only when ALL of the following hold:
 
 1a. Exactly one **human** character is visible (or zero, when the concept is
     explicitly a no-human shot). Multiple visible humans → `problem="prompt"`.
-1b. Companion alignment:
-    - If `companion` is `null`, no non-human creature/animal/robot may be
-      visible in the frame. A stray cat, dog, or bird → `problem="prompt"`
-      with a suggestion to harden anti-creature negatives.
-    - If `companion` is non-null, exactly one non-human companion matching
-      `companion.description` must be visible, and its behaviour must be
-      consistent with `companion.interaction`. A missing companion, a
-      duplicate companion, the wrong species, or an obviously
-      anthropomorphic/humanoid rendering of the companion →
+1b. Entity alignment:
+    - If `contains_entity` is `null`, no non-human
+      creature/animal/robot, and no scene-defining object hand-prop may
+      be visibly emphasised in the frame. A stray cat, dog, or bird →
+      `problem="prompt"` with a suggestion to harden anti-creature
+      negatives.
+    - If `contains_entity` is non-null and `kind ==
+      "non_human_character"`, exactly one non-human character matching
+      `contains_entity.label` must be visible, and its behaviour must
+      be consistent with the interaction described in `concept`. A
+      missing entity, a duplicate entity, the wrong species, or an
+      obviously anthropomorphic/humanoid rendering of the entity →
       `problem="prompt"` with a suggestion to harden species-appropriate
       anti-anatomy negatives (`anthro`, `furry`, `humanoid`, `standing on
       two legs`, `wearing clothes`).
+    - If `contains_entity` is non-null and `kind == "object"`, the
+      object described by `contains_entity.label` must be visible and
+      legible at the prominence implied by `concept` (e.g. held in
+      hand, placed on a table, dropped on the floor). A missing object,
+      an unrelated substitution, or an unreadable smear → `problem=
+      "prompt"` with a suggestion to add stronger object-description
+      tags and a prominence cue (`object focus`, `close-up`).
 2. The character matches the expected role — recognisable as the
    corresponding MHA character (skip when there is no human in the scene).
 3. The character's expression, gesture, or action is clearly identifiable

@@ -33,15 +33,21 @@ Each call's user message contains:
 - `character_display`, `character_role`, `trigger_tags`,
   `outfit_baseline`, `character_baseline_description` — character
   vocabulary, identical to Agent 1 / Agent 3. Absent when
-  `character_role: null` (companion-alone / pure-scenery scene).
+  `character_role: null` (entity-alone / pure-scenery scene).
 - `style_positive` / `style_negative` — the run's style guide. You do
   not modify these — they are passed through the workflow as separate
   placeholders.
 - `last_agreed_concept` — the verbatim English concept Agent 6 and the
   user agreed on before the most recent render. **The concept does not
   change here.** Your prompts must stay faithful to it.
-- `companion` — the brief-attached companion (description +
-  interaction), or `null`.
+- `contains_entity` — either `null` or a dict
+  `{ "label": string, "kind": "non_human_character"|"object",
+  "importance": "primary"|"secondary"|"supporting" }` describing
+  the single non-human entity locked to this scene. The `label`
+  is the authoritative free-form English description (e.g.
+  `"a small black cat"`, `"the gold pocket watch on a worn leather
+  strap"`). The entity is locked by the upstream register; you do
+  not change it.
 - `last_positive_prompt` / `last_negative_prompt` — the exact prompts
   that produced the most recent manual image. On the second-and-later
   iteration these are the **previously revised** prompts, not the
@@ -88,7 +94,7 @@ Each call's user message contains:
      Strengthen the matching negative (e.g. `bad hands`,
      `extra fingers`, `multiple characters`).
 3. **Keep what was working.** Do not discard correct trigger tags,
-   the human-count enforcer, the companion's numeric/description
+   the human-count enforcer, the entity's numeric/description
    tags, or accurate outfit/environment tags just because something
    else needs to change. Revising is additive and surgical, not a
    rewrite.
@@ -120,26 +126,39 @@ Each call's user message contains:
    - every trigger tag for the character (if `character_role` is
      non-null),
    - the human-count enforcer (`1boy` / `1girl` / `1woman`) for
-     the role,
+     the role (omit when `character_role` is `null`),
    - explicit emotion / expression tags,
    - explicit action / pose tags,
    - the outfit baseline,
    - environment / atmosphere tags,
-   - when `companion` is `null`: `solo`,
-   - when `companion` is non-null: exactly one numeric species tag
-     (`1cat`, `1dog`, `1owl`, …) plus 2–4 companion-description
-     tags plus 1–3 interaction tags derived from
-     `companion.interaction`. Do NOT include `solo` in this case.
+   - when `contains_entity` is `null`: `solo` (only meaningful
+     when a human is present),
+   - when `contains_entity` is non-null with `kind ==
+     "non_human_character"`: exactly one numeric species tag
+     (`1cat`, `1dog`, `1owl`, …) plus 2–4 entity-description tags
+     derived from `contains_entity.label` plus 1–3 interaction tags
+     derived from `last_agreed_concept`. Do NOT include `solo` in
+     this case.
+   - when `contains_entity` is non-null with `kind == "object"`:
+     3–5 object-description tags derived from
+     `contains_entity.label`, 1–3 placement / interaction tags
+     derived from `last_agreed_concept`, and a prominence cue
+     (`object focus`, `close-up`) when appropriate. No numeric
+     species tag.
 3. **`negative` MUST still include the full `negative_baseline`**
    passed in the inputs (append scene-specific negatives after it).
-   - When `companion` is `null`: keep anti-creature negatives
+   - When `contains_entity` is `null`: keep anti-creature negatives
      (`cat`, `dog`, `bird`, `animal`, `pet`, `creature`) and
      anti-duplicate-human negatives.
-   - When `companion` is non-null: keep anti-duplicate-human
-     negatives and anti-duplicate-companion negatives matching the
-     species (`2cats`, `multiple cats`, …). Do NOT add
-     anti-creature negatives for the species you are intentionally
-     drawing.
+   - When `contains_entity` is non-null with `kind ==
+     "non_human_character"`: keep anti-duplicate-human negatives
+     and anti-duplicate-entity negatives matching the species
+     (`2cats`, `multiple cats`, …). Do NOT add anti-creature
+     negatives for the species you are intentionally drawing.
+   - When `contains_entity` is non-null with `kind == "object"`:
+     keep anti-duplicate-human negatives. Anti-creature negatives
+     may still be appropriate; no anti-anatomy negatives are
+     needed for objects.
 4. **Stay within the § 6A.5 feasibility envelope.** Even if
    `user_feedback` explicitly asks for an out-of-envelope change,
    the revised prompts must remain within envelope:

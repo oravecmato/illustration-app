@@ -37,7 +37,7 @@ from app.schemas.api import (
     TranslateResponse,
     TranslationItemResponse,
 )
-from app.schemas.claude import Companion, StyleGuide
+from app.schemas.claude import StyleGuide
 from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
 from app.utils.hashing import compute_source_hash
@@ -226,12 +226,6 @@ def _build_illustration_response(
     image_url = None
     if ill.image_path:
         image_url = f"/static/{ill.image_path}"
-    companion = None
-    if ill.companion_description and ill.companion_interaction:
-        companion = Companion(
-            description=ill.companion_description,
-            interaction=ill.companion_interaction,
-        )
 
     current_concept = ill.current_concept
     concept_state = None
@@ -273,7 +267,7 @@ def _build_illustration_response(
         concept_attempt=ill.concept_attempt,
         prompt_attempt=ill.prompt_attempt,
         image_url=image_url,
-        companion=companion,
+        contains_entity_label=ill.contains_entity_label,
         manual_attempts=ill.manual_attempts or 0,
         manual_session=manual_session,
     )

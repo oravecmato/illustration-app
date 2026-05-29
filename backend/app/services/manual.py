@@ -37,7 +37,7 @@ from app.db.models import (
 )
 from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
-from app.schemas.claude import Companion, StyleGuide
+from app.schemas.claude import StyleGuide, _normalize_entity_label
 from app.services.claude import ClaudeClient, ClaudeError
 from app.services.images import copy_image, save_manual_image
 from app.services.runpod import RunPodClient
@@ -321,12 +321,7 @@ class ManualService:
         story_blocks = json.loads(run.story_blocks_json) if run.story_blocks_json else []
         original_concept = illustration.initial_concept or illustration.current_concept
 
-        current_companion: Companion | None = None
-        if illustration.companion_description and illustration.companion_interaction:
-            current_companion = Companion(
-                description=illustration.companion_description,
-                interaction=illustration.companion_interaction,
-            )
+        current_entity = await self._entity_dict_from_illustration(illustration, run)
 
         try:
             agent_response = await self.claude.manual_concept(
@@ -338,7 +333,7 @@ class ManualService:
                 current_scene_excerpt=illustration.scene_excerpt,
                 original_concept=original_concept,
                 character_role=illustration.character_role,
-                current_companion=current_companion,
+                current_entity=current_entity,
                 manual_attempts_consumed=illustration.manual_attempts,
                 manual_attempts_remaining=max(
                     0, MAX_MANUAL_ATTEMPTS - illustration.manual_attempts
@@ -594,7 +589,8 @@ class ManualService:
         """Concept-design path: dispatch Agent 1 + RunPod."""
         style_guide = StyleGuide(**json.loads(style_guide_json))
         character_role = illustration.character_role
-        current_companion = self._companion_from_illustration(illustration)
+        run = await self.run_repo.get_run(illustration.run_id)
+        current_entity = await self._entity_dict_from_illustration(illustration, run)
 
         # Cumulative prompt-engineering memo (§ 6A.2 rule #12). NULL until
         # Agent 6 has emitted its first `prompting_notes_update`.
@@ -615,7 +611,7 @@ class ManualService:
                 style_guide=style_guide,
                 character_role=character_role,
                 character_config=self.character_config,
-                companion=current_companion,
+                contains_entity=current_entity,
                 prompting_notes=prompting_notes,
             )
         except Exception as e:
@@ -656,7 +652,8 @@ class ManualService:
         RunPod with revised prompts."""
         style_guide = StyleGuide(**json.loads(style_guide_json))
         character_role = illustration.character_role
-        current_companion = self._companion_from_illustration(illustration)
+        run = await self.run_repo.get_run(illustration.run_id)
+        current_entity = await self._entity_dict_from_illustration(illustration, run)
 
         ms = await self.manual_repo.get_manual_session(illustration.id)
         if ms is None or not ms.last_agreed_concept:
@@ -698,7 +695,7 @@ class ManualService:
                 style_guide=style_guide,
                 character_role=character_role,
                 character_config=self.character_config,
-                companion=current_companion,
+                contains_entity=current_entity,
                 prompting_notes=ms.prompting_notes,
             )
         except Exception as e:
@@ -731,13 +728,23 @@ class ManualService:
         )
         return illustration
 
-    @staticmethod
-    def _companion_from_illustration(illustration: Illustration) -> Companion | None:
-        if illustration.companion_description and illustration.companion_interaction:
-            return Companion(
-                description=illustration.companion_description,
-                interaction=illustration.companion_interaction,
-            )
+    async def _entity_dict_from_illustration(self, illustration: Illustration, run) -> dict | None:
+        """Look up the NarrativeEntity dict attached to this illustration.
+
+        Returns the entity entry from ``run.narrative_entities_json``
+        matching ``illustration.contains_entity_label`` (normalised), or
+        ``None`` when the slot has no active entity or the registry is
+        missing.
+        """
+        if not illustration.contains_entity_label or run is None:
+            return None
+        if not run.narrative_entities_json:
+            return None
+        entities = json.loads(run.narrative_entities_json)
+        norm = _normalize_entity_label(illustration.contains_entity_label)
+        for e in entities:
+            if _normalize_entity_label(e["label"]) == norm:
+                return e
         return None
 
     async def _slice_post_image_user_feedback(self, illustration_id: str) -> str:

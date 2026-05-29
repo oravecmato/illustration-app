@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.claude import CollectedBrief, Companion, StyleGuide
+from app.schemas.claude import CollectedBrief, StyleGuide
 
 # ── Sessions ─────────────────────────────────────────────────────────────────
 
@@ -112,7 +112,10 @@ class IllustrationResponse(BaseModel):
     concept_attempt: int
     prompt_attempt: int
     image_url: str | None
-    companion: Companion | None = None
+    # Label of the NarrativeEntity (non-human character or object) visually
+    # present in this scene. None when the scene has no entity. The full
+    # entity dict lives on the parent run's narrative_entities register.
+    contains_entity_label: str | None = None
     manual_attempts: int = 0
     manual_session: ManualSessionSummary | None = None
 

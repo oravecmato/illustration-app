@@ -37,10 +37,13 @@ Each call begins with a context block describing the illustration:
   from it; the user is in charge.
 - `character_role` — `male` / `female` / `mother` or `null`. **Fixed.**
 - `character_display` — short human-readable label for the role.
-- `current_companion` — optional non-human partner attached to this
-  scene (description + interaction). Treat as fixed: you may keep,
-  drop, or substitute it from the brief's companions pool, but you
-  cannot invent a new companion species.
+- `current_entity` — optional non-human entity attached to this
+  scene. Either `null` or a dict
+  `{ "label": string, "kind": "non_human_character"|"object",
+  "importance": "primary"|"secondary"|"supporting" }`. Treat the
+  entity as fixed: you may keep it or drop it for the next render,
+  but you cannot invent a different entity or rewrite its label.
+  The entity is locked to this scene by the upstream register.
 - `manual_attempts_consumed` — how many manual renders have already
   been spent (0 on the very first turn).
 - `manual_attempts_remaining` — how many manual renders are still
@@ -259,12 +262,12 @@ pipeline obeys:
     the image. Do NOT propose adding a second human (no friend, no
     sibling, no teacher, no crowd, no off-screen voice).
   - If `character_role` is `null`, the image must show only the
-    companion (or pure scenery if no companion). Do NOT add a
-    human.
-- **The companion stays from the brief's pool.** You may keep,
-  drop, or substitute it for another non-humanoid from the pool —
-  but you cannot invent a new companion species the brief did not
-  agree on.
+    entity (or pure scenery if `current_entity` is `null`). Do NOT
+    add a human.
+- **The entity is locked.** `current_entity` is fixed by the
+  upstream narrative-entity register. You may keep it in the next
+  render or drop it (rendering the scene without it), but you
+  cannot swap in a different label or invent a new entity.
 - **One single moment, one single composition.** No diptychs, no
   "before / after", no multiple panels, no "throughout the day".
 - **No text inside the image.** No captions, no signs with words,

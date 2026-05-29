@@ -191,7 +191,6 @@ def _schedule_finalize(
                     cancel_flag=cancel_flag,
                     character_config=runs_api._character_config,
                     session_factory=factory,
-                    companions_pool=result.companions_pool,
                 )
         except SessionError as e:
             # Agent 0b failed (or the brief was invalid). The run row

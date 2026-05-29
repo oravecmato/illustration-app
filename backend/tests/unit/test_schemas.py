@@ -8,15 +8,14 @@ from app.schemas.claude import (
     BuildStoryResponse,
     ChatResponse,
     CollectedBrief,
-    Companion,
     Environment,
     EvaluateImageResponse,
     GeneratePromptsResponse,
-    ReservedEntity,
+    NarrativeEntity,
+    NonHumanEntityHint,
     RethinkConceptResponse,
     RethinkEnvironmentResponse,
     RevisePromptsResponse,
-    companion_in_pool,
     validate_illustration_distribution,
 )
 
@@ -146,7 +145,7 @@ def _build_story_payload(
     blocks: list[dict],
     illustrations: list[dict],
     environments: list[dict] | None = None,
-    reserved_entities: list[dict] | None = None,
+    narrative_entities: list[dict] | None = None,
 ) -> dict:
     # When the test only fixes ``illustrations`` count != MAX_ILLUSTRATIONS,
     # the environments must still be MAX_ILLUSTRATIONS for the outer
@@ -160,7 +159,7 @@ def _build_story_payload(
         "style_guide": VALID_STYLE_GUIDE,
         "illustrations": illustrations,
         "environments": envs,
-        "reserved_entities": reserved_entities if reserved_entities is not None else [],
+        "narrative_entities": narrative_entities if narrative_entities is not None else [],
     }
 
 
@@ -378,6 +377,9 @@ def test_rethink_concept_accepts_valid():
     )
     assert "new approach" in resp.concept
     assert resp.scene_excerpt in resp.paragraph_text
+    # Default entity_action is "none" with null label.
+    assert resp.entity_action == "none"
+    assert resp.contains_entity_label is None
 
 
 def test_rethink_concept_rejects_missing_concept():
@@ -407,71 +409,111 @@ def test_rethink_concept_rejects_excerpt_not_in_paragraph():
         )
 
 
-# ---- Companion + CollectedBrief.companions ----
+# ---- NonHumanEntityHint + CollectedBrief.non_human_entities ----
 
 
-def _brief_with_companions(companion_descriptions: list[str]) -> dict:
+def _brief_with_hints(labels: list[str]) -> dict:
     payload = _brief(["male"])
-    payload["companions"] = [{"description": d} for d in companion_descriptions]
+    payload["non_human_entities"] = [{"label": label, "role_in_story": "ally"} for label in labels]
     return payload
 
 
-def test_collected_brief_accepts_empty_companions():
+def test_collected_brief_accepts_empty_non_human_entities():
     brief = CollectedBrief(**_brief(["male"]))
-    assert brief.companions == []
+    assert brief.non_human_entities == []
 
 
-def test_collected_brief_accepts_one_companion():
-    brief = CollectedBrief(**_brief_with_companions(["a small black cat"]))
-    assert len(brief.companions) == 1
-    assert brief.companions[0].description == "a small black cat"
+def test_collected_brief_accepts_one_hint():
+    brief = CollectedBrief(**_brief_with_hints(["a small black cat"]))
+    assert len(brief.non_human_entities) == 1
+    assert brief.non_human_entities[0].label == "a small black cat"
 
 
-def test_collected_brief_accepts_two_companions():
-    brief = CollectedBrief(**_brief_with_companions(["a small black cat", "a brass clockwork owl"]))
-    assert len(brief.companions) == 2
+def test_collected_brief_accepts_two_hints():
+    brief = CollectedBrief(**_brief_with_hints(["a small black cat", "a brass clockwork owl"]))
+    assert len(brief.non_human_entities) == 2
 
 
-def test_collected_brief_rejects_three_companions():
+def test_collected_brief_rejects_duplicate_hint_labels():
     with pytest.raises(ValidationError):
-        CollectedBrief(**_brief_with_companions(["a", "b", "c"]))
+        CollectedBrief(**_brief_with_hints(["a small black cat", "A SMALL BLACK CAT"]))
 
 
-def test_collected_brief_rejects_empty_companion_description():
+def test_collected_brief_rejects_empty_hint_label():
     with pytest.raises(ValidationError):
-        CollectedBrief(**_brief_with_companions(["   "]))
+        CollectedBrief(**_brief_with_hints(["   "]))
 
 
-def test_companion_requires_non_empty_fields():
+def test_non_human_entity_hint_requires_non_empty_fields():
     with pytest.raises(ValidationError):
-        Companion(description="", interaction="curled on her lap")
+        NonHumanEntityHint(label="", role_in_story="ally")
     with pytest.raises(ValidationError):
-        Companion(description="a small black cat", interaction="")
+        NonHumanEntityHint(label="a cat", role_in_story="   ")
 
 
-def test_companion_accepts_valid():
-    c = Companion(description="a small black cat", interaction="curled on her lap")
-    assert c.description == "a small black cat"
+def test_non_human_entity_hint_accepts_valid():
+    h = NonHumanEntityHint(label="a small black cat", role_in_story="ally")
+    assert h.label == "a small black cat"
 
 
-def test_build_story_accepts_illustration_with_companion():
+# ---- IllustrationConcept.contains_entity_label ----
+
+
+def test_build_story_accepts_illustration_with_entity():
     blocks, illustrations = _valid_blocks_and_illustrations()
-    illustrations[0]["companion"] = {
-        "description": "a small black cat",
-        "interaction": "curled on her lap",
-    }
-    resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-    assert resp.illustrations[0].companion is not None
-    assert resp.illustrations[0].companion.description == "a small black cat"
+    illustrations[0]["contains_entity_label"] = "a small black cat"
+    entities = [
+        {
+            "label": "a small black cat",
+            "kind": "non_human_character",
+            "importance": "primary",
+            "reserved_for_scene_index": 0,
+        }
+    ]
+    resp = BuildStoryResponse(
+        **_build_story_payload(
+            blocks=blocks, illustrations=illustrations, narrative_entities=entities
+        )
+    )
+    assert resp.illustrations[0].contains_entity_label == "a small black cat"
 
 
-def test_build_story_accepts_all_illustrations_without_companion():
+def test_build_story_rejects_entity_label_not_in_register():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    illustrations[0]["contains_entity_label"] = "a ghost dog"
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
+
+
+def test_build_story_rejects_entity_placed_outside_reserved_slot():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    illustrations[0]["contains_entity_label"] = "a small black cat"
+    entities = [
+        {
+            "label": "a small black cat",
+            "kind": "non_human_character",
+            "importance": "primary",
+            "reserved_for_scene_index": 2,  # reserved for slot 2, placed in slot 0
+        }
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks, illustrations=illustrations, narrative_entities=entities
+            )
+        )
+
+
+def test_build_story_accepts_all_illustrations_without_entity():
     blocks, illustrations = _valid_blocks_and_illustrations()
     resp = BuildStoryResponse(**_build_story_payload(blocks=blocks, illustrations=illustrations))
-    assert all(i.companion is None for i in resp.illustrations)
+    assert all(i.contains_entity_label is None for i in resp.illustrations)
 
 
-def test_rethink_concept_accepts_companion_null():
+# ---- RethinkConceptResponse entity_action / contains_entity_label coherence ----
+
+
+def test_rethink_concept_accepts_entity_action_none_with_null_label():
     resp = RethinkConceptResponse(
         workflow="single-lora",
         concept="A new concept",
@@ -479,13 +521,14 @@ def test_rethink_concept_accepts_companion_null():
         character_role="male",
         paragraph_text="Pršalo a on plakal.",
         scene_excerpt="Pršalo a on plakal.",
-        companion=None,
+        entity_action="none",
+        contains_entity_label=None,
         narrative_continuity_check="ok",
     )
-    assert resp.companion is None
+    assert resp.contains_entity_label is None
 
 
-def test_rethink_concept_accepts_companion_populated():
+def test_rethink_concept_accepts_entity_action_keep_with_label():
     resp = RethinkConceptResponse(
         workflow="single-lora",
         concept="A new concept",
@@ -493,17 +536,29 @@ def test_rethink_concept_accepts_companion_populated():
         character_role="female",
         paragraph_text="Sedela pri okne. Mačka sa jej krčila na kolenách.",
         scene_excerpt="Sedela pri okne.",
-        companion={
-            "description": "a small black cat",
-            "interaction": "curled on her lap",
-        },
+        entity_action="keep",
+        contains_entity_label="a small black cat",
         narrative_continuity_check="ok",
     )
-    assert resp.companion is not None
-    assert resp.companion.description == "a small black cat"
+    assert resp.contains_entity_label == "a small black cat"
 
 
-def test_rethink_concept_rejects_companion_with_empty_field():
+def test_rethink_concept_accepts_entity_action_claim_floating_with_label():
+    resp = RethinkConceptResponse(
+        workflow="single-lora",
+        concept="A new concept",
+        concept_localized="A new concept",
+        character_role="female",
+        paragraph_text="Sedela pri okne. Mačka sa jej krčila na kolenách.",
+        scene_excerpt="Sedela pri okne.",
+        entity_action="claim_floating",
+        contains_entity_label="a small black cat",
+        narrative_continuity_check="ok",
+    )
+    assert resp.entity_action == "claim_floating"
+
+
+def test_rethink_concept_rejects_keep_with_null_label():
     with pytest.raises(ValidationError):
         RethinkConceptResponse(
             workflow="single-lora",
@@ -512,43 +567,40 @@ def test_rethink_concept_rejects_companion_with_empty_field():
             character_role="male",
             paragraph_text="Pršalo.",
             scene_excerpt="Pršalo.",
-            companion={"description": "a cat", "interaction": ""},
+            entity_action="keep",
+            contains_entity_label=None,
             narrative_continuity_check="ok",
         )
 
 
-# ---- companion_in_pool ----
+def test_rethink_concept_rejects_drop_with_non_null_label():
+    with pytest.raises(ValidationError):
+        RethinkConceptResponse(
+            workflow="single-lora",
+            concept="A new concept",
+            concept_localized="A new concept",
+            character_role="male",
+            paragraph_text="Pršalo.",
+            scene_excerpt="Pršalo.",
+            entity_action="drop",
+            contains_entity_label="a small black cat",
+            narrative_continuity_check="ok",
+        )
 
 
-def test_companion_in_pool_exact_match():
-    assert companion_in_pool("a small black cat", ["a small black cat"])
-
-
-def test_companion_in_pool_case_insensitive():
-    assert companion_in_pool("A Small Black Cat", ["a small black cat"])
-
-
-def test_companion_in_pool_whitespace_tolerant():
-    assert companion_in_pool("a  small   black cat", ["a small black cat"])
-
-
-def test_companion_in_pool_substring_in_either_direction():
-    # description is substring of pool entry
-    assert companion_in_pool("small black cat", ["a small black cat"])
-    # pool entry is substring of description
-    assert companion_in_pool("a small black cat sitting", ["small black cat"])
-
-
-def test_companion_in_pool_rejects_unrelated():
-    assert not companion_in_pool("a red dragon", ["a small black cat"])
-
-
-def test_companion_in_pool_rejects_empty_description():
-    assert not companion_in_pool("", ["a small black cat"])
-
-
-def test_companion_in_pool_rejects_empty_pool():
-    assert not companion_in_pool("a small black cat", [])
+def test_rethink_concept_rejects_none_with_non_null_label():
+    with pytest.raises(ValidationError):
+        RethinkConceptResponse(
+            workflow="single-lora",
+            concept="A new concept",
+            concept_localized="A new concept",
+            character_role="male",
+            paragraph_text="Pršalo.",
+            scene_excerpt="Pršalo.",
+            entity_action="none",
+            contains_entity_label="a small black cat",
+            narrative_continuity_check="ok",
+        )
 
 
 # ---- main_character_role ----
@@ -622,11 +674,11 @@ def test_environment_rejects_invalid_kind():
         Environment(label="x", kind="undersea", aspect="single")
 
 
-# ---- ReservedEntity ----
+# ---- NarrativeEntity ----
 
 
-def test_reserved_entity_accepts_non_human_primary_with_index():
-    e = ReservedEntity(
+def test_narrative_entity_accepts_non_human_primary_with_index():
+    e = NarrativeEntity(
         label="malá čierna mačka",
         kind="non_human_character",
         importance="primary",
@@ -635,53 +687,90 @@ def test_reserved_entity_accepts_non_human_primary_with_index():
     assert e.reserved_for_scene_index == 2
 
 
-def test_reserved_entity_accepts_object_unassigned():
-    e = ReservedEntity(
+def test_narrative_entity_accepts_supporting_object_unassigned():
+    e = NarrativeEntity(
         label="stará fotografia",
         kind="object",
-        importance="secondary",
+        importance="supporting",
         reserved_for_scene_index=None,
     )
     assert e.reserved_for_scene_index is None
 
 
-def test_reserved_entity_rejects_empty_label():
+def test_narrative_entity_rejects_object_with_primary_importance():
+    # Primary/secondary are reserved for non_human_character.
     with pytest.raises(ValidationError):
-        ReservedEntity(
-            label="",
+        NarrativeEntity(
+            label="stará fotografia",
             kind="object",
             importance="primary",
+            reserved_for_scene_index=1,
         )
 
 
-def test_reserved_entity_rejects_out_of_range_index():
+def test_narrative_entity_rejects_primary_unassigned():
+    # Primary/secondary must be slot-reserved.
     with pytest.raises(ValidationError):
-        ReservedEntity(
+        NarrativeEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=None,
+        )
+
+
+def test_narrative_entity_rejects_secondary_unassigned():
+    with pytest.raises(ValidationError):
+        NarrativeEntity(
+            label="hnedá sova",
+            kind="non_human_character",
+            importance="secondary",
+            reserved_for_scene_index=None,
+        )
+
+
+def test_narrative_entity_rejects_empty_label():
+    with pytest.raises(ValidationError):
+        NarrativeEntity(
+            label="",
+            kind="object",
+            importance="supporting",
+        )
+
+
+def test_narrative_entity_rejects_out_of_range_index():
+    with pytest.raises(ValidationError):
+        NarrativeEntity(
             label="x",
             kind="object",
-            importance="primary",
+            importance="supporting",
             reserved_for_scene_index=MAX_ILLUSTRATIONS,
         )
 
 
-def test_reserved_entity_rejects_negative_index():
+def test_narrative_entity_rejects_negative_index():
     with pytest.raises(ValidationError):
-        ReservedEntity(
+        NarrativeEntity(
             label="x",
             kind="object",
-            importance="primary",
+            importance="supporting",
             reserved_for_scene_index=-1,
         )
 
 
-def test_reserved_entity_rejects_invalid_kind():
+def test_narrative_entity_rejects_invalid_kind():
     with pytest.raises(ValidationError):
-        ReservedEntity(label="x", kind="weapon", importance="primary")
+        NarrativeEntity(label="x", kind="weapon", importance="supporting")
 
 
-def test_reserved_entity_rejects_invalid_importance():
+def test_narrative_entity_rejects_invalid_importance():
     with pytest.raises(ValidationError):
-        ReservedEntity(label="x", kind="object", importance="critical")
+        NarrativeEntity(
+            label="x",
+            kind="object",
+            importance="critical",
+            reserved_for_scene_index=0,
+        )
 
 
 # ---- BuildStoryResponse environments ----
@@ -776,60 +865,36 @@ def test_build_story_environment_label_uniqueness_is_case_insensitive():
         )
 
 
-# ---- BuildStoryResponse reserved entities ----
+# ---- BuildStoryResponse narrative_entities ----
 
 
-def test_build_story_accepts_reserved_entities_pool():
+def test_build_story_accepts_narrative_entities_register():
     blocks, illustrations = _valid_blocks_and_illustrations()
-    reserved = [
+    entities = [
         {
             "label": "stará kniha",
             "kind": "object",
-            "importance": "primary",
+            "importance": "supporting",
             "reserved_for_scene_index": 2,
         },
         {
             "label": "čierna mačka",
             "kind": "non_human_character",
-            "importance": "secondary",
+            "importance": "supporting",
             "reserved_for_scene_index": None,
         },
     ]
     resp = BuildStoryResponse(
         **_build_story_payload(
-            blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+            blocks=blocks, illustrations=illustrations, narrative_entities=entities
         )
     )
-    assert len(resp.reserved_entities) == 2
-
-
-def test_build_story_rejects_two_entities_sharing_scene_index():
-    blocks, illustrations = _valid_blocks_and_illustrations()
-    reserved = [
-        {
-            "label": "kniha",
-            "kind": "object",
-            "importance": "primary",
-            "reserved_for_scene_index": 1,
-        },
-        {
-            "label": "mačka",
-            "kind": "non_human_character",
-            "importance": "secondary",
-            "reserved_for_scene_index": 1,
-        },
-    ]
-    with pytest.raises(ValidationError):
-        BuildStoryResponse(
-            **_build_story_payload(
-                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
-            )
-        )
+    assert len(resp.narrative_entities) == 2
 
 
 def test_build_story_rejects_two_primary_non_human_characters():
     blocks, illustrations = _valid_blocks_and_illustrations()
-    reserved = [
+    entities = [
         {
             "label": "mačka",
             "kind": "non_human_character",
@@ -846,14 +911,14 @@ def test_build_story_rejects_two_primary_non_human_characters():
     with pytest.raises(ValidationError):
         BuildStoryResponse(
             **_build_story_payload(
-                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+                blocks=blocks, illustrations=illustrations, narrative_entities=entities
             )
         )
 
 
 def test_build_story_rejects_two_secondary_non_human_characters():
     blocks, illustrations = _valid_blocks_and_illustrations()
-    reserved = [
+    entities = [
         {
             "label": "mačka",
             "kind": "non_human_character",
@@ -870,7 +935,54 @@ def test_build_story_rejects_two_secondary_non_human_characters():
     with pytest.raises(ValidationError):
         BuildStoryResponse(
             **_build_story_payload(
-                blocks=blocks, illustrations=illustrations, reserved_entities=reserved
+                blocks=blocks, illustrations=illustrations, narrative_entities=entities
+            )
+        )
+
+
+def test_build_story_rejects_duplicate_entity_labels():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    entities = [
+        {
+            "label": "Stará Kniha",
+            "kind": "object",
+            "importance": "supporting",
+            "reserved_for_scene_index": 0,
+        },
+        {
+            "label": "stará kniha",
+            "kind": "object",
+            "importance": "supporting",
+            "reserved_for_scene_index": 1,
+        },
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks, illustrations=illustrations, narrative_entities=entities
+            )
+        )
+
+
+def test_build_story_rejects_entity_label_colliding_with_environment_label():
+    blocks, illustrations = _valid_blocks_and_illustrations()
+    envs = _default_environments()
+    entities = [
+        {
+            # Same label as envs[0].
+            "label": envs[0]["label"],
+            "kind": "object",
+            "importance": "supporting",
+            "reserved_for_scene_index": 0,
+        },
+    ]
+    with pytest.raises(ValidationError):
+        BuildStoryResponse(
+            **_build_story_payload(
+                blocks=blocks,
+                illustrations=illustrations,
+                environments=envs,
+                narrative_entities=entities,
             )
         )
 
@@ -878,23 +990,33 @@ def test_build_story_rejects_two_secondary_non_human_characters():
 # ---- validate_illustration_distribution ----
 
 
-def _ill_concept(scene_index: int, role: str | None) -> dict:
+def _ill_concept(scene_index: int, role: str | None, entity_label: str | None = None) -> dict:
     return {
         "scene_index": scene_index,
         "scene_excerpt": f"excerpt {scene_index}",
         "concept": f"concept {scene_index}",
         "character_role": role,
+        "contains_entity_label": entity_label,
     }
 
 
-def _build_distribution_inputs(roles: list[str | None], cast: list[str], main: str):
+def _build_distribution_inputs(
+    roles: list[str | None],
+    cast: list[str],
+    main: str,
+    entity_labels: list[str | None] | None = None,
+):
     """Construct (brief, illustrations) for distribution-validator tests."""
     from app.schemas.claude import IllustrationConcept
 
     brief_payload = _brief(cast)
     brief_payload["main_character_role"] = main
     brief = CollectedBrief(**brief_payload)
-    illustrations = [IllustrationConcept(**_ill_concept(i, r)) for i, r in enumerate(roles)]
+    labels = entity_labels if entity_labels is not None else [None] * len(roles)
+    illustrations = [
+        IllustrationConcept(**_ill_concept(i, r, lab))
+        for i, (r, lab) in enumerate(zip(roles, labels, strict=True))
+    ]
     return brief, illustrations
 
 
@@ -904,7 +1026,7 @@ def test_distribution_accepts_balanced_run():
         cast=["male", "female"],
         main="male",
     )
-    validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+    validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_accepts_one_no_human_slot():
@@ -913,7 +1035,7 @@ def test_distribution_accepts_one_no_human_slot():
         cast=["male", "female"],
         main="male",
     )
-    validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+    validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_rejects_cast_role_never_appearing():
@@ -923,7 +1045,7 @@ def test_distribution_rejects_cast_role_never_appearing():
         main="male",
     )
     with pytest.raises(ValueError, match="cast role 'female'"):
-        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+        validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_rejects_main_appearing_only_once():
@@ -933,7 +1055,7 @@ def test_distribution_rejects_main_appearing_only_once():
         main="male",
     )
     with pytest.raises(ValueError, match="main_character_role='male'"):
-        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+        validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_rejects_side_exceeding_main():
@@ -943,7 +1065,7 @@ def test_distribution_rejects_side_exceeding_main():
         main="male",
     )
     with pytest.raises(ValueError, match="side role 'female'"):
-        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+        validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_rejects_two_no_human_slots():
@@ -953,25 +1075,18 @@ def test_distribution_rejects_two_no_human_slots():
         main="male",
     )
     with pytest.raises(ValueError, match="character_role=null"):
-        validate_illustration_distribution(brief, illustrations, reserved_entities=[])
+        validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
-def test_distribution_rejects_primary_nh_unassigned():
+def test_distribution_rejects_entity_label_not_in_register():
     brief, illustrations = _build_distribution_inputs(
         roles=["male", "female", "male", "female", "male"],
         cast=["male", "female"],
         main="male",
+        entity_labels=["a ghost dog", None, None, None, None],
     )
-    reserved = [
-        ReservedEntity(
-            label="čierna mačka",
-            kind="non_human_character",
-            importance="primary",
-            reserved_for_scene_index=None,
-        )
-    ]
-    with pytest.raises(ValueError, match="primary non_human_character"):
-        validate_illustration_distribution(brief, illustrations, reserved)
+    with pytest.raises(ValueError, match="not in the narrative_entities register"):
+        validate_illustration_distribution(brief, illustrations, narrative_entities=[])
 
 
 def test_distribution_accepts_primary_nh_with_main():
@@ -979,16 +1094,17 @@ def test_distribution_accepts_primary_nh_with_main():
         roles=["male", "female", "male", "female", "male"],
         cast=["male", "female"],
         main="male",
+        entity_labels=[None, None, "čierna mačka", None, None],
     )
-    reserved = [
-        ReservedEntity(
+    entities = [
+        NarrativeEntity(
             label="čierna mačka",
             kind="non_human_character",
             importance="primary",
             reserved_for_scene_index=2,  # male slot
         )
     ]
-    validate_illustration_distribution(brief, illustrations, reserved)
+    validate_illustration_distribution(brief, illustrations, entities)
 
 
 def test_distribution_accepts_primary_nh_alone():
@@ -996,52 +1112,55 @@ def test_distribution_accepts_primary_nh_alone():
         roles=["male", "female", "male", "female", None],
         cast=["male", "female"],
         main="male",
+        entity_labels=[None, None, None, None, "čierna mačka"],
     )
-    reserved = [
-        ReservedEntity(
+    entities = [
+        NarrativeEntity(
             label="čierna mačka",
             kind="non_human_character",
             importance="primary",
             reserved_for_scene_index=4,  # no-human slot
         )
     ]
-    validate_illustration_distribution(brief, illustrations, reserved)
+    validate_illustration_distribution(brief, illustrations, entities)
 
 
-def test_distribution_rejects_primary_nh_with_side_role():
+def test_distribution_accepts_primary_nh_with_side_role():
+    # Under the unified register, primary NH may sit with ANY cast role.
     brief, illustrations = _build_distribution_inputs(
         roles=["male", "female", "male", "female", "male"],
         cast=["male", "female"],
         main="male",
+        entity_labels=[None, "čierna mačka", None, None, None],
     )
-    reserved = [
-        ReservedEntity(
+    entities = [
+        NarrativeEntity(
             label="čierna mačka",
             kind="non_human_character",
             importance="primary",
             reserved_for_scene_index=1,  # female (side) slot
         )
     ]
-    with pytest.raises(ValueError, match="neither null"):
-        validate_illustration_distribution(brief, illustrations, reserved)
+    validate_illustration_distribution(brief, illustrations, entities)
 
 
-def test_distribution_rejects_secondary_nh_with_side_role():
+def test_distribution_rejects_secondary_nh_alone():
     brief, illustrations = _build_distribution_inputs(
-        roles=["male", "female", "male", "female", "male"],
+        roles=["male", "female", "male", "female", None],
         cast=["male", "female"],
         main="male",
+        entity_labels=[None, None, None, None, "hnedá sova"],
     )
-    reserved = [
-        ReservedEntity(
+    entities = [
+        NarrativeEntity(
             label="hnedá sova",
             kind="non_human_character",
             importance="secondary",
-            reserved_for_scene_index=1,  # female (side) slot
+            reserved_for_scene_index=4,  # no-human slot — secondary may NOT appear alone
         )
     ]
     with pytest.raises(ValueError, match="secondary non_human_character"):
-        validate_illustration_distribution(brief, illustrations, reserved)
+        validate_illustration_distribution(brief, illustrations, entities)
 
 
 def test_distribution_accepts_secondary_nh_with_main():
@@ -1049,16 +1168,110 @@ def test_distribution_accepts_secondary_nh_with_main():
         roles=["male", "female", "male", "female", "male"],
         cast=["male", "female"],
         main="male",
+        entity_labels=[None, None, "hnedá sova", None, None],
     )
-    reserved = [
-        ReservedEntity(
+    entities = [
+        NarrativeEntity(
             label="hnedá sova",
             kind="non_human_character",
             importance="secondary",
             reserved_for_scene_index=2,  # male (main) slot
         )
     ]
-    validate_illustration_distribution(brief, illustrations, reserved)
+    validate_illustration_distribution(brief, illustrations, entities)
+
+
+def test_distribution_accepts_secondary_nh_with_side():
+    # Unified register allows secondary NH with any cast role (just not alone).
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+        entity_labels=[None, "hnedá sova", None, None, None],
+    )
+    entities = [
+        NarrativeEntity(
+            label="hnedá sova",
+            kind="non_human_character",
+            importance="secondary",
+            reserved_for_scene_index=1,
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, entities)
+
+
+def test_distribution_rejects_entity_outside_reserved_slot():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+        entity_labels=[None, "kniha", None, None, None],  # placed at slot 1
+    )
+    entities = [
+        NarrativeEntity(
+            label="kniha",
+            kind="object",
+            importance="supporting",
+            reserved_for_scene_index=3,  # reserved for slot 3, not 1
+        )
+    ]
+    with pytest.raises(ValueError, match="scene-locked"):
+        validate_illustration_distribution(brief, illustrations, entities)
+
+
+def test_distribution_accepts_supporting_entity_at_reserved_slot():
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+        entity_labels=[None, None, None, "kniha", None],
+    )
+    entities = [
+        NarrativeEntity(
+            label="kniha",
+            kind="object",
+            importance="supporting",
+            reserved_for_scene_index=3,
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, entities)
+
+
+def test_distribution_accepts_floating_supporting_entity_at_any_slot():
+    # Floating supporting (reserved_for_scene_index=None) may appear at any slot.
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+        entity_labels=[None, "kniha", None, None, None],
+    )
+    entities = [
+        NarrativeEntity(
+            label="kniha",
+            kind="object",
+            importance="supporting",
+            reserved_for_scene_index=None,  # floating
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, entities)
+
+
+def test_distribution_accepts_unused_entity():
+    # An entity that no illustration claims is allowed (graceful drop).
+    brief, illustrations = _build_distribution_inputs(
+        roles=["male", "female", "male", "female", "male"],
+        cast=["male", "female"],
+        main="male",
+    )
+    entities = [
+        NarrativeEntity(
+            label="čierna mačka",
+            kind="non_human_character",
+            importance="primary",
+            reserved_for_scene_index=2,
+        )
+    ]
+    validate_illustration_distribution(brief, illustrations, entities)
 
 
 # ---- EvaluateImageResponse environment problem ----
@@ -1089,7 +1302,8 @@ def test_rethink_environment_accepts_valid():
         narrative_continuity_check="Flows naturally from prev to next.",
     )
     assert resp.environment.label == "kuchyňa"
-    assert resp.companion is None
+    assert resp.contains_entity_label is None
+    assert resp.entity_action == "none"
 
 
 def test_rethink_environment_accepts_dual_environment():
@@ -1145,5 +1359,21 @@ def test_rethink_environment_rejects_invalid_environment_aspect():
             scene_excerpt="Stál pri okne.",
             # indoor + aspect=inside is invalid (must be 'single')
             environment={"label": "obývačka", "kind": "indoor", "aspect": "inside"},
+            narrative_continuity_check="ok",
+        )
+
+
+def test_rethink_environment_rejects_keep_with_null_label():
+    with pytest.raises(ValidationError):
+        RethinkEnvironmentResponse(
+            workflow="single-lora",
+            concept="x",
+            concept_localized="x",
+            character_role="male",
+            paragraph_text="Stál pri okne.",
+            scene_excerpt="Stál pri okne.",
+            environment={"label": "obývačka", "kind": "indoor", "aspect": "single"},
+            entity_action="keep",
+            contains_entity_label=None,
             narrative_continuity_check="ok",
         )

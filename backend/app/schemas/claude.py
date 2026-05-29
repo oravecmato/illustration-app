@@ -1,4 +1,3 @@
-from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
@@ -6,28 +5,9 @@ from pydantic import BaseModel, model_validator
 from app.constants import MAX_ILLUSTRATIONS
 
 
-def _normalize_companion_text(text: str) -> str:
+def _normalize_entity_label(text: str) -> str:
+    """Whitespace-collapsed, case-folded label for cross-illustration comparison."""
     return " ".join(text.lower().split())
-
-
-def companion_in_pool(description: str, pool: Iterable[str]) -> bool:
-    """Whitespace-tolerant, case-insensitive pool-fidelity check.
-
-    Returns True iff ``description`` matches at least one pool entry by
-    exact normalized equality or by normalized substring (either
-    direction — pool entry inside description, or description inside
-    pool entry).
-    """
-    norm = _normalize_companion_text(description)
-    if not norm:
-        return False
-    for entry in pool:
-        e = _normalize_companion_text(entry)
-        if not e:
-            continue
-        if norm == e or norm in e or e in norm:
-            return True
-    return False
 
 
 # ── Shared shapes ────────────────────────────────────────────────────────────
@@ -40,42 +20,7 @@ class StyleGuide(BaseModel):
     character_baseline_description: str
 
 
-class Companion(BaseModel):
-    """A non-human companion attached to an illustration.
-
-    Both fields are required and non-empty. Used in Agent 0b output and
-    Agent 4 output. The ``description`` must reference an entry in the
-    run's ``collected_brief.companions`` pool (pool-fidelity check runs
-    server-side, outside this schema).
-    """
-
-    description: str
-    interaction: str
-
-    @model_validator(mode="after")
-    def _validate_non_empty(self) -> "Companion":
-        if not self.description.strip():
-            raise ValueError("companion.description must be non-empty")
-        if not self.interaction.strip():
-            raise ValueError("companion.interaction must be non-empty")
-        return self
-
-
-class IllustrationConcept(BaseModel):
-    scene_index: int
-    scene_excerpt: str
-    concept: str
-    concept_localized: str | None = None  # Used by Agent 0b; null for Agents 1/3/4
-    character_role: Literal["male", "female", "mother"] | None = None
-    companion: Companion | None = None
-
-
 # ── Environment ──────────────────────────────────────────────────────────────
-
-
-def _normalize_env_label(text: str) -> str:
-    """Whitespace-collapsed, case-folded label for cross-illustration comparison."""
-    return " ".join(text.lower().split())
 
 
 class Environment(BaseModel):
@@ -103,36 +48,59 @@ class Environment(BaseModel):
         return self
 
 
-# ── Reserved entities (non-human characters and story-important objects) ─────
+# ── Narrative entities (non-human characters + story-important objects) ─────
 
 
-class ReservedEntity(BaseModel):
-    """A non-human character or story-important object reserved at a specific
-    illustration slot (or unassigned). Once an entity is reserved for a
-    ``scene_index``, no other illustration may depict it — this side-steps
-    cross-illustration object/character consistency, which our renderer
-    cannot guarantee.
+class NarrativeEntity(BaseModel):
+    """One non-human character or story-important object that belongs to the
+    story. The unified replacement for the legacy ``companion`` /
+    ``reserved_entity`` split — there is only one register now and the
+    same rules apply uniformly to friendly creatures, antagonists, and
+    objects.
 
-    The ``kind`` discriminates a recurring non-human character (which also
-    appears in the brief's ``companions`` pool when used in a scene) from a
-    plain story-important object. ``importance`` ranks the entity for the
-    statistical-distribution rules (primary NH-char appears exactly once,
-    secondary NH-char at most once and only with a human).
+    ``importance`` ranks the entity for cross-illustration quotas
+    (cf. ``validate_illustration_distribution``):
 
-    Disambiguation rule (cars / boats / planes etc.): if a human is at any
-    point in the story *inside* the entity, treat it as an environment and
-    do NOT add it here; otherwise add it as kind=``"object"``.
+    * ``primary`` — at most ONE primary NH-character per story. MUST be
+      pre-reserved to a specific ``scene_index`` by Agent 0b. Targets
+      exactly one appearance overall (graceful drop by Agent 4 may
+      lower this to zero — see locking semantics).
+    * ``secondary`` — at most ONE secondary NH-character per story.
+      MUST be pre-reserved by Agent 0b. At most one appearance overall,
+      AND the slot where it appears must contain at least one human
+      cast member (it may never appear alone).
+    * ``supporting`` — any number of supporting NH-characters and
+      objects. May be ``reserved_for_scene_index=None`` (floating) when
+      first emitted by Agent 0b; the first agent that includes a
+      floating entity in a scene permanently claims that slot for it.
+      At most one appearance per supporting entity.
+
+    Locking semantics (the ``reserved_for_scene_index`` field):
+
+    * Once set to ``N``, never changes — even if Agent 4 later drops
+      the entity from slot ``N`` (graceful degradation), the entity
+      stays forever associated with that slot and may NEVER appear in
+      any other slot. This sidesteps cross-illustration consistency
+      problems the renderer cannot solve.
+    * ``None`` means "floating" — eligible to be claimed by any later
+      agent into the slot it's being rewritten for. Only supporting
+      entities may be floating at Agent 0b time.
+
+    Disambiguation (cars / boats / planes / cabins): if a human is at
+    any point in the story *inside* the entity, treat it as an
+    ``Environment`` and do NOT add it here; otherwise add it as
+    ``kind="object"``.
     """
 
     label: str
     kind: Literal["non_human_character", "object"]
-    importance: Literal["primary", "secondary"]
+    importance: Literal["primary", "secondary", "supporting"]
     reserved_for_scene_index: int | None = None
 
     @model_validator(mode="after")
-    def _validate(self) -> "ReservedEntity":
+    def _validate(self) -> "NarrativeEntity":
         if not self.label.strip():
-            raise ValueError("reserved_entity.label must be non-empty")
+            raise ValueError("narrative_entity.label must be non-empty")
         if (
             self.reserved_for_scene_index is not None
             and not 0 <= self.reserved_for_scene_index < MAX_ILLUSTRATIONS
@@ -140,7 +108,38 @@ class ReservedEntity(BaseModel):
             raise ValueError(
                 f"reserved_for_scene_index must be in 0..{MAX_ILLUSTRATIONS - 1} or null"
             )
+        # Primary/secondary NH characters MUST be reserved by Agent 0b.
+        # Only supporting entities may be floating.
+        if self.importance in ("primary", "secondary") and self.kind != "non_human_character":
+            raise ValueError(
+                "importance='primary' and importance='secondary' are reserved "
+                "for kind='non_human_character'; use 'supporting' for objects"
+            )
+        if self.importance in ("primary", "secondary") and self.reserved_for_scene_index is None:
+            raise ValueError(
+                f"importance={self.importance!r} entity {self.label!r} must "
+                "have reserved_for_scene_index set (only 'supporting' entities "
+                "may be floating)"
+            )
         return self
+
+
+class IllustrationConcept(BaseModel):
+    """One illustration slot. ``contains_entity_label`` is the single
+    handle for "what non-human entity is visually present in this
+    scene"; it replaces the legacy ``companion`` field. When non-null,
+    the label MUST match an entity in the run's narrative_entities
+    register, AND that entity's ``reserved_for_scene_index`` must equal
+    this illustration's ``scene_index`` (or be ``None`` at the moment of
+    placement, in which case the placement implicitly claims the slot).
+    """
+
+    scene_index: int
+    scene_excerpt: str
+    concept: str
+    concept_localized: str | None = None  # Used by Agent 0b; null for Agents 1/3/4
+    character_role: Literal["male", "female", "mother"] | None = None
+    contains_entity_label: str | None = None
 
 
 # ── Agent 0a: chat ───────────────────────────────────────────────────────────
@@ -152,21 +151,34 @@ class BriefCharacter(BaseModel):
     short_description: str
 
 
-class BriefCompanion(BaseModel):
-    """One companion entry in the brief's agreed pool (Agent 0a)."""
+class NonHumanEntityHint(BaseModel):
+    """One non-human entity hint collected from the user during chat.
 
-    description: str
+    Replaces the legacy ``BriefCompanion`` and broadens the concept: this
+    now covers friendly companions, antagonists, recurring creatures,
+    and story-important objects alike. Agent 0b promotes each hint into
+    a ``NarrativeEntity`` with concrete importance + slot reservation.
+
+    ``role_in_story`` is free-form English text the agent uses to decide
+    importance (e.g. ``"ally"``, ``"antagonist"``, ``"recurring
+    presence"``, ``"sentimental keepsake"``).
+    """
+
+    label: str
+    role_in_story: str
 
     @model_validator(mode="after")
-    def _validate_non_empty(self) -> "BriefCompanion":
-        if not self.description.strip():
-            raise ValueError("companion description must be non-empty")
+    def _validate(self) -> "NonHumanEntityHint":
+        if not self.label.strip():
+            raise ValueError("non_human_entity.label must be non-empty")
+        if not self.role_in_story.strip():
+            raise ValueError("non_human_entity.role_in_story must be non-empty")
         return self
 
 
 class CollectedBrief(BaseModel):
     characters: list[BriefCharacter]
-    companions: list[BriefCompanion] = []
+    non_human_entities: list[NonHumanEntityHint] = []
     topic: str
     notes: str
     main_character_role: Literal["male", "female", "mother"]
@@ -182,12 +194,14 @@ class CollectedBrief(BaseModel):
             raise ValueError("a brief consisting only of 'mother' is invalid")
         if "mother" in roles and not ({"male", "female"} & set(roles)):
             raise ValueError("'mother' requires at least one of 'male' or 'female'")
-        if len(self.companions) > 2:
-            raise ValueError("companions may contain at most 2 entries")
-        # main_character_role must reference an actual cast member, and (per
-        # the new statistical distribution rules) cannot be 'mother' unless
-        # she is the only human besides herself — which the prior rule
-        # forbids. So in practice: main is always male or female.
+        # Non-human entity label uniqueness (normalized).
+        seen_labels: set[str] = set()
+        for ent in self.non_human_entities:
+            norm = _normalize_entity_label(ent.label)
+            if norm in seen_labels:
+                raise ValueError(f"non_human_entities contains duplicate label {ent.label!r}")
+            seen_labels.add(norm)
+        # main_character_role must reference an actual cast member.
         if self.main_character_role not in roles:
             raise ValueError(
                 f"main_character_role must be one of the characters' roles ({roles!r})"
@@ -246,16 +260,14 @@ class BuildStoryResponse(BaseModel):
     # Position N in the list is the environment locked to scene_index=N.
     # See ``Environment`` docstring for dual-aspect semantics.
     environments: list[Environment]
-    # Story-important non-human characters and objects. Entries may be
-    # ``reserved_for_scene_index=None`` at A0b time if the agent could not
-    # commit them to a specific slot yet — orchestrator/A4 must still
-    # respect them as exclusion zones for *other* slots.
-    reserved_entities: list[ReservedEntity] = []
+    # Unified register of all story-important non-human characters and
+    # objects. Replaces the legacy ``reserved_entities`` + ``companions``
+    # split. See ``NarrativeEntity`` for shape and locking semantics.
+    narrative_entities: list[NarrativeEntity] = []
 
     @model_validator(mode="after")
     def _validate_structure(self) -> "BuildStoryResponse":
-        # Exact-count rule (§ 7.1 Call 0b rule #4): Agent 0b must return
-        # exactly MAX_ILLUSTRATIONS illustrations — no fewer, no more.
+        # Exact-count rule (§ 7.1 Call 0b rule #4).
         if len(self.illustrations) != MAX_ILLUSTRATIONS:
             raise ValueError(
                 f"illustrations must contain exactly {MAX_ILLUSTRATIONS} entries, "
@@ -270,19 +282,19 @@ class BuildStoryResponse(BaseModel):
         if blocks[-1].type != "paragraph":
             raise ValueError("story_blocks must end with a paragraph block")
 
-        # No two adjacent illustration blocks
+        # No two adjacent illustration blocks.
         for prev, curr in zip(blocks, blocks[1:], strict=False):
             if prev.type == "illustration" and curr.type == "illustration":
                 raise ValueError("two illustration blocks must not be adjacent")
 
-        # scene_index of illustration blocks must be 0, 1, 2, ... in order
+        # scene_index of illustration blocks must be 0, 1, 2, ... in order.
         block_indices = [b.scene_index for b in blocks if isinstance(b, IllustrationBlock)]
         if block_indices != list(range(len(block_indices))):
             raise ValueError(
                 "illustration block scene_index values must be 0,1,2,... in document order"
             )
 
-        # Illustrations and block indices must match 1-to-1
+        # Illustrations and block indices must match 1-to-1.
         illus_indices = [i.scene_index for i in self.illustrations]
         if sorted(illus_indices) != sorted(block_indices):
             raise ValueError(
@@ -309,10 +321,10 @@ class BuildStoryResponse(BaseModel):
             )
 
         # Group environments by normalized label and enforce dual rules.
-        groups: dict[str, list[tuple[int, Environment]]] = {}
+        env_groups: dict[str, list[tuple[int, Environment]]] = {}
         for idx, env in enumerate(self.environments):
-            groups.setdefault(_normalize_env_label(env.label), []).append((idx, env))
-        for norm_label, group in groups.items():
+            env_groups.setdefault(_normalize_entity_label(env.label), []).append((idx, env))
+        for norm_label, group in env_groups.items():
             kinds = {env.kind for _, env in group}
             if len(kinds) > 1:
                 raise ValueError(
@@ -339,48 +351,73 @@ class BuildStoryResponse(BaseModel):
                         f"aspect (got {aspects})"
                     )
 
-        # Reserved entities: at most one reservation per scene_index.
-        seen_reservations: dict[int, str] = {}
-        for entity in self.reserved_entities:
-            if entity.reserved_for_scene_index is None:
-                continue
-            idx = entity.reserved_for_scene_index
-            if idx in seen_reservations:
+        # narrative_entities: label uniqueness (normalized).
+        seen_entity_labels: set[str] = set()
+        for entity in self.narrative_entities:
+            norm = _normalize_entity_label(entity.label)
+            if norm in seen_entity_labels:
+                raise ValueError(f"narrative_entities contains duplicate label {entity.label!r}")
+            seen_entity_labels.add(norm)
+            # narrative_entity labels must not collide with environment labels.
+            if norm in env_groups:
                 raise ValueError(
-                    f"scene_index={idx} has multiple reserved entities "
-                    f"({seen_reservations[idx]!r} and {entity.label!r}); "
-                    "at most one reserved entity may be tied to a single "
-                    "scene"
+                    f"narrative_entity label {entity.label!r} collides with an "
+                    "environment label; entities and environments live in "
+                    "disjoint namespaces"
                 )
-            seen_reservations[idx] = entity.label
 
-        # Primary/secondary cardinality (cross-illustration distribution
-        # rules — Statistical distribution §). At most one primary
-        # non-human character; at most one secondary non-human character.
-        # Object importance is unconstrained at this layer because the
-        # statistical rules speak about NH-characters and "standalone
-        # object shots" separately; the standalone-shot cap is enforced
-        # by ``validate_illustration_distribution``.
+        # Primary / secondary NH character cardinality.
         primary_nh = [
             e
-            for e in self.reserved_entities
+            for e in self.narrative_entities
             if e.kind == "non_human_character" and e.importance == "primary"
         ]
         if len(primary_nh) > 1:
             raise ValueError(
-                "at most one reserved non_human_character may have "
-                f"importance='primary' (got {len(primary_nh)})"
+                "at most one narrative_entity may have kind='non_human_character' "
+                f"and importance='primary' (got {len(primary_nh)})"
             )
         secondary_nh = [
             e
-            for e in self.reserved_entities
+            for e in self.narrative_entities
             if e.kind == "non_human_character" and e.importance == "secondary"
         ]
         if len(secondary_nh) > 1:
             raise ValueError(
-                "at most one reserved non_human_character may have "
-                f"importance='secondary' (got {len(secondary_nh)})"
+                "at most one narrative_entity may have kind='non_human_character' "
+                f"and importance='secondary' (got {len(secondary_nh)})"
             )
+
+        # contains_entity_label fidelity: every non-null value must reference
+        # a registered entity, and the entity-side scene lock must hold —
+        # if entity.reserved_for_scene_index is set, only that scene_index
+        # may carry the entity. (Slots may host multiple *historically*
+        # reserved entities but only ONE active contains_entity_label per
+        # slot, which is enforced structurally by the schema since each
+        # IllustrationConcept has at most one contains_entity_label.)
+        entity_by_label: dict[str, NarrativeEntity] = {
+            _normalize_entity_label(e.label): e for e in self.narrative_entities
+        }
+        for ill in self.illustrations:
+            if ill.contains_entity_label is None:
+                continue
+            norm = _normalize_entity_label(ill.contains_entity_label)
+            if norm not in entity_by_label:
+                raise ValueError(
+                    f"illustration scene_index={ill.scene_index} references "
+                    f"contains_entity_label={ill.contains_entity_label!r} which "
+                    "is not in the narrative_entities register"
+                )
+            ent = entity_by_label[norm]
+            if (
+                ent.reserved_for_scene_index is not None
+                and ent.reserved_for_scene_index != ill.scene_index
+            ):
+                raise ValueError(
+                    f"illustration scene_index={ill.scene_index} references "
+                    f"entity {ent.label!r} which is reserved for scene_index="
+                    f"{ent.reserved_for_scene_index}; entities are scene-locked"
+                )
 
         return self
 
@@ -416,24 +453,44 @@ class EvaluateImageResponse(BaseModel):
     suggestion: str
 
 
-# Agent 3 output is same schema as Agent 1
+# Agent 3 output is same schema as Agent 1.
 RevisePromptsResponse = GeneratePromptsResponse
 
 
 class RethinkConceptResponse(BaseModel):
     """Agent 4 output.
 
-    The environment is a hard constraint for Agent 4 — it cannot move the
-    scene to a new location. If the renderer's blocker is the environment
-    itself, the Evaluator emits ``problem="environment"`` and the
-    orchestrator routes to Agent 4b (``RethinkEnvironmentResponse``) instead.
+    The environment is a hard constraint — Agent 4 cannot move the
+    scene. If the renderer's blocker is the environment itself, the
+    Evaluator emits ``problem="environment"`` and the orchestrator
+    routes to Agent 4b (``RethinkEnvironmentResponse``) instead.
 
-    ``narrative_continuity_check`` is a 1–3 sentence English self-audit the
-    agent must write *after* drafting ``paragraph_text``. The agent has to
-    read the trio ⟨previous paragraph, new paragraph, next paragraph⟩ as a
-    whole and explain how the new paragraph flows smoothly between them
-    AND what story-level purpose it serves (so the rewrite is never just
-    filler text shaped to fit a pretty picture).
+    Entity placement (the unified narrative_entities system):
+
+    * ``contains_entity_label`` — the entity Agent 4 commits to depict
+      in this rewrite (or ``None`` for a clean scene). Must reference
+      either (a) the entity reserved for this slot, (b) a floating
+      supporting entity Agent 4 is claiming for this slot, or (c) be
+      ``None`` (drop or clean scene). Including an entity reserved for
+      a DIFFERENT slot is rejected by the server.
+    * ``entity_action`` — discriminates intent so the server can
+      validate the move:
+        - ``"keep"`` — entity reserved for this slot stays present
+          (contains_entity_label is non-null and matches the
+          reservation).
+        - ``"drop"`` — entity reserved for this slot is intentionally
+          dropped (contains_entity_label is null; the slot stays
+          reserved forever — ghost reservation).
+        - ``"claim_floating"`` — a floating supporting entity (with
+          ``reserved_for_scene_index=None``) is being claimed for this
+          slot (contains_entity_label is non-null and matches that
+          entity).
+        - ``"none"`` — there is no narrative_entity at play in this
+          slot (no reservation existed, no claim made).
+
+    ``narrative_continuity_check`` is a 1–3 sentence English self-audit
+    Agent 4 must write *after* drafting ``paragraph_text``; see Agent 4
+    prompt for details.
     """
 
     workflow: Literal["single-lora", "no-lora"]
@@ -442,7 +499,8 @@ class RethinkConceptResponse(BaseModel):
     character_role: Literal["male", "female", "mother"] | None
     paragraph_text: str
     scene_excerpt: str
-    companion: Companion | None = None
+    contains_entity_label: str | None = None
+    entity_action: Literal["keep", "drop", "claim_floating", "none"] = "none"
     narrative_continuity_check: str
 
     @model_validator(mode="after")
@@ -451,6 +509,18 @@ class RethinkConceptResponse(BaseModel):
             raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
         if not self.narrative_continuity_check.strip():
             raise ValueError("narrative_continuity_check must be a non-empty string")
+        # entity_action ↔ contains_entity_label coherence.
+        if self.entity_action in ("keep", "claim_floating"):
+            if not self.contains_entity_label or not self.contains_entity_label.strip():
+                raise ValueError(
+                    f"contains_entity_label must be non-empty when "
+                    f"entity_action={self.entity_action!r}"
+                )
+        else:  # drop, none
+            if self.contains_entity_label is not None:
+                raise ValueError(
+                    f"contains_entity_label must be null when entity_action={self.entity_action!r}"
+                )
         return self
 
 
@@ -458,18 +528,9 @@ class RethinkConceptResponse(BaseModel):
 
 
 class RethinkEnvironmentResponse(BaseModel):
-    """Agent 4b output.
-
-    Activated when the Evaluator emits ``problem="environment"``. Unlike
-    Agent 4, this agent is allowed — and required — to swap the
-    illustration slot to a qualitatively new environment whose features
-    avoid the renderer blocker that the Evaluator flagged.
-
-    The replacement environment MUST be disjoint from the other four
-    in-use environments to preserve the global no-consistency-needed
-    invariant. The same narrative-continuity contract that binds Agent 4
-    applies here: the rewritten paragraph must flow smoothly between its
-    neighbours and carry real story weight.
+    """Agent 4b output. Mirrors Agent 4's entity-placement contract;
+    additionally emits a fresh ``Environment`` because this agent's
+    raison d'être is swapping the locked environment for a slot.
     """
 
     workflow: Literal["single-lora", "no-lora"]
@@ -478,7 +539,8 @@ class RethinkEnvironmentResponse(BaseModel):
     character_role: Literal["male", "female", "mother"] | None
     paragraph_text: str
     scene_excerpt: str
-    companion: Companion | None = None
+    contains_entity_label: str | None = None
+    entity_action: Literal["keep", "drop", "claim_floating", "none"] = "none"
     environment: Environment
     narrative_continuity_check: str
 
@@ -488,6 +550,17 @@ class RethinkEnvironmentResponse(BaseModel):
             raise ValueError("scene_excerpt must be a verbatim substring of paragraph_text")
         if not self.narrative_continuity_check.strip():
             raise ValueError("narrative_continuity_check must be a non-empty string")
+        if self.entity_action in ("keep", "claim_floating"):
+            if not self.contains_entity_label or not self.contains_entity_label.strip():
+                raise ValueError(
+                    f"contains_entity_label must be non-empty when "
+                    f"entity_action={self.entity_action!r}"
+                )
+        else:
+            if self.contains_entity_label is not None:
+                raise ValueError(
+                    f"contains_entity_label must be null when entity_action={self.entity_action!r}"
+                )
         return self
 
 
@@ -554,12 +627,8 @@ class ManualConceptResponse(BaseModel):
         else:
             if self.concept_candidate is not None:
                 raise ValueError(f"concept_candidate must be null when phase is {self.phase!r}")
-        # `accepted` may carry an empty reply; everything else must be non-empty.
         if self.phase != "accepted" and (not self.reply or not self.reply.strip()):
             raise ValueError("reply must be a non-empty string")
-        # `prompting_notes_update`, when present, must be a non-empty string
-        # (Agent 6 either updates the memo with content or omits the field;
-        # an empty/whitespace-only update is treated as malformed). § 6A.2 #12.
         if self.prompting_notes_update is not None and not self.prompting_notes_update.strip():
             raise ValueError("prompting_notes_update must be a non-empty string when provided")
         return self
@@ -591,34 +660,43 @@ class ManualRevisePromptsResponse(BaseModel):
 def validate_illustration_distribution(
     brief: CollectedBrief,
     illustrations: list[IllustrationConcept],
-    reserved_entities: list[ReservedEntity],
+    narrative_entities: list[NarrativeEntity],
 ) -> None:
     """Enforce the statistical-distribution rules across all 5 auto-pipeline
-    illustrations.
+    illustrations of one run.
 
-    Rules (auto pipeline only — manual co-creation ignores this validator):
+    Cast-role rules (auto pipeline only — manual co-creation ignores these):
 
     1. Every cast role in ``brief.characters`` appears at least once across
        ``illustrations[*].character_role``.
     2. ``brief.main_character_role`` appears at least twice.
     3. No side cast role appears more often than the main role.
-    4. At most one illustration has ``character_role=None``
-       (the no-human cap of 1/5 for the auto pipeline).
-    5. The primary non-human-character reserved entity (if any) is
-       reserved to exactly one ``scene_index``. The illustration at that
-       index must either be ``character_role=None`` (alone shot) or carry
-       the main character.
-    6. The secondary non-human-character reserved entity (if any) may be
-       reserved to at most one ``scene_index``; if reserved, the
-       illustration there must carry the main character (not alone).
-    7. At most one illustration may be a standalone object/scenery shot —
-       an illustration with ``character_role=None`` whose only reserved
-       entity is an object (or no entity at all). This shares the cap
-       with rule #4.
+    4. At most one illustration has ``character_role=None`` (the no-human
+       cap of 1/5).
 
-    Raises ``ValueError`` on the first violation. Callers must catch it
-    and trigger an A0b retry (or fail the run with
-    ``STORY_BUILD_FAILED`` after exhausting retries).
+    Narrative-entity rules (the unified register; cf.
+    ``NarrativeEntity``):
+
+    5. For each entity, ``appearances`` = number of illustrations whose
+       ``contains_entity_label`` matches the entity's label. Quotas:
+         * primary NH-character: ``appearances <= 1``; if 1, that
+           illustration's scene_index equals the entity's
+           ``reserved_for_scene_index`` AND character_role is either
+           ``None`` (alone shot) or any cast role (with-cast shot).
+         * secondary NH-character: ``appearances <= 1``; if 1, that
+           illustration's scene_index equals the entity's
+           ``reserved_for_scene_index`` AND character_role is a cast
+           role (never ``None`` — secondary may not appear alone).
+         * supporting entity: ``appearances <= 1``; if 1, the scene
+           obeys the entity-side scene lock (rule 6).
+    6. Entity-side scene lock: an entity with a non-null
+       ``reserved_for_scene_index`` may only appear at that one slot.
+       (Per-slot single-active is enforced structurally by the schema
+       since each illustration has at most one ``contains_entity_label``;
+       *ghost* reservations from prior drops do not block new active
+       displays in the same slot.)
+
+    Raises ``ValueError`` on the first violation.
     """
     cast_roles = [c.role for c in brief.characters]
     main = brief.main_character_role
@@ -660,56 +738,71 @@ def validate_illustration_distribution(
             f"auto pipeline (got {no_human_count})"
         )
 
-    # Reservations indexed by scene_index for cross-checks.
-    reservations_by_index: dict[int, ReservedEntity] = {}
-    for entity in reserved_entities:
-        if entity.reserved_for_scene_index is not None:
-            reservations_by_index[entity.reserved_for_scene_index] = entity
+    cast_role_set = set(cast_roles)
 
-    # Rules 5 & 6: primary / secondary non-human characters.
-    primary_nh = next(
-        (
-            e
-            for e in reserved_entities
-            if e.kind == "non_human_character" and e.importance == "primary"
-        ),
-        None,
-    )
-    if primary_nh is not None:
-        if primary_nh.reserved_for_scene_index is None:
+    # Build entity-by-normalized-label and per-entity appearance lists.
+    entity_by_label: dict[str, NarrativeEntity] = {
+        _normalize_entity_label(e.label): e for e in narrative_entities
+    }
+    appearances_by_label: dict[str, list[IllustrationConcept]] = {
+        norm: [] for norm in entity_by_label
+    }
+    for ill in illustrations:
+        if ill.contains_entity_label is None:
+            continue
+        norm = _normalize_entity_label(ill.contains_entity_label)
+        if norm not in entity_by_label:
             raise ValueError(
-                "primary non_human_character reserved entity "
-                f"{primary_nh.label!r} must be reserved to exactly one "
-                "scene_index"
+                f"illustration scene_index={ill.scene_index} references "
+                f"contains_entity_label={ill.contains_entity_label!r} which "
+                "is not in the narrative_entities register"
             )
-        target = illustrations[primary_nh.reserved_for_scene_index]
-        if target.character_role not in (None, main):
-            raise ValueError(
-                f"primary non_human_character {primary_nh.label!r} is "
-                f"reserved for scene_index={primary_nh.reserved_for_scene_index} "
-                f"whose character_role={target.character_role!r} is "
-                f"neither null (alone shot) nor the main role {main!r}"
-            )
+        appearances_by_label[norm].append(ill)
 
-    secondary_nh = next(
-        (
-            e
-            for e in reserved_entities
-            if e.kind == "non_human_character" and e.importance == "secondary"
-        ),
-        None,
-    )
-    if secondary_nh is not None and secondary_nh.reserved_for_scene_index is not None:
-        target = illustrations[secondary_nh.reserved_for_scene_index]
-        if target.character_role != main:
+    # Rules 5 & 6: per-entity quotas + scene lock.
+    for norm, entity in entity_by_label.items():
+        appearances = appearances_by_label[norm]
+        # All importance levels share a hard cap of 1 appearance.
+        if len(appearances) > 1:
             raise ValueError(
-                f"secondary non_human_character {secondary_nh.label!r} is "
-                f"reserved for scene_index={secondary_nh.reserved_for_scene_index} "
-                f"whose character_role={target.character_role!r} is not "
-                f"the main role {main!r}; secondary NH characters must "
-                "appear with the main human"
+                f"narrative_entity {entity.label!r} (importance="
+                f"{entity.importance!r}) appears in {len(appearances)} "
+                "illustrations; the cap is 1 — entities are scene-locked"
             )
 
-    # Rule 7: standalone object/scenery cap shares the no-human budget,
-    # which is already capped by rule 4 — nothing extra to validate here
-    # unless we ever raise the no-human cap above 1.
+        if not appearances:
+            # Zero appearances is allowed for any importance (graceful drop
+            # by Agent 4 may reduce primary/secondary to zero too).
+            continue
+
+        ill = appearances[0]
+
+        # Rule 6 (entity-side scene lock): if reserved_for_scene_index is
+        # set, the appearance MUST be at that slot.
+        if (
+            entity.reserved_for_scene_index is not None
+            and entity.reserved_for_scene_index != ill.scene_index
+        ):
+            raise ValueError(
+                f"narrative_entity {entity.label!r} is reserved for "
+                f"scene_index={entity.reserved_for_scene_index} but appears "
+                f"at scene_index={ill.scene_index}; entities are scene-locked"
+            )
+
+        # Rule 5 (importance-specific character_role constraints).
+        if entity.kind == "non_human_character" and entity.importance == "secondary":
+            if ill.character_role not in cast_role_set:
+                raise ValueError(
+                    f"secondary non_human_character {entity.label!r} appears "
+                    f"in scene_index={ill.scene_index} with character_role="
+                    f"{ill.character_role!r}; secondary NH characters must "
+                    "appear with a human cast member (never alone)"
+                )
+        if entity.kind == "non_human_character" and entity.importance == "primary":
+            # Primary may be alone OR with any cast role — both fine.
+            if ill.character_role is not None and ill.character_role not in cast_role_set:
+                raise ValueError(
+                    f"primary non_human_character {entity.label!r} appears "
+                    f"in scene_index={ill.scene_index} with character_role="
+                    f"{ill.character_role!r} which is not a cast role"
+                )

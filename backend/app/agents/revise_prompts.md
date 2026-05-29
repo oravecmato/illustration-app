@@ -5,8 +5,10 @@ positive and negative prompts based on the evaluator's verdict. Output
 strict JSON — no markdown, no extra text.
 
 You will receive the same character/style context as the original
-prompt-engineer call (including the optional `companion` field for this
-scene), plus:
+prompt-engineer call (including the optional `contains_entity` field for
+this scene — same shape as in `generate_prompts.md`:
+`{ "label", "kind": "non_human_character"|"object", "importance" }` or
+`null`), plus:
 
 - `current_positive` / `current_negative` — the prompts that produced the
   failing image.
@@ -14,45 +16,58 @@ scene), plus:
 - `verdict_reasoning` — why the image failed.
 - `verdict_suggestion` — actionable hint from the evaluator.
 
-If `companion` is non-null in the inputs, treat companion-related rules
-in this file exactly as the original prompt-engineer call would — pool
-fidelity has already been enforced upstream, so do not invent a
-different species.
+If `contains_entity` is non-null, treat entity-related rules in this
+file exactly as the original `generate_prompts` call would — the
+register and scene-lock have already been enforced upstream, so do not
+invent a different label or species.
 
 ## Revision principles
 
 1. Keep what was working. Do not discard correct trigger tags, the
-   human-count enforcer, the companion's numeric/description tags, or
+   human-count enforcer, the entity's numeric/description tags, or
    accurate outfit/environment tags just because the image failed for a
    different reason.
 2. Fix the specific failure called out by the verdict — add or strengthen
-   the missing expression/gesture/action tag, change the environment,
-   harden anatomy negatives, etc.
+   the missing expression/gesture/action tag, push the environment tags,
+   harden anatomy negatives, raise object prominence, etc.
 3. Stay in Danbooru-style COMMA-SEPARATED TAGS. Never natural language.
 4. `positive` MUST still include:
    - every trigger tag for the character,
-   - the human-count enforcer (`1boy` / `1girl` / `1woman`) for the role,
+   - the human-count enforcer (`1boy` / `1girl` / `1woman`) for the role
+     (omit when `character_role` is `null`),
    - explicit emotion/expression tags,
    - explicit action/pose tags,
    - the outfit baseline,
    - environment/atmosphere tags,
-   - when `companion` is `null`: `solo`,
-   - when `companion` is non-null: exactly one numeric species tag
-     (`1cat`, `1dog`, `1owl`, …) plus 2–4 companion-description tags
-     plus 1–3 interaction tags derived from `companion.interaction`.
-     Do NOT include `solo` in this case.
+   - when `contains_entity` is `null`: `solo` (only meaningful when a
+     human is present),
+   - when `contains_entity` is non-null with `kind ==
+     "non_human_character"`: exactly one numeric species tag
+     (`1cat`, `1dog`, `1owl`, …) plus 2–4 entity-description tags
+     derived from `contains_entity.label` plus 1–3 interaction tags
+     derived from `concept`. Do NOT include `solo` in this case.
+   - when `contains_entity` is non-null with `kind == "object"`:
+     3–5 object-description tags derived from `contains_entity.label`,
+     1–3 placement/interaction tags derived from `concept`, and a
+     prominence cue (`object focus`, `close-up`) when appropriate. No
+     numeric species tag.
 5. `negative` MUST still include the full negative baseline supplied in the
    user message (append scene-specific negatives after it).
-   - When `companion` is `null`: keep the anti-creature negatives (`cat`,
-     `dog`, `bird`, `animal`, `pet`, `creature`) and anti-duplicate-human
-     negatives.
-   - When `companion` is non-null: keep anti-duplicate-human negatives and
-     anti-duplicate-companion negatives matching the species (`2cats`,
+   - When `contains_entity` is `null`: keep the anti-creature negatives
+     (`cat`, `dog`, `bird`, `animal`, `pet`, `creature`) and
+     anti-duplicate-human negatives.
+   - When `contains_entity` is non-null with `kind ==
+     "non_human_character"`: keep anti-duplicate-human negatives and
+     anti-duplicate-entity negatives matching the species (`2cats`,
      `multiple cats`, …). Do NOT add anti-creature negatives for the
      species you are intentionally drawing. If the verdict says the
-     companion looks anthropomorphic, strengthen species-appropriate
+     entity looks anthropomorphic, strengthen species-appropriate
      anti-anatomy negatives (e.g. for a cat: `anthro, furry, humanoid,
      standing on two legs, wearing clothes`).
+   - When `contains_entity` is non-null with `kind == "object"`: keep
+     anti-duplicate-human negatives. Anti-creature negatives may still
+     be appropriate (objects don't conflict with them). No anti-anatomy
+     negatives are needed for objects.
 6. Vague tags alone are insufficient: `standing`, `looking`, `posing` must
    always be paired with concrete specifics.
 
