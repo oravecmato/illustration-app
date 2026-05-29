@@ -76,14 +76,32 @@ snapshots also reflect the latest state (§ 5.3, § 8.3).
 The visual output style is anime/manga, rendered by Illustrious-based
 SDXL ComfyUI workflows with character and style LoRAs. The app ships
 **two** workflows — `single-lora.json` (used when the scene depicts
-exactly one human character, optionally accompanied by one non-human
-companion) and `no-lora.json` (used when the scene depicts no human
-character — i.e. a non-human companion alone, or, rarely, a pure
-environment beat with no characters). Agents 1 and 3 decide which
+exactly one human character, optionally accompanied by one
+**narrative entity** — a non-human character or story-important object)
+and `no-lora.json` (used when the scene depicts no human character — i.e.
+a non-human-character narrative entity alone, an object beat, or, rarely,
+a pure environment beat with no characters). Agents 1 and 3 decide which
 workflow each illustration uses; Agent 0b is responsible for designing
 the story so that the resulting mix of workflows is well-motivated
 (§ 7.2.1 and § 7.3.11). See § 7.3 for the full creative and prompting
 brief.
+
+Two registers are locked at story-build time and form hard constraints
+on every per-image rewrite that follows:
+
+* **Environments** — exactly 5 entries on the run, position `N` locked
+  to `scene_index=N`. Each entry is `{label, kind, aspect}`; ordinary
+  indoor/outdoor places occupy one slot, while *dual* places (cars,
+  planes, ships, wooden cabins) may occupy two slots with one `inside`
+  aspect and one `outside` aspect. Only **Agent 4b** (`rethink_environment`)
+  may swap an environment for a slot, and only once per branch.
+* **Narrative entities** — the unified register of all non-human
+  characters and story-important objects (`{label, kind, importance,
+  reserved_for_scene_index}`). It replaces the legacy split between
+  "companions" and "reserved entities". Entities are **scene-locked**:
+  once `reserved_for_scene_index=N` is set, that entity may NEVER
+  appear in any other slot, even if Agent 4 later drops it from slot
+  `N` (the slot stays ghost-reserved forever). See § 5 + § 7.1 Call 0b.
 
 ---
 
@@ -149,7 +167,10 @@ anime-illustrator/
 │   │   │   ├── generate_prompts.md # Agent 1
 │   │   │   ├── evaluate_image.md   # Agent 2
 │   │   │   ├── revise_prompts.md   # Agent 3
-│   │   │   ├── rethink_concept.md  # Agent 4
+│   │   │   ├── rethink_concept.md  # Agent 4 — concept + paragraph rewrite (same env)
+│   │   │   ├── rethink_environment.md # Agent 4b — swap a slot's locked environment
+│   │   │   ├── manual_concept.md   # Agent 6 — § 6A manual chat concept design
+│   │   │   ├── manual_revise_prompts.md # Agent 7 — § 6A manual chat prompt revision
 │   │   │   └── translate.md        # Agent 5 — on-demand translations
 │   │   ├── db/
 │   │   │   ├── models.py           # SQLAlchemy ORM models
@@ -170,8 +191,8 @@ anime-illustrator/
 │   │   │   ├── runs.py             # GET run snapshot + SSE + cancel
 │   │   │   └── static.py           # Image file serving (optional)
 │   │   └── workflows/              # ComfyUI workflow files (API format, § 7.2)
-│   │       ├── single-lora.json    # 1 human (+ optional companion); LoRA wired in
-│   │       └── no-lora.json        # 0 humans (companion-only or environment-only)
+│   │       ├── single-lora.json    # 1 human (+ optional narrative entity); LoRA wired in
+│   │       └── no-lora.json        # 0 humans (NH-character/object alone, or environment-only)
 │   ├── output/                     # Generated images (gitignored)
 │   ├── data/                       # SQLite file (gitignored)
 │   └── tests/
@@ -358,7 +379,7 @@ shaping a story.
 | `created_at`          | DATETIME     | UTC                                                  |
 | `updated_at`          | DATETIME     | UTC                                                  |
 | `state`               | TEXT (enum)  | `CHATTING` / `AWAITING_CONFIRMATION` / `BUILDING_STORY` / `COMPLETED` / `FAILED` |
-| `collected_brief_json`| TEXT NULL    | JSON: the brief captured by Agent 0a; set on confirmation. Shape includes the optional `companions` pool (§ 7.1 Call 0a) but the column itself remains plain TEXT JSON — no schema change. |
+| `collected_brief_json`| TEXT NULL    | JSON: the brief captured by Agent 0a; set on confirmation. Shape includes `characters[]`, the optional `non_human_entities[]` pool (free-form `{label, role_in_story}` hints that Agent 0b later promotes into `NarrativeEntity` records), and a required `main_character_role` (one of `male` / `female` — `mother` is forbidden as main). See § 7.1 Call 0a. The column itself stays plain TEXT JSON — no schema change. |
 | `source_language`     | TEXT NULL    | One of `sk` / `cs` / `en`. Set on the assistant turn whose Agent 0a output first emits a non-`other` `language` field, and again on `phase="confirmed"` (locks the language Agent 0b will author in). Stays `NULL` while still gathering and never seen a concrete language. |
 | `topic_short`         | TEXT NULL    | Short ≤8-word topic phrase emitted by Agent 0a on the `phase="confirmed"` turn (in `source_language`). Surfaced to the frontend immediately so the story-skeleton view can render "Generating the story on …" before Agent 0b returns (§ 7.1 Call 0a, § 8.2, § 9.1 Screen A). |
 | `run_id`              | TEXT FK NULL | → `runs.id`; set when Agent 0b finishes and the run is created |
@@ -403,6 +424,9 @@ from raw input text.
 | `story_topic_description` | TEXT   | One-sentence English-equivalent topic description produced by Agent 0b in `source_language`. Distinct from `topic_short`: this one is a full sentence Agent 0b expands from the brief, used by the runs UI as a subtitle and by Agent 5 as input when translating. |
 | `story_blocks_json` | TEXT         | JSON array of typed blocks (see § 7.1, Call 0b output). Paragraph blocks carry **`source_language`** prose. **Mutable** — when Agent 4 rewrites a paragraph (§ 7.1 Call 4), the orchestrator overwrites the corresponding `paragraph` block's `text` field in this column before continuing the branch. The blocks structure (order, types, scene_index values) never changes after run creation; only individual paragraph `text` values do. Translations of paragraph text live in `story_block_translations` (§ 5.5). |
 | `style_guide_json`  | TEXT         | JSON; populated at run creation (no longer null)            |
+| `main_character_role` | TEXT NULL  | Carried over from `sessions.collected_brief.main_character_role`. Drives the cross-illustration distribution validator (§ 7.1 Call 0b rule). One of `male` / `female`. Nullable only for legacy pre-Alembic rows. |
+| `environments_json` | TEXT NULL    | JSON array of exactly **5** `Environment` objects: `{label, kind: indoor\|outdoor\|dual, aspect: single\|inside\|outside}`. Position `N` in the array is locked to `scene_index=N`. Populated by Agent 0b at run creation and **mutable only via Agent 4b** (`rethink_environment`), which may swap one slot's entry at most once per branch. Indoor/outdoor entries occupy exactly one slot; dual entries may occupy two slots with one `inside` and one `outside` aspect (cars, planes, ships, wooden cabins). Nullable only for legacy pre-Alembic rows. |
+| `narrative_entities_json` | TEXT NULL | JSON array of `NarrativeEntity` objects: `{label, kind: non_human_character\|object, importance: primary\|secondary\|supporting, reserved_for_scene_index: int\|null}`. The unified register replaces the legacy `companions` + `reserved_entities` split. At most one primary NH-character and at most one secondary NH-character per story. Labels live in a disjoint namespace from environment labels. Entities are **scene-locked**: once `reserved_for_scene_index` is set, it never changes — even after Agent 4 drops the entity, the slot stays ghost-reserved. Nullable only for legacy pre-Alembic rows. |
 | `illustration_count`| INTEGER      | Final count after Agent 0b (always exactly 5, per § 7.1)    |
 | `completed_count`   | INTEGER      | Successful illustrations                                    |
 | `failed_count`      | INTEGER      | Definitively failed illustrations                           |
@@ -434,8 +458,9 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `current_workflow`       | TEXT NULL    | The ComfyUI workflow name chosen for the most recent generate/revise call: `single-lora` or `no-lora` (§ 7.2.1). Persisted so reconnects and snapshots can show which workflow is in flight. NULL until Agent 1 has been called at least once. **Mutable** — Agent 3 may choose a different workflow on revision (rare; usually stays the same across revisions for a given concept). |
 | `last_verdict_json`      | TEXT NULL    | Last Claude verdict (for debugging/visibility)                            |
 | `image_path`             | TEXT NULL    | Relative path under `OUTPUT_DIR`, e.g. `runs/<run_id>/scene_0.png`        |
-| `companion_description`  | TEXT NULL    | The companion's `description` from Agent 0b (or Agent 4 after a rewrite), or NULL if no companion. **Mutable** — Agent 4 may set, change, or clear this. |
-| `companion_interaction`  | TEXT NULL    | The companion's `interaction` from Agent 0b (or Agent 4), or NULL. **Mutable** — same as above. |
+| `contains_entity_label`  | TEXT NULL    | Label of the `NarrativeEntity` (non-human character or object) visually present in this scene, or NULL when the scene contains no entity. The actual entity record (`{label, kind, importance, reserved_for_scene_index}`) lives on `runs.narrative_entities_json` and is matched by normalised label. **Mutable** — Agent 4 and Agent 4b may set it (`entity_action="keep"` / `"claim_floating"`), clear it (`entity_action="drop"`), or leave it null (`entity_action="none"`). Once a label is *first* placed in a slot whose reservation was floating, the entity's `reserved_for_scene_index` is permanently set to that slot. Replaces the legacy `companion_description` + `companion_interaction` columns. |
+| `environment_label`      | TEXT NULL    | Denormalised label of this slot's environment (the source of truth is `runs.environments_json[scene_index]`). Cached on the illustration row so the orchestrator can hand Agent 1 / 3 / 4 the environment constraint without joining. **Mutable only by Agent 4b** when it swaps the slot's environment. Nullable only for legacy pre-Alembic rows. |
+| `environment_aspect`     | TEXT NULL    | Denormalised aspect for this slot: `single`, `inside`, or `outside`. Same mutation rules as `environment_label`. Nullable only for legacy pre-Alembic rows. |
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
