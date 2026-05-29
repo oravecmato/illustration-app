@@ -3929,8 +3929,15 @@ Response 200:
       "concept_attempt": 1,
       "prompt_attempt": 1,
       "image_url": "string|null",
-      "companion": { "description": "string", "interaction": "string" } | null
+      "contains_entity_label": "string|null",
+      "environment": { "label": "string", "kind": "indoor|outdoor|dual", "aspect": "single|inside|outside" } | null
     }
+  ],
+  "environments": [
+    { "label": "string", "kind": "indoor|outdoor|dual", "aspect": "single|inside|outside" }
+  ],
+  "narrative_entities": [
+    { "label": "string", "kind": "non_human_character|object", "importance": "primary|secondary|supporting", "reserved_for_scene_index": 0 }
   ]
 }
 ```
@@ -3972,11 +3979,31 @@ Notes:
 
 `image_url` is `null` until completed, then `/static/runs/<run_id>/scene_N.png`.
 
-`companion` reflects the current state of the illustration's
-`companion_description` + `companion_interaction` columns. It is `null`
-when the illustration has no companion; otherwise it carries both
-fields. Like `scene_excerpt` and `story_blocks`, this value reflects
-the latest state after any Agent 4 rewrites have been persisted.
+`contains_entity_label` reflects the current state of the
+illustration's `contains_entity_label` column — the label of the
+`NarrativeEntity` visually present in this scene, or `null` for scenes
+with no entity. The full entity record (with `kind`, `importance`,
+`reserved_for_scene_index`) is on the top-level
+`narrative_entities[]` array and matched by normalised label. Like
+`scene_excerpt` and `story_blocks`, this value reflects the latest
+state after any Agent 4 / Agent 4b rewrites have been persisted.
+
+`environment` reflects the run's `environments_json[scene_index]`
+entry — the locked indoor/outdoor/dual environment Agent 0b assigned
+to this slot, mutated only by Agent 4b. The same entries are also
+exposed in the top-level `environments[]` array so consumers can read
+the full register without walking illustrations.
+
+`environments[]` and `narrative_entities[]` are the two registers
+locked at story-build time (§ 1, § 5). `environments[]` always has
+exactly 5 entries with position `N` == `scene_index=N`.
+`narrative_entities[]` is the unified pool that replaces the legacy
+`companions` + `reserved_entities` split. Both are mutable in
+narrowly-scoped ways: Agent 4b may swap one environment slot's entry
+per branch, and Agent 4 / Agent 4b mutate per-illustration
+`contains_entity_label` via the `entity_action` discriminator. The
+top-level arrays let the frontend render entity-aware affordances
+(e.g. tooltips, register inspectors) without per-event reconciliation.
 
 `run.story_blocks` and `illustration.scene_excerpt` always reflect the
 **current** content — i.e. the latest state after any Agent 4 paragraph
@@ -4021,7 +4048,8 @@ SSE event types (`event:` field) and JSON payloads:
 | `snapshot`                  | `{ "run": {...}, "illustrations": [...] }` — same shape as § 8.3, in subscriber's `lang` |
 | `illustration_state`        | `{ "illustration_id", "scene_index", "state", "concept_attempt", "prompt_attempt", "current_concept", "current_concept_translation_state", "scene_excerpt", "current_workflow" }` |
 | `paragraph_updated`         | `{ "paragraph_index", "text", "translation_state" }`                    |
-| `illustration_companion_updated` | `{ "illustration_id", "scene_index", "companion": { "description", "interaction" } \| null }` |
+| `illustration_entity_updated`    | `{ "illustration_id", "scene_index", "contains_entity_label": "string\|null", "entity": { "label", "kind", "importance", "reserved_for_scene_index" } \| null }` — emitted by Agent 4 / Agent 4b when the scene's entity changes (set, swapped, or dropped). `entity` carries the full record from `narrative_entities[]` after the mutation (or null when dropped). |
+| `illustration_environment_updated` | `{ "illustration_id", "scene_index", "environment": { "label", "kind", "aspect" } }` — emitted by Agent 4b when it swaps the slot's environment. |
 | `illustration_role_updated` | `{ "illustration_id", "scene_index", "character_role": "male\|female\|mother\|null" }` — emitted only when Agent 4 swaps a scene's cast shape |
 | `translations_refreshed`    | `{ "language", "items": [ { "kind": "story_title\|story_topic_description\|paragraph\|illustration_concept", "paragraph_index"?: N, "scene_index"?: N, "text": "string" } ] }` — emitted to every subscriber after § 8.9 completes, so multi-tab views in the same language stay in sync |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
@@ -4068,25 +4096,60 @@ field-level, this re-renders the matching `StoryParagraph` component
 without disturbing siblings. The order of paragraph blocks (and of all
 blocks generally) is fixed and never broadcast (§ 5.3).
 
-`illustration_companion_updated` is a new event emitted at most once
-per successful Agent 4 invocation, **only when the companion actually
-changed** (including any change to/from null). When Agent 4 returns the
-same companion as before, no event is emitted. Subscribers replace the
-matched illustration's `companion` field in place on the existing
-reactive object; like the other in-place mutations, this triggers a
-field-level re-render of the `IllustrationCard` without remount.
+`illustration_entity_updated` is emitted at most once per successful
+Agent 4 or Agent 4b invocation, **only when the scene's
+`contains_entity_label` actually changes** (including any change
+to/from `null`). When the agent's `entity_action` is `"none"` or
+`"keep"` and yields the same label as before, no event is emitted.
+Subscribers locate the illustration by `illustration_id` and assign
+`illustration.contains_entity_label = event.contains_entity_label` on
+the existing reactive object; the optional `entity` payload is used
+to update any in-memory entity register the frontend keeps
+(e.g. `run.narrative_entities[]`). Like the other in-place mutations,
+this triggers a field-level re-render of the `IllustrationCard`
+without remount.
 
-Per-Agent-4 ordering guarantee (one branch, one rethink cycle):
+`illustration_environment_updated` is emitted at most once per
+successful Agent 4b invocation, **only when the slot's environment
+record changes** (label, kind, or aspect). The payload carries the
+post-mutation `Environment` record. Subscribers assign it to the
+matching illustration's `environment` field **and** overwrite
+`run.environments[scene_index]` on the live `run` object — both
+mutations are necessary so the snapshot view and per-card view stay
+consistent.
+
+Per-rethink ordering guarantees (one branch, one rethink cycle):
+
+**Agent 4 (concept rethink):**
 
 1. `illustration_state` — `state="RETHINKING_CONCEPT"`, fields still
    carry the *old* `current_concept` and `scene_excerpt` (the rethink
    hasn't happened yet on the server when this event is emitted).
 2. `paragraph_updated` — the rewritten paragraph text, after server
    persistence.
-3. `illustration_companion_updated` — emitted *only when* the
-   companion changed, after server persistence.
-4. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
+3. `illustration_entity_updated` — emitted *only when* the entity
+   label changed, after server persistence.
+4. `illustration_role_updated` — emitted *only when* Agent 4 swapped
+   the scene's `character_role` (rare), after server persistence.
+5. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
    the *new* `current_concept` and `scene_excerpt`.
+
+**Agent 4b (environment rethink):**
+
+1. `illustration_state` — `state="RETHINKING_ENVIRONMENT"`, fields
+   still carry the *old* `current_concept`, `scene_excerpt`, and
+   `environment`.
+2. `paragraph_updated` — the rewritten paragraph text, after server
+   persistence.
+3. `illustration_environment_updated` — the new environment record
+   for this slot, after server persistence.
+4. `illustration_entity_updated` — emitted *only when* the entity
+   label changed (Agent 4b may also drop or claim an entity as part
+   of the swap), after server persistence.
+5. `illustration_state` — `state="GENERATING_PROMPTS"`, fields carry
+   the *new* `current_concept`, `scene_excerpt`, and `environment`.
+   The branch's `skip_concept_rethink_once` flag is now set so the
+   next outer-loop iteration bypasses Agent 4.
 
 The stream closes after `run_completed`, `run_failed`, or `run_cancelled`.
 
@@ -4488,14 +4551,17 @@ input control is the chat composer at the bottom of the chat thread.
    There is no separate confirm button — the user types their answer
    like any other reply.
 
-   The chat experience also covers the optional companion topic
+   The chat experience also covers the optional non-human entity topic
    (§ 7.1 Call 0a rules #6–#9). Agent 0a is expected to surface the
-   companion question naturally — e.g. *"Bude v príbehu okrem hlavných
-   postáv aj nejaké zviera, robot, alebo iná podobná bytosť?"* — but
-   only once the human cast is settled, only if the user has not
-   already volunteered an answer, and without insisting if the user
-   declines. The verbatim phrasing lives in `chat.md`; this clause
-   captures the intent.
+   entity question naturally — e.g. *"Bude v príbehu okrem hlavných
+   postáv aj nejaké zviera, robot, kúzelný predmet alebo iná dôležitá
+   bytosť či vec?"* — but only once the human cast is settled, only if
+   the user has not already volunteered hints, and without insisting if
+   the user declines. The verbatim phrasing lives in `chat.md`; this
+   clause captures the intent. Entities the user mentions are stored on
+   the brief as `non_human_entities[]` hints (label + role_in_story)
+   and promoted by Agent 0b into the run's `narrative_entities`
+   register at story-build time.
 
    **No "Spustiť ilustrácie" / "Generate illustrations" button exists
    anywhere in the UI.** The pipeline must start automatically when
@@ -4707,19 +4773,28 @@ keyboard focus, not only on hover.
   `RETHINKING_CONCEPT`.
 - The **info-icon popover** (right of header) carrying the current
   concept text and the scene excerpt (replaces the old in-body concept
-  text and excerpt-preview tooltip). When `illustration.companion` is
-  non-null, the popover additionally shows the `interaction` text on a
-  separate line.
+  text and excerpt-preview tooltip). When `illustration.environment`
+  is present, the popover additionally shows the environment label and
+  aspect on a separate small line (e.g. "Prostredie: auto · vnútro").
 - The **image slot** in the card body — skeleton (aspect 1:1) until
   `COMPLETED`, then the actual thumbnail (click to open original).
-- **Companion subtitle** (only when `illustration.companion` is
-  non-null): a small line below the existing scene info reading
-  `"V scéne je tiež: {description}"`. When `companion` is null, the
+- **Entity subtitle** (only when `illustration.contains_entity_label`
+  is non-null): a small line below the existing scene info reading
+  `i18n.t('illustration.containsEntity', { label })`, where the
+  localised string is e.g. *"V scéne je tiež: {label}"* (Slovak),
+  *"Ve scéně je také: {label}"* (Czech), *"Also in the scene: {label}"*
+  (English). The `label` placeholder is filled from
+  `illustration.contains_entity_label`. When the label is null, the
   line is omitted entirely. The subtitle is reactive — when the
-  `illustration_companion_updated` SSE event mutates the companion in
-  place, the subtitle re-renders without remount; when the companion
-  transitions to null, the subtitle disappears; when it transitions
-  from null to non-null, it appears.
+  `illustration_entity_updated` SSE event mutates the label in place,
+  the subtitle re-renders without remount; when the label transitions
+  to null, the subtitle disappears; when it transitions from null to
+  non-null, it appears.
+- **Environment subtitle** (always shown once `illustration.environment`
+  is populated): a small line reading
+  `i18n.t('illustration.environment', { label, aspect })`, e.g.
+  *"Prostredie: les · vonku"*. Reactive to the
+  `illustration_environment_updated` SSE event (Agent 4b swap).
 - On `FAILED`: a short error message (no retry button in MVP).
 - On `CANCELLED`: greyed-out card with label "Zrušené".
 - On `MANUAL_CHATTING` / `MANUAL_GENERATING_PROMPTS` / `MANUAL_RENDERING`:
@@ -5058,12 +5133,27 @@ SSE handlers:
   in the tests verifies this (§ 11.3). The store ALSO writes the new
   text + hash into `translations[currentLanguage]` for the
   `paragraph[i]` slot so the cache stays in sync.
-- `illustration_companion_updated` → finds the illustration by
-  `illustration_id` and assigns `illustration.companion = event.companion`
-  on the existing reactive object (replacement of the whole companion
-  field is fine — its inner fields are not bound separately, since the
-  whole object can transition to/from null). The IllustrationCard's
-  companion subtitle re-renders without remount.
+- `illustration_entity_updated` → finds the illustration by
+  `illustration_id` and assigns
+  `illustration.contains_entity_label = event.contains_entity_label`
+  on the existing reactive object. The label is a plain string (or
+  null), so field-level assignment is sufficient — the
+  IllustrationCard's entity subtitle re-renders without remount. If
+  the payload's `entity` is non-null, the store ALSO upserts the full
+  record into `run.narrative_entities[]` (matched by normalised
+  label), so inspectors or tooltips that read the register stay in
+  sync. If the payload's `entity` is null and the label was dropped,
+  the store does NOT remove the record from `run.narrative_entities[]`
+  — the register is append-only on the frontend; ghost-reserved
+  entities stay visible for debugging.
+- `illustration_environment_updated` → finds the illustration by
+  `illustration_id` and assigns `illustration.environment =
+  event.environment` (a fresh `Environment` object — the inner fields
+  are not bound separately). The store ALSO overwrites
+  `run.environments[event.scene_index] = event.environment` so the
+  top-level register stays consistent with the per-illustration
+  view. The IllustrationCard's environment subtitle and the concept
+  popover's environment line re-render without remount.
 - `illustration_role_updated` → finds the illustration by
   `illustration_id` and assigns `illustration.character_role =
   event.character_role` on the existing reactive object. The role
