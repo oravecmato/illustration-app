@@ -601,8 +601,6 @@ needed to render run X in language L".
 
 ## 6. Illustration State Machine
 
-(Unchanged from previous spec.)
-
 ### States
 
 | State                  | Slovak UI label              | Notes                                          |
@@ -612,7 +610,8 @@ needed to render run X in language L".
 | `RENDERING`            | "Kreslím (pokus k/N)"        | ComfyUI job in flight                          |
 | `EVALUATING`           | "Vyhodnocujem výsledok"      | Claude inspects the image                      |
 | `REVISING_PROMPTS`     | "Upravujem prompty"          | Claude revises prompts after a bad image       |
-| `RETHINKING_CONCEPT`   | "Premýšľam koncept"          | Claude proposes a new concept for the scene    |
+| `RETHINKING_CONCEPT`   | "Premýšľam koncept"          | Agent 4 proposes a new concept for the scene **inside the same locked environment** |
+| `RETHINKING_ENVIRONMENT` | "Prepracovanie prostredia" | Agent 4b is swapping the slot's locked environment (one-shot per branch; extends concept budget by +1). Only fires when the evaluator's verdict is `problem="environment"`. |
 | `COMPLETED`            | "Hotovo"                     | Image accepted (auto pipeline OR manual flow — § 6A) |
 | `MANUAL_CHATTING`      | "Spoločná tvorba"            | Auto pipeline exhausted; user is chatting with Agent 6 to design a feasible concept manually (§ 6A) |
 | `MANUAL_GENERATING_PROMPTS` | "Pripravujem prompty (manuál)" | Agent 1 is translating the agreed manual concept into Danbooru prompts (§ 6A) |
@@ -620,60 +619,117 @@ needed to render run X in language L".
 | `FAILED`               | "Nepodarilo sa"              | All automatic attempts exhausted AND the manual flow either was abandoned by the user OR exhausted its own attempt budget (§ 6A) |
 | `CANCELLED`            | "Zrušené"                    | Run cancelled while this branch was active     |
 
-### Loop semantics (worst case: 3 × 3 = 9 ComfyUI jobs)
+### Loop semantics (worst case: 3 × 3 = 9 ComfyUI jobs; 4 × 3 = 12 if Agent 4b fires)
 
 ```
-for concept_attempt in 1..MAX_CONCEPT_ATTEMPTS (3):       # initial + 2 restarts
-    if concept_attempt > 1:
+# Per-branch local flags (NOT persisted; live only for this run):
+#   - env_rethink_used: True once Agent 4b has fired for this slot.
+#     Limits Agent 4b to a single invocation per branch.
+#   - skip_concept_rethink_once: when set, the *next* outer iteration
+#     skips Agent 4 because Agent 4b already rewrote concept + paragraph
+#     in the same call.
+#
+# The "+1 budget" rule: env_rethink_used=True extends the outer
+# concept-attempt budget by exactly +1 (i.e. 4 attempts instead of 3),
+# acknowledging that Agent 4b's rewrite deserves its own fresh
+# inner-loop budget rather than burning the slot it preempted.
+
+env_rethink_used = False
+skip_concept_rethink_once = False
+concept_attempt = 1
+while concept_attempt <= MAX_CONCEPT_ATTEMPTS (3) + (1 if env_rethink_used else 0):
+    if concept_attempt > 1 and not skip_concept_rethink_once:
         state = RETHINKING_CONCEPT
         # Agent 4 returns a new concept AND a rewritten paragraph + new
-        # excerpt (§ 7.1 Call 4). The orchestrator:
+        # excerpt, INSIDE the slot's locked environment (§ 7.1 Call 4).
+        # The entity placement uses the unified narrative_entities
+        # register and the entity_action discriminator:
+        #   - "keep"           — entity reserved for this slot stays
+        #   - "drop"           — reserved entity is intentionally
+        #                        removed (slot stays ghost-reserved)
+        #   - "claim_floating" — a floating supporting entity is
+        #                        claimed for this slot (its
+        #                        reserved_for_scene_index is then
+        #                        permanently set to this slot)
+        #   - "none"           — no entity at play in this slot
+        # The orchestrator:
         #   1. validates the new excerpt is a verbatim substring of the
         #      new paragraph;
-        #   2. validates that any non-null companion belongs to the
-        #      brief's companions pool (§ 7.1 Call 4 rule #7);
+        #   2. validates entity_action ↔ contains_entity_label coherence
+        #      and the entity-side scene lock (§ 7.1 Call 4);
         #   3. overwrites runs.story_blocks_json[paragraph_index].text;
-        #   4. overwrites illustrations.scene_excerpt;
+        #   4. overwrites illustrations.scene_excerpt + current_concept;
         #   5. emits SSE paragraph_updated{paragraph_index, text};
-        #   6. updates current_concept;
-        #   7. overwrites illustrations.companion_description and
-        #      illustrations.companion_interaction when the new
-        #      companion differs from the previous (including any
-        #      transition to/from null); emits SSE
-        #      illustration_companion_updated in that case.
-        (current_concept, new_paragraph_text, new_scene_excerpt, new_companion) =
-            claude.rethink_concept(
-                full_story_text=<latest joined paragraph blocks>,
-                current_paragraph_text=<latest paragraph at paragraph_index>,
-                scene_excerpt=<current excerpt>,
-                current_companion=<current illustrations.companion_*>,
-                companions_pool=<sessions.collected_brief.companions>,
-                failed_concept=<previous current_concept>,
-                verdict=<last verdict>,
-                style_guide=...,
-                character_role=...,
-            )
+        #   6. when contains_entity_label changed (including to/from
+        #      null), overwrites illustrations.contains_entity_label and
+        #      emits SSE illustration_entity_updated{
+        #        contains_entity_label, entity: NarrativeEntity | null
+        #      } (the full updated entity record from the register, so
+        #      the frontend can rebind the entity subtitle in place).
+        #   7. when entity_action="claim_floating", also persists the
+        #      claim on the register: the entity's
+        #      reserved_for_scene_index is set to this slot.
+        result = claude.rethink_concept(
+            full_story_text=<latest joined paragraph blocks>,
+            current_paragraph_text=<latest paragraph at paragraph_index>,
+            scene_excerpt=<current excerpt>,
+            current_entity=<entity reserved for or currently in this slot>,
+            floating_entities=<supporting entities with
+                               reserved_for_scene_index=null>,
+            environment=<runs.environments_json[scene_index]>,
+            failed_concept=<previous current_concept>,
+            verdict=<last verdict>,
+            style_guide=...,
+            character_role=...,
+        )
+    skip_concept_rethink_once = False
     state = GENERATING_PROMPTS
-    prompts = claude.generate_prompts(current_concept, style_guide)
+    prompts = claude.generate_prompts(current_concept, style_guide,
+                                      environment=<slot environment>,
+                                      contains_entity=<current entity | None>)
     for prompt_attempt in 1..MAX_PROMPT_ATTEMPTS_PER_CONCEPT (3):
         check_cancellation()
         state = RENDERING
         image = runpod.run_workflow(workflow_with_prompts)
         state = EVALUATING
-        verdict = claude.evaluate_image(image, current_concept, style_guide)
+        verdict = claude.evaluate_image(image, current_concept,
+                                        style_guide, environment=...)
         if verdict.ok:
             state = COMPLETED
             return success
+        if verdict.problem == "environment" and not env_rethink_used:
+            # Agent 4b — only agent allowed to swap the slot's locked
+            # environment. One-shot per branch; extends the outer budget
+            # by +1; on success, the next outer iteration skips Agent 4
+            # since 4b already produced fresh concept + paragraph.
+            state = RETHINKING_ENVIRONMENT
+            result = claude.rethink_environment(...)  # § 7.1 Call 4b
+            # Server-side persistence:
+            #   - overwrites runs.environments_json[scene_index] AND
+            #     illustrations.environment_label/_aspect;
+            #   - overwrites story_blocks_json[paragraph_index].text,
+            #     scene_excerpt, current_concept;
+            #   - applies the same entity_action handling as Agent 4;
+            #   - emits SSE illustration_environment_updated{
+            #       environment: Environment
+            #     }, paragraph_updated, and (when entity changed)
+            #     illustration_entity_updated.
+            env_rethink_used = True
+            skip_concept_rethink_once = True
+            break  # exit inner loop -> next outer iteration
         if verdict.problem == "concept":
-            break  # exit inner loop -> next concept
+            break  # exit inner loop -> next concept (Agent 4)
         # verdict.problem == "prompt"
         state = REVISING_PROMPTS
         prompts = claude.revise_prompts(prompts, verdict, ...)
-state = FAILED
+    concept_attempt += 1
+state = FAILED  # auto pipeline exhausted; § 6A manual fallback takes over
 return failure
 ```
 
-Each state transition writes to DB and emits one SSE event.
+Each state transition writes to DB and emits one SSE event. The new
+SSE events `illustration_entity_updated` and
+`illustration_environment_updated` are documented in § 8.4.
 
 ---
 
@@ -1187,11 +1243,12 @@ introduce any *new* technical capabilities.
   background humans, no crowds, no secondary humanoids. If the user
   proposes a second person, Agent 6 reframes to a single-character
   scene.
-- **Companions are non-humanoid only.** Same rule as Agent 0a
-  (§ 7.1 Call 0a rule #8). The manual concept may keep the existing
-  companion, drop it, or substitute another non-humanoid one from
-  the brief's `companions` pool. It must not invent new companions
-  outside the pool.
+- **Narrative entities are non-humanoid only (animate ones).** Same
+  rule as Agent 0a (§ 7.1 Call 0a rule #8). The manual concept may
+  keep the existing entity, drop it, or substitute another entry
+  from the run's `narrative_entities` register (a non-human
+  character or an object). It must not invent new entities outside
+  the register.
 - **No consistent-environment promises.** The model must not commit
   to a setting that depends on continuity with other illustrations
   in the run (e.g. "the same kitchen as in scene 2"). Each manual
@@ -1454,7 +1511,7 @@ The file structure mirrors the existing agents:
        "the robot keeps rendering as mist or ghostly figure;
        needs explicit `mecha, metallic plating, glowing eyes,
        hard edges` in positive and `ghost, mist, ethereal,
-       humanoid` in negative"; "the cat companion drifts to
+       humanoid` in negative"; "the cat entity drifts to
        background when not anchored; force `on her shoulder,
        close to face` positional tags". Examples of bad notes
        (must NOT be written): "user wants more emotion in the
@@ -1804,9 +1861,11 @@ render the story-skeleton view (§ 9.1 Screen A) before Agent 0b runs.
     "characters": [
       { "role": "male" | "female" | "mother", "name_in_story": "string", "short_description": "string" }
     ],
-    "companions": [
-      { "description": "string (concrete English description of one allowed non-human entity)" }
+    "non_human_entities": [
+      { "label": "string (concrete English label of one allowed non-human entity — a non-human character or a story-important object)",
+        "role_in_story": "string (free-form English phrase describing the entity's role: e.g. \"ally\", \"antagonist\", \"recurring presence\", \"sentimental keepsake\")" }
     ],
+    "main_character_role": "male" | "female",
     "topic": "string (1–2 sentence summary of the agreed concept)",
     "notes": "string (anything else the user emphasized that should shape the story)"
   } | null
@@ -1903,26 +1962,44 @@ Hard rules enforced by the prompt (and re-checked server-side):
    list any scene concepts. That is Agent 0b's job. Its `reply` may
    discuss themes and tone with the user, but must not deliver the
    finished narrative.
-6. **Companion pool size.** `collected_brief.companions` may contain
-   **at most 2** entries. An empty array (the default) means the story
-   has no companions. Agent 0a must not push the user toward companions
+6. **Non-human entity pool — no hard cap on count.** Each entry is a
+   non-human character (animal, creature, mechanical being, etc.) **or
+   a story-important object** (a pocket watch, a locked diary, a
+   talisman). Agent 0a must not push the user toward adding entities
    — it only captures them if the user volunteers the idea or
-   explicitly agrees when asked.
-7. **Companion shape.** Each entry has a non-empty, visualizable
-   `description`. Agent 0a nudges the user toward concrete descriptions
-   ("a small black cat" not "an animal") before moving to
-   `awaiting_confirmation`.
-8. **Non-humanoid only.** A companion must have a body plan
-   fundamentally different from humans — quadrupeds, winged creatures,
-   serpents, mechanical entities without human form factor, etc.
-   Anthropomorphic / humanoid creatures (cat-girls, elf-like beings,
-   humanoid androids with human faces, etc.) are forbidden and treated
-   as humans for scope purposes. Agent 0a refuses such companions and
-   stays in `gathering` until the user proposes a non-humanoid one or
-   drops the idea.
-9. **No companions without a human main character.** Companions belong
-   to a human; the prerequisite from rule #2 (at least one of `male` or
-   `female`) still applies before any companion can be accepted.
+   explicitly agrees when asked. Pool size is not capped in the schema
+   (Agent 0b later assigns importance and is bound by the per-importance
+   cardinality rules — § 7.1 Call 0b rule #14).
+7. **Entity shape.** Each entry has a non-empty, visualizable English
+   `label` and a non-empty, free-form English `role_in_story` hint.
+   Agent 0a nudges the user toward concrete labels
+   ("a small black cat", "the gold pocket watch") rather than vague
+   ones ("an animal", "a thing") before moving to
+   `awaiting_confirmation`. The `role_in_story` field is *free-form
+   prose* the agent will later read to pick the entity's importance
+   (e.g. "ally throughout", "antagonist who appears once", "a sentimental
+   keepsake the boy carries to school").
+8. **Non-humanoid only for animate entities.** A non-human *animate*
+   entity (kind that becomes a `non_human_character` in Agent 0b's
+   register) must have a body plan fundamentally different from
+   humans — quadrupeds, winged creatures, serpents, mechanical
+   entities without human form factor, etc. Anthropomorphic / humanoid
+   creatures (cat-girls, elf-like beings, humanoid androids with human
+   faces, etc.) are forbidden and treated as humans for scope purposes.
+   Objects are exempt from this rule. Agent 0a refuses humanoid
+   non-human characters and stays in `gathering` until the user
+   proposes a non-humanoid one, switches to an object, or drops the
+   idea.
+9. **No non-human entities without a human main character.**
+   Entities exist *for* the human cast; the prerequisite from rule #2
+   (at least one of `male` or `female`) still applies before any
+   entity can be accepted.
+10. **Main character role.** `collected_brief.main_character_role` is
+    REQUIRED and must reference one of the cast roles. `mother` is
+    forbidden as main (cast rule #1 already prevents a mother-only
+    brief). Agent 0a infers it from the conversation; if the user has
+    given a male + a female lead without expressing a preference, the
+    agent must ask before moving to `awaiting_confirmation`.
 
 Server-side guard: if the validated response is `phase="confirmed"` but
 no `awaiting_confirmation` turn exists in the session history, the backend
@@ -1967,10 +2044,22 @@ authoritative call that defines a run's content.
       "concept": "string (the canonical English concept — single source of truth, used by Agents 1 / 2 / 3)",
       "concept_localized": "string (the same concept in source_language; used by the UI ConceptPopover; same meaning, idiomatic phrasing) | null when source_language='en'",
       "character_role": "male" | "female" | "mother" | null,
-      "companion": {
-        "description": "string (must match — case-insensitive substring or exact — one description from collected_brief.companions)",
-        "interaction": "string (concrete visual relationship in this scene)"
-      } | null
+      "contains_entity_label": "string (label of one entry in narrative_entities, scene-locked once placed)" | null
+    }
+  ],
+  "environments": [
+    {
+      "label": "string (short locale-specific name, e.g. \"obývačka\", \"školská chodba\", \"auto\")",
+      "kind": "indoor" | "outdoor" | "dual",
+      "aspect": "single" | "inside" | "outside"
+    }
+  ],
+  "narrative_entities": [
+    {
+      "label": "string (English label, unique within the register)",
+      "kind": "non_human_character" | "object",
+      "importance": "primary" | "secondary" | "supporting",
+      "reserved_for_scene_index": 0 | 1 | 2 | 3 | 4 | null
     }
   ]
 }
@@ -2000,70 +2089,108 @@ Hard rules enforced by the prompt and re-checked server-side:
    must correspond to a character present in the approved brief. If the
    brief has no `mother`, no illustration may have
    `character_role="mother"`. **`character_role` MAY be `null`** for an
-   illustration whose visible subject is the companion alone, or — very
-   rarely — a pure environment beat with no characters at all (see
-   rules #12 / #13 below).
+   illustration whose visible subject is a narrative entity alone, or —
+   very rarely — a pure environment beat with no characters at all
+   (see rules #12 / #13 below).
 6. **Specificity of expression / gesture / action** (§ 7.3.4) applies
    to every illustration that includes either a human character
-   (`character_role != null`) or a companion. Each such `concept` must
-   explicitly mention at least one concrete facial expression,
-   gesture/posture, or action. For the rare pure-environment beat
+   (`character_role != null`) or a non-null `contains_entity_label`.
+   Each such `concept` must explicitly mention at least one concrete
+   facial expression, gesture/posture, or action (for animate
+   subjects), or a concrete physical state / depictable role of the
+   object (for object beats). For the rare pure-environment beat
    (rule #13), the concept must instead name a concrete, depictable
    moment in the *environment* (lighting, weather, a specific object
    in frame).
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
    technical constraints (single human character optionally accompanied
-   by one non-human companion, simple ComfyUI workflow with no regional
-   prompting or inpainting, naturally-varied environments per scene).
-8. **Companion pool fidelity.** If `companion` is set on an illustration,
-   its `description` MUST come from the brief's `companions` pool
-   (whitespace-tolerant, case-insensitive substring or exact match). The
-   server re-checks this on receipt and re-prompts on failure. Agent 0b
-   must not invent new companion types.
-9. **Companion cadence is a story-design choice.** Agent 0b decides which
-   of the 5 scenes feature a companion. There is no required minimum
-   or maximum beyond "each scene has at most one companion." When the
-   brief's `companions` pool is empty, every illustration's `companion`
-   field MUST be `null`. Agent 0b should use companions meaningfully
-   (when their presence adds emotional weight) rather than
-   decoratively — see § 7.3.9 principle 8.
-10. **`interaction` specificity.** When `companion` is set, its
-    `interaction` text must describe a visualizable spatial or
-    behavioral relationship (`held in lap`, `perched on shoulder`,
-    `walking beside her`). Vague phrasing (`there with him`) is
-    rejected.
-11. **No companion in scenes requiring hand-object precision.** This
+   by one non-human narrative entity, simple ComfyUI workflow with no
+   regional prompting or inpainting, locked per-scene environment
+   chosen from the run's `environments` register).
+8. **Entity register fidelity.** If `contains_entity_label` is set on
+   an illustration, its value MUST match an entry in the run's
+   `narrative_entities` register (whitespace-tolerant,
+   case-insensitive). The server re-checks this on receipt and
+   re-prompts on failure. Agent 0b must not invent new entities at
+   the illustration level — every entity that appears in any scene
+   is also present in `narrative_entities`.
+9. **Entity cadence + per-importance cardinality.** Agent 0b decides
+   which scenes feature an entity. The hard caps (re-checked by the
+   distribution validator, § 7.1 rule #14) are:
+   - At most **one** entity with `importance="primary"`
+     (`kind="non_human_character"`); when present it appears in
+     exactly its `reserved_for_scene_index` and nowhere else.
+   - At most **one** entity with `importance="secondary"`
+     (`kind="non_human_character"`); when present it appears in
+     exactly its `reserved_for_scene_index` *with* a human in the
+     same scene (it may never appear alone).
+   - Any number of `importance="supporting"` entities (NH-characters
+     and objects). Each may appear in at most one scene; supporting
+     entities may be reserved to a slot at Agent 0b time **or** left
+     floating (`reserved_for_scene_index=null`) to be claimed later
+     by Agent 4 / 4b.
+
+   When the brief's `non_human_entities` pool is empty,
+   `narrative_entities` MAY also be empty and every illustration's
+   `contains_entity_label` MUST be `null`.
+10. **`contains_entity_label` is scene-locked.** Once an entity appears
+    in scene `N`, it is permanently locked to scene `N`. If a later
+    agent (Agent 4 / 4b) drops the entity, the slot stays
+    *ghost-reserved* — the same entity may not migrate to a different
+    slot.
+11. **No entity in scenes requiring hand-object precision.** This
     complements § 7.3.9 principle 4. If a scene's `concept` pushes the
     hand-object precision envelope (e.g., character pouring water,
     picking up a coin, holding something delicate), Agent 0b must not
-    additionally place a companion that compounds the difficulty.
+    additionally place an entity that compounds the difficulty.
 12. **Per-illustration cast triplet (workflow-driving).** Every
     illustration falls into exactly one of three cast shapes:
-    - **Single human + optional companion** — `character_role` is one
-      of `male` / `female` / `mother`; `companion` is null or set.
-      This is the dominant shape; the `single-lora.json` workflow
-      renders it (§ 7.2.1).
-    - **Companion alone** — `character_role` is `null`; `companion` is
-      set. Rendered by `no-lora.json`. Used for beats where the
-      companion's *own* presence (the cat asleep on the bed; the
-      dragon perched on a rooftop watching) carries the moment.
-    - **No characters** — `character_role` is `null`; `companion` is
-      `null`. Rendered by `no-lora.json`. **Rare** — reserved for
-      story-essential environment beats (the empty classroom after
-      she left; the storm rolling in over the harbor). Multiple
-      character-less illustrations in the same run are discouraged;
-      Agent 0b should not produce more than one such scene unless the
-      story arc strongly motivates it.
+    - **Single human + optional narrative entity** — `character_role`
+      is one of `male` / `female` / `mother`; `contains_entity_label`
+      is null or set. This is the dominant shape; the
+      `single-lora.json` workflow renders it (§ 7.2.1).
+    - **Entity alone** — `character_role` is `null`;
+      `contains_entity_label` is set. Rendered by `no-lora.json`.
+      Permitted only when the entity is `importance="primary"`
+      (NH-character) or a floating/reserved supporting entity; a
+      `secondary` NH-character may NEVER appear alone (rule #9).
+      Used for beats where the entity's *own* presence (the cat
+      asleep on the bed; the dragon perched on a rooftop watching;
+      the locked diary lying open on the desk) carries the moment.
+    - **No characters / no entity** — `character_role` is `null`;
+      `contains_entity_label` is `null`. Rendered by `no-lora.json`.
+      **Rare** — reserved for story-essential environment beats
+      (the empty classroom after she left; the storm rolling in
+      over the harbor). Multiple character-less illustrations in
+      the same run are discouraged.
 13. **Workflow distribution discipline.** Agent 0b implicitly
     determines the workflow each illustration will use via the cast
     shape it returns (rule #12). It must design the story so that the
     overall mix is sensible: most illustrations should feature a
     human character. A run where 4-out-of-5 illustrations are
-    character-less environment beats is rejected at validation time
-    as poorly aligned with the app's purpose. The server caps
-    `no-human` illustrations (i.e. `character_role == null`) at
-    **≤ 2 out of 5** and re-prompts on violation.
+    character-less is rejected at validation time as poorly aligned
+    with the app's purpose. The server caps `no-human` illustrations
+    (i.e. `character_role == null`) at **≤ 1 out of 5** and re-prompts
+    on violation.
+14. **Cross-illustration distribution validator.** Server runs
+    `validate_illustration_distribution(brief, illustrations,
+    narrative_entities)` (§ schemas/claude.py) which enforces, beyond
+    the rules above: every cast role appears at least once;
+    `main_character_role` appears at least twice; no side role exceeds
+    main; per-entity quotas; entity-side scene lock. Failures re-prompt
+    up to `CLAUDE_JSON_RETRY` times.
+15. **Environments register.** `environments` MUST contain exactly 5
+    entries. Position `N` in the array is the locked environment for
+    `scene_index=N`. Indoor and outdoor entries occupy exactly one
+    slot (`aspect="single"`). Dual entries (cars, planes, ships,
+    wooden cabins) may occupy two slots and only if their aspects
+    are one `inside` and one `outside`. Environment labels live in
+    a disjoint namespace from `narrative_entities` labels: if a thing
+    can host a human inside it during the story, it is an
+    `Environment`; otherwise it is a `NarrativeEntity` with
+    `kind="object"`. Agent 0b authors all five environments at story-
+    build time; only Agent 4b may later swap one (§ 7.1 Call 4b).
 
 Unlike the previous spec, Agent 0b **does not** have a "no suitable
 scenes" escape hatch. The brief has already been negotiated and confirmed
@@ -2075,13 +2202,16 @@ hard rules above is treated as a Claude failure (`STORY_BUILD_FAILED`).
 **Input:** `current_concept` (English — single source of truth),
 `style_guide`, `character_role` (`male` / `female` / `mother` / `null` —
 when `null`, the agent treats the illustration as character-less; see
-rule below), the optional `companion` (`{ description, interaction }
-| null`) attached to the illustration, and the optional
-`prompting_notes: string | null` — an English-only cumulative
-prompt-engineering memo from the collaboration mode (§ 6A.2 rule #12).
-When `companion` is non-null the agent must incorporate it per § 7.3.10
-(companion prompting guidance) and apply the conditional adjustments to
-the negative baseline described in § 7.3.6.
+rule below), the slot's locked `environment`
+(`{ label, kind, aspect }`), the optional `contains_entity`
+(`NarrativeEntity | null` — the full register entry for the entity
+present in this scene, including `label`, `kind`, `importance`,
+`reserved_for_scene_index`), and the optional `prompting_notes: string
+| null` — an English-only cumulative prompt-engineering memo from the
+collaboration mode (§ 6A.2 rule #12). When `contains_entity` is
+non-null the agent must incorporate it per § 7.3.10 (entity prompting
+guidance) and apply the conditional adjustments to the negative
+baseline described in § 7.3.6.
 
 `prompting_notes` semantics:
 
@@ -2114,8 +2244,8 @@ perspective.
 ```
 
 The `positive` field is the full per-scene positive prompt (character +
-environment + action + expression + companion if any, all expressed as
-Danbooru tags — *always in English*, regardless of the run's source
+environment + action + expression + narrative entity if any, all expressed
+as Danbooru tags — *always in English*, regardless of the run's source
 language). The `negative` field is the full per-scene negative prompt.
 Style-level tags are NOT included here — they live in `style_guide` and
 are composed in by the workflow itself (see § 7.2). See § 7.3.4 and
@@ -2125,11 +2255,11 @@ are composed in by the workflow itself (see § 7.2). See § 7.3.4 and
 
 - Return `"single-lora"` **iff** `character_role` is non-null (i.e. the
   illustration shows exactly one human character — optionally
-  accompanied by one non-human companion). The character LoRA wiring
-  is taken from `character_config[role]` (§ 7.3.7) and the
+  accompanied by one narrative entity). The character LoRA wiring is
+  taken from `character_config[role]` (§ 7.3.7) and the
   `CHARACTER_LORA` placeholder is filled in by the workflow runner.
 - Return `"no-lora"` **iff** `character_role` is `null` (i.e. the
-  illustration shows no human — either the companion alone, or no
+  illustration shows no human — either an entity alone, or no
   characters at all). The `no-lora.json` workflow does not have a
   `CHARACTER_LORA` placeholder (§ 7.2.1).
 
@@ -2143,10 +2273,13 @@ from `character_role`.
 #### Call 2 — `evaluate_image`
 
 **Input:** image (base64), `current_concept` (English), `style_guide`,
-`character_role` (`male` / `female` / `mother` / `null`), and the
-illustration's `companion` (`{ description, interaction } | null`). The
-agent's checklist is companion-aware **and cast-aware** (§ 7.3.5 items
-1a + 1b + 1c).
+`character_role` (`male` / `female` / `mother` / `null`), the slot's
+locked `environment` (`{ label, kind, aspect }`), and the
+illustration's `contains_entity` (`NarrativeEntity | null`). The
+agent's checklist is entity-aware **and cast-aware** (§ 7.3.5 items
+1a + 1b + 1c) and additionally checks that the rendered scene matches
+the locked environment (lighting, structure, expected indoor/outdoor
+aspect).
 
 **Output schema:**
 ```json
@@ -2161,20 +2294,40 @@ or
 ```json
 {
   "ok": false,
-  "problem": "prompt" | "concept",
+  "problem": "prompt" | "concept" | "environment",
   "reasoning": "string",
   "suggestion": "string (hint to be passed into the next call)"
 }
 ```
 
+**Routing semantics for `problem`:**
+
+- `"prompt"` — fixable by tag revision in the same concept; routes to
+  Agent 3 (`revise_prompts`). Use when the renderer *could* depict
+  the concept but the tags missed something (a missing expression,
+  wrong colour, lighting tag drift, etc.). Use this verdict even when
+  the renderer "missed the environment" but the environment is still
+  feasible — that is steerable via tags.
+- `"concept"` — the concept itself is the blocker but the locked
+  environment remains workable; routes to Agent 4 (`rethink_concept`).
+  Agent 4 may rewrite the concept and paragraph in the same locked
+  environment.
+- `"environment"` — the locked environment itself is the renderer
+  blocker; concept revision in-place cannot help; routes to Agent 4b
+  (`rethink_environment`). Use only when the env is fundamentally at
+  odds with the depictable scene (e.g. a "vast underwater cavern"
+  that the model consistently fails to render coherently). One-shot
+  per branch; if Agent 4b has already fired (`env_rethink_used=True`),
+  the orchestrator demotes the verdict to `"concept"`.
+
 #### Call 3 — `revise_prompts`
 
 **Input:** current `prompts`, last `verdict`, `current_concept`
 (English), `style_guide`, `character_role` (`male` / `female` /
-`mother` / `null`), and the illustration's `companion` (`{ description,
-interaction } | null`). When `companion` is non-null the same companion
-guidance applies as in Call 1 (§ 7.3.10 + the § 7.3.6 conditional
-negative adjustments).
+`mother` / `null`), the slot's locked `environment`, and the
+illustration's `contains_entity` (`NarrativeEntity | null`). When
+`contains_entity` is non-null the same entity guidance applies as in
+Call 1 (§ 7.3.10 + the § 7.3.6 conditional negative adjustments).
 
 **Output schema:** same as Call 1 (i.e. `{ positive, negative,
 workflow }`). The `workflow` selection rule is identical to Call 1 and
@@ -2214,11 +2367,20 @@ particular *moment* the paragraph crystallizes can change as needed.
 - `style_guide`, `character_role`, `character_display` — unchanged from
   before; used so the new concept and the new paragraph stay consistent
   with the global visual continuity and the cast vocabulary.
-- `current_companion` — the illustration's current companion
-  (`{ description, interaction } | null`).
-- `companions_pool` — the brief's full `companions` pool (list of
-  `{ description }` entries) so Agent 4 knows which companions, if any,
-  it may select from.
+- `environment` — the slot's **locked** environment (`{ label, kind,
+  aspect }`) from `runs.environments_json[scene_index]`. Agent 4 is
+  forbidden from changing it; if the locked environment is the
+  renderer blocker, the evaluator should have emitted
+  `problem="environment"` and the orchestrator should have routed to
+  Agent 4b (§ 7.1 Call 4b) instead.
+- `current_entity` — the unified narrative entity currently associated
+  with this slot (`NarrativeEntity | null`). Includes `label`, `kind`,
+  `importance`, and `reserved_for_scene_index`.
+- `floating_entities` — every entity in the run's `narrative_entities`
+  register whose `reserved_for_scene_index` is `null` (i.e. floating
+  supporting entities still up for grabs). Agent 4 may claim one of
+  these for this slot by returning its label with
+  `entity_action="claim_floating"`.
 - `source_language` — `runs.source_language`. Tells Agent 4 which
   language the rewritten paragraph and the localized concept must be
   authored in. The canonical concept is still English (single source
@@ -2228,24 +2390,24 @@ particular *moment* the paragraph crystallizes can change as needed.
 **Output schema:**
 ```json
 {
+  "workflow": "single-lora" | "no-lora",
   "concept": "string (canonical English concept, meaningfully different from failed_concept)",
   "concept_localized": "string (the same concept in source_language) | null when source_language='en'",
   "paragraph_text": "string (the rewritten paragraph that replaces current_paragraph_text, in source_language)",
   "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)",
   "character_role": "male" | "female" | "mother" | null,
-  "companion": {
-    "description": "string (must match an entry in companions_pool)",
-    "interaction": "string (concrete visual relationship in the new scene)"
-  } | null
+  "contains_entity_label": "string (label of the entity present in this rewrite)" | null,
+  "entity_action": "keep" | "drop" | "claim_floating" | "none",
+  "narrative_continuity_check": "string (1–3 sentence English self-audit Agent 4 writes after drafting paragraph_text — see rule #9)"
 }
 ```
 
 `character_role` is **also rewritable** by Agent 4 (it was already in
 Call 4's narrative scope but was implicit; making it explicit clarifies
-that Agent 4 can switch a scene from human-with-companion to
-companion-alone — and vice versa — as long as the resulting cast
-shape (Call 0b rule #12) is one of the three permitted triplets, and
-the global per-run cap of ≤ 2 character-less illustrations (Call 0b
+that Agent 4 can switch a scene from human-with-entity to
+entity-alone — and vice versa — as long as the resulting cast shape
+(Call 0b rule #12) is one of the three permitted triplets, and the
+global per-run cap of ≤ 1 character-less illustration (Call 0b
 rule #13) is still respected across the run after applying this
 change). The orchestrator persists the new `character_role` on the
 illustration row and uses it on the subsequent Call 1 / Call 3, which
@@ -2283,42 +2445,69 @@ Hard rules enforced by the prompt and re-checked server-side:
    directives as `build_story.md` so the agent obeys them in identical
    form (§ 7.4).
 5. **Out-of-band side effects.** Agent 4 must not change anything else
-   — it does not return a different `character_role`, does not invent
-   new characters, does not propose changing the story title, and does
-   not propose changes to other paragraphs. Its scope is exactly: one
-   paragraph, one concept, one excerpt, optionally one companion.
-6. **Companion-aware rethinking.** Agent 4 may keep, drop, or swap the
-   scene's companion when rewriting:
-   - Dropping (`companion: null`) is the natural choice when the
-     evaluator's failure mode was companion-related (e.g. "cat anatomy
-     fails").
-   - Swapping is the natural choice when the brief lists more than one
-     allowed companion and a different one fits the new beat better.
-   - Keeping (returning the same description / interaction) is fine
-     when the failure was unrelated to the companion.
-7. **Pool fidelity (same as Agent 0b).** Any non-null `companion`
-   returned by Agent 4 must reference an entry in the run's saved
-   `collected_brief.companions` pool (whitespace-tolerant,
-   case-insensitive substring or exact match). The persisted brief is
-   read from `sessions.collected_brief_json` via the
-   `runs.session_id` foreign key. The server re-checks this and
-   re-prompts on failure (same validator path used by Agent 0b
-   rule #8).
-8. **No invention.** Agent 4 must not introduce a companion type that
-   was not in the brief, even if it seems to help.
+   — it does not invent new characters, does not propose changing the
+   story title, and does not propose changes to other paragraphs. Its
+   scope is exactly: one paragraph, one concept, one excerpt,
+   optionally one narrative entity placement.
+6. **Environment is immutable.** Agent 4 must place the new scene
+   inside the `environment` passed in. Moving the scene to a different
+   place (a different room, a different building, outdoors when the
+   slot is indoors, etc.) is forbidden. If the locked environment is
+   the failure mode, the evaluator emits `problem="environment"` and
+   the orchestrator dispatches Agent 4b instead — Agent 4 is never
+   asked to swap the environment.
+7. **Entity placement via `entity_action`.** Agent 4 must classify
+   what it is doing with this slot's narrative entity by setting the
+   `entity_action` discriminator:
+   - `"keep"` — the entity reserved for this slot stays in the new
+     scene. `contains_entity_label` is non-null and matches
+     `current_entity.label`.
+   - `"drop"` — the entity reserved for this slot is intentionally
+     removed from the new scene. `contains_entity_label` MUST be
+     `null`. The slot stays *ghost-reserved* — the entity may never
+     appear in any other slot (entity-side scene lock).
+   - `"claim_floating"` — a floating supporting entity (one from
+     `floating_entities`, i.e. `reserved_for_scene_index=null`) is
+     being claimed for this slot. `contains_entity_label` is non-null
+     and matches one of the floating entries; on receipt, the server
+     permanently sets that entity's `reserved_for_scene_index` to
+     this slot.
+   - `"none"` — there is no entity at play (no reservation existed
+     and no claim is being made). `contains_entity_label` MUST be
+     `null`.
+
+   The server enforces the `entity_action` ↔ `contains_entity_label`
+   coherence; mismatches re-prompt up to `CLAUDE_JSON_RETRY` times.
+8. **Register fidelity (same as Agent 0b).** Any non-null
+   `contains_entity_label` must reference an entry in the run's saved
+   `narrative_entities` register (whitespace-tolerant, case-insensitive
+   substring or exact match). The persisted register is read from
+   `runs.narrative_entities_json`. Including a label that belongs to
+   an entity reserved for a DIFFERENT slot is rejected (entity-side
+   scene lock).
+9. **Narrative continuity self-audit.** Agent 4 must write a 1–3
+   sentence English `narrative_continuity_check` *after* drafting
+   `paragraph_text`, stating in its own words how the rewrite
+   preserves the transition into and out of this paragraph. Empty
+   strings or trailing whitespace-only strings are rejected. This is
+   the prompt's chief defense against subtle narrative drift on
+   third-attempt rewrites.
 
 If the validated response violates any rule above, the server treats
 that as a Claude failure and re-prompts up to `CLAUDE_JSON_RETRY` (= 2)
 times. After that the branch ends as if Agent 4 returned nothing useful
 — concept_attempt exhaustion behavior (§ 6 loop semantics) takes over.
 
-The orchestrator persists the returned companion (if any) into
-`illustrations.companion_description` and `illustrations.companion_interaction`
-at the same time it overwrites the paragraph text, scene excerpt, and
-current concept. When the new companion differs from the previous
+The orchestrator persists `contains_entity_label` onto the illustration
+row at the same time it overwrites the paragraph text, scene excerpt,
+and current concept. When the new label differs from the previous
 (including any change to/from null), the orchestrator additionally
-emits an `illustration_companion_updated` SSE event (§ 8.4). No event
-is emitted when the companion is unchanged.
+emits an `illustration_entity_updated` SSE event (§ 8.4) carrying both
+the new label and the **full entity record** from the (possibly
+mutated) register. For `entity_action="claim_floating"`, the
+orchestrator also updates `runs.narrative_entities_json` to set the
+claimed entity's `reserved_for_scene_index` to this slot. No event is
+emitted when the label is unchanged.
 
 Agent 4's `concept_localized` and `paragraph_text` together replace
 the corresponding source-language texts and **invalidate** any
@@ -2327,6 +2516,92 @@ existing translations for the same paragraph and concept in
 (their `source_hash` no longer matches). The orchestrator does not
 proactively call Agent 5; staleness is resolved lazily on the next
 read in a non-source language (§ 5.5, § 8.9).
+
+#### Call 4b — `rethink_environment` (Agent 4b, "the location scout")
+
+Agent 4b is the **only** agent allowed to swap a slot's locked
+environment. It exists for the narrow case where the renderer can
+demonstrably not depict the locked environment for this scene — not
+because the prompt is wrong, not because the concept is wrong, but
+because the environment itself fights the simple ComfyUI workflow.
+The evaluator's `problem="environment"` verdict (§ 7.1 Call 2) is
+the only way Agent 4b is dispatched.
+
+Loop integration (§ 6 loop semantics):
+
+- One-shot per branch — gated by `env_rethink_used`. After Agent 4b
+  fires once, any subsequent `problem="environment"` verdict is
+  demoted to `problem="concept"` and routed back to Agent 4.
+- On success, Agent 4b extends the branch's outer concept-attempt
+  budget by **+1** (i.e. 4 attempts instead of 3), so the swap
+  doesn't burn the slot it just rewrote.
+- `skip_concept_rethink_once` is set so the *next* outer iteration
+  bypasses Agent 4 (Agent 4b has already produced a fresh concept +
+  paragraph + environment in this same call).
+
+**Input (to Claude):** identical to Agent 4 except:
+
+- `verdict.problem == "environment"` is implicit.
+- A new field `dual_aspect_in_use` — when this slot's old environment
+  was a dual entry (`kind="dual"`) and its sibling slot uses the other
+  aspect, Agent 4b is told which aspect is taken so it can pick a
+  non-conflicting replacement. Dual-rule violations are re-prompted
+  server-side.
+
+**Output schema:** mirrors Agent 4 plus a fresh `environment`:
+
+```json
+{
+  "workflow": "single-lora" | "no-lora",
+  "concept": "string",
+  "concept_localized": "string | null when source_language='en'",
+  "paragraph_text": "string",
+  "scene_excerpt": "string (verbatim substring of paragraph_text)",
+  "character_role": "male" | "female" | "mother" | null,
+  "contains_entity_label": "string | null",
+  "entity_action": "keep" | "drop" | "claim_floating" | "none",
+  "environment": {
+    "label": "string",
+    "kind": "indoor" | "outdoor" | "dual",
+    "aspect": "single" | "inside" | "outside"
+  },
+  "narrative_continuity_check": "string (1–3 sentence English self-audit)"
+}
+```
+
+Hard rules enforced by the prompt and re-checked server-side:
+
+1. **Substantively different environment.** The new `environment.label`
+   must be meaningfully distinct from the previous one (case-folded
+   substring match against the old label is rejected). Agent 4b must
+   not just rename the same place.
+2. **Run-level disjointness preserved.** After the swap, the run's
+   five-slot `environments` register must still satisfy: each label
+   appears in at most 2 slots; labels that appear twice are
+   `kind="dual"` with one `inside` and one `outside`; labels that
+   appear once are either `single`, `inside`, or `outside`. Conflicts
+   re-prompt up to `CLAUDE_JSON_RETRY` times.
+3. **Entity contract** — identical to Agent 4 rules #7 and #8
+   (`entity_action` ↔ `contains_entity_label` coherence; register
+   fidelity; entity-side scene lock).
+4. **Narrative continuity** — identical to Agent 4 rule #9
+   (`narrative_continuity_check` required).
+5. **All Agent 4 paragraph rules still apply** — excerpt validity,
+   functional equivalence, story-design discipline, out-of-band side
+   effects.
+
+Server-side persistence after a valid Agent 4b response:
+
+- `runs.environments_json[scene_index]` is overwritten with the new
+  `environment`.
+- `illustrations.environment_label` and `illustrations.environment_aspect`
+  are overwritten on the same row.
+- `runs.story_blocks_json[paragraph_index].text` is overwritten.
+- `illustrations.scene_excerpt`, `current_concept`, `character_role`,
+  and `contains_entity_label` are overwritten on the same row.
+- Three SSE events are emitted (in this order):
+  `illustration_environment_updated{environment}`, `paragraph_updated`,
+  and (when the entity label changed) `illustration_entity_updated`.
 
 #### Call 5 — `translate` (Agent 5, "the translator")
 
@@ -2443,9 +2718,12 @@ and operates in one of two sub-phases (§ 6A.4):
 - `style_guide` — the run's existing `style_guide` (§ 5 `runs`).
 - `character_role` — the illustration's existing role (drives the
   per-role LoRA / character vocabulary the model may rely on).
-- `companions_pool` — the same brief-level pool used by Agent 4
-  (§ 7.1 Call 4); Agent 6 may keep / drop / substitute companions
-  but never invent new ones.
+- `narrative_entities_register` — the same run-level register used
+  by Agent 4 (§ 7.1 Call 4); Agent 6 may keep / drop / substitute
+  entities (non-human characters or objects) but never invent new
+  ones. Entity-side scene locks (§ 7.1 Call 0b rule #10) still apply:
+  an entity already locked to a *different* slot may not appear in
+  this slot.
 - `initial_concept` — the illustration's original concept text
   (English source). Agent 6 may use it as a starting point or
   deliberately depart from it; the user is in charge.
@@ -2712,8 +2990,8 @@ a revised positive/negative prompt pair.
   change the workflow choice (`single-lora` ↔ `no-lora`) because
   the cast shape is fixed for this illustration; the server reuses
   `illustrations.current_workflow` after this call.
-- `companion` — same as Agent 1 / Agent 3 (the brief-attached
-  companion or `null`).
+- `contains_entity` — same as Agent 1 / Agent 3 (the run-level
+  `NarrativeEntity | null` whose label is on the illustration row).
 
 **Output schema:**
 ```json
@@ -2769,9 +3047,9 @@ The app ships **two** workflow files in `app/workflows/`, both in
 **ComfyUI API format**:
 
 - `single-lora.json` — single human character (optionally accompanied
-  by one non-human companion). The character LoRA is wired in via the
-  `CHARACTER_LORA` placeholder.
-- `no-lora.json` — no human character (companion alone, or pure
+  by one non-human narrative entity, animate or inanimate). The
+  character LoRA is wired in via the `CHARACTER_LORA` placeholder.
+- `no-lora.json` — no human character (entity-alone scene, or pure
   environment). No character LoRA is referenced in this file; the
   `CHARACTER_LORA` placeholder is **not** present.
 
@@ -2816,8 +3094,8 @@ and follows from `illustrations.character_role`:
 
 | `character_role`             | Workflow            | Cast shape (per Call 0b rule #12)              |
 |------------------------------|---------------------|-------------------------------------------------|
-| `male` / `female` / `mother` | `single-lora.json`  | Single human + optional companion              |
-| `null`                       | `no-lora.json`      | Companion alone, or no characters at all       |
+| `male` / `female` / `mother` | `single-lora.json`  | Single human + optional non-human entity        |
+| `null`                       | `no-lora.json`      | Entity alone, or no characters at all           |
 
 Server-side enforcement:
 
@@ -2918,26 +3196,32 @@ descriptors for each character are loaded from configuration (see
 Each illustration falls into one of three permitted cast shapes
 (§ 7.1 Call 0b rule #12):
 
-1. **Single human + optional companion** — dominant shape. One of the
-   three permitted human character roles, optionally accompanied by
-   exactly one non-human, non-anthropomorphic companion drawn from the
-   run's brief pool. Rendered by `single-lora.json` (§ 7.2.1).
-2. **Companion alone** — no human character; exactly one non-human
-   companion from the brief's pool is the visible subject. Rendered by
-   `no-lora.json`.
+1. **Single human + optional non-human entity** — dominant shape. One
+   of the three permitted human character roles, optionally accompanied
+   by exactly one non-human entity (animate non-humanoid character, or
+   story-important object) drawn from the run's `narrative_entities`
+   register. Rendered by `single-lora.json` (§ 7.2.1).
+2. **Entity alone** — no human character; exactly one non-human entity
+   from the register is the visible subject (e.g. the cat sleeping on
+   the windowsill, the gold pocket watch resting on a table). Rendered
+   by `no-lora.json`. Capped at ≤ 1 per run by Call 0b rule #13.
 3. **No characters** — *rare*; reserved for story-essential environment
-   beats. No human, no companion. Rendered by `no-lora.json`. Capped at
-   ≤ 2 per run by Call 0b rule #13.
+   beats. No human, no entity. Rendered by `no-lora.json`. Capped at
+   ≤ 1 per run by Call 0b rule #13.
 
 Scenes with multiple human characters, group scenes, crowds, scenes
 with multiple non-human entities visible, and scenes whose subject is
 ambiguous are excluded under all three shapes.
 
-A non-human companion has a body plan fundamentally different from
-humans — quadrupeds, winged creatures, serpents, mechanical entities
-without human form factor, etc. Anthropomorphic / humanoid beings
-(cat-girls, elf-like beings, humanoid androids with human faces, etc.)
-are treated as a *second human* and therefore forbidden.
+For shapes 1 and 2, when the entity is a `non_human_character` it must
+have a body plan fundamentally different from humans — quadrupeds,
+winged creatures, serpents, mechanical entities without human form
+factor, etc. Anthropomorphic / humanoid beings (cat-girls, elf-like
+beings, humanoid androids with human faces, etc.) are treated as a
+*second human* and therefore forbidden as non-human entities. Objects
+(`kind="object"`) are exempt from the body-plan rule — they are
+inanimate and never compete with the human for the "single character"
+slot.
 
 Because Agent 0b is **constructing** the story together with its scenes
 (rather than mining a pre-existing text), it is responsible for
@@ -2975,29 +3259,50 @@ Agent 2 evaluates this discipline as part of its checklist (see § 7.3.5).
 A correctly rendered character with a vague or ambiguous expression should
 be rejected with `problem="prompt"` and a suggestion to add specifics.
 
-When `companion` is present on the illustration, the mandatory
-specificity applies to both the human and the human-companion
-interaction. The `concept` field must still describe a concrete human
-expression / gesture / action, and the `interaction` field must
-independently describe a concrete spatial or behavioral relationship
-between the human and the companion.
+When `contains_entity_label` is non-null on the illustration, the
+mandatory specificity applies to both the human and the
+human-entity interaction. The `concept` field must describe a
+concrete human expression / gesture / action **and** a concrete
+spatial or behavioral relationship between the human and the entity
+(e.g. "Mia kneels beside the small black cat, one hand resting gently
+on its back" — single sentence carrying expression, gesture, and the
+interaction with the entity).
+
+For entity-alone scenes (shape 2, `character_role=null` with
+`contains_entity_label` non-null), the specificity rule shifts to the
+entity itself: the `concept` field must describe the entity in a
+concrete, depictable state — a specific posture, action, lighting, or
+contextual cue (e.g. "the gold pocket watch lying open on the desk,
+hands frozen at 9:14, lamplight glinting on the rim"). Generic "object
+on a surface" or "animal in a meadow" beats are not acceptable.
 
 #### 7.3.5 Agent 2 evaluation checklist
 
 Agent 2 (`evaluate_image`) judges each rendered image against this
 checklist. The image is `ok` only when **all** of the following hold:
 
-1a. **Exactly one human character is visible.** Multiple visible humans
-    → `problem="prompt"`.
-1b. **Companion alignment.** If `companion` was specified for this
-    illustration, exactly one non-human entity matching the description
-    is visible, positioned consistently with the `interaction` field.
-    Missing companion → `problem="prompt"`. Multiple companions of the
-    same type appearing → `problem="prompt"`. Wrong type of companion
-    rendered → `problem="prompt"`. If `companion` was *not* specified
-    and a non-human entity nevertheless appears prominently → also
-    `problem="prompt"` (Agent 0b did not plan one). A small, peripheral
-    non-human element that does not distract is tolerated.
+1a. **Cast shape matches `character_role`.** If `character_role` is
+    non-null, exactly one human is visible; multiple visible humans →
+    `problem="prompt"`. If `character_role` is null, no humans are
+    visible; any visible human → `problem="prompt"`.
+1b. **Entity alignment.** If `contains_entity_label` was specified for
+    this illustration, exactly one non-human entity matching that label
+    is visible and prominently positioned per the concept. Missing
+    entity → `problem="prompt"`. Multiple copies of the same entity
+    type appearing → `problem="prompt"`. Wrong kind of entity rendered
+    (e.g. a dog when the label said cat, or a watch when the label said
+    locket) → `problem="prompt"`. If `contains_entity_label` was *not*
+    specified and a non-human entity nevertheless appears prominently →
+    also `problem="prompt"` (Agent 0b did not plan one). A small,
+    peripheral non-human element that does not distract is tolerated.
+1c. **Environment matches the slot.** The visible environment is
+    consistent with the locked `environment` for this scene (label and
+    aspect — `single`, `inside`, or `outside`). A renderer miss that
+    is plausibly steerable through prompt tweaks → `problem="prompt"`.
+    Persistent inability of the environment to host the planned action,
+    or a fundamental concept/environment clash that no prompt edit can
+    fix → `problem="environment"` (routes to Agent 4b — see § 7.1
+    Call 2 routing semantics and Call 4b).
 2. **The character matches the expected role** (male, female, or mother)
    per § 7.3.2 — recognizable as the corresponding MHA character.
 3. **The character's expression, gesture, or action is clearly
@@ -3038,27 +3343,30 @@ baseline includes at minimum:
 The exact baseline string lives in `backend/app/constants.py` so it is
 reusable and consistent across agents 1 and 3.
 
-**Conditional adjustments when `companion` is present** (Agents 1, 3,
-and 7 apply these on top of the baseline above when the illustration
-carries a non-null `companion`):
+**Conditional adjustments when `contains_entity_label` is non-null**
+(Agents 1, 3, and 7 apply these on top of the baseline above when the
+illustration carries a non-null entity label):
 
-- **Do not include** `solo` in the *positive* prompt. The Danbooru `solo`
-  tag means "only one entity in the image" and conflicts with the
-  companion's presence.
+- **Do not include** `solo` in the *positive* prompt. The Danbooru
+  `solo` tag means "only one entity in the image" and conflicts with
+  the entity's presence (animate or inanimate).
 - **Keep the multi-character negatives** (`multiple characters`, `crowd`,
   `two girls`, `two boys`, `2girls`, `2boys`, `group`) — they refer to
   humans.
-- **Add anti-duplicate negatives for the companion type.** If the
-  companion is a cat, add `2cats, multiple cats` to negatives; if a
-  dragon, `2dragons, multiple dragons`; etc. Pattern: one extra clause
-  forbidding duplication of the *specific* companion present, derived
-  from the companion description.
-- **Do not include anti-creature tags.** Phrases like `no animals`,
-  `no creatures`, `no pets` must not appear in the negative when a
-  companion is present.
-- **Do not use "focus" tags** (`animal focus`, `cat focus`, etc.).
-  These tags suppress the human and push the non-human into the
-  primary subject role, which inverts the composition we want.
+- **Add anti-duplicate negatives for the entity type.** Pattern: one
+  extra clause forbidding duplication of the *specific* entity
+  present, derived from the entity label. If the entity is a cat, add
+  `2cats, multiple cats`; if a dragon, `2dragons, multiple dragons`;
+  if a pocket watch, `multiple watches, two pocket watches`; etc.
+- **Do not include anti-creature / anti-object tags.** Phrases like
+  `no animals`, `no creatures`, `no pets`, `no objects` must not appear
+  in the negative when an entity is present.
+- **Do not use "focus" tags** (`animal focus`, `cat focus`,
+  `object focus`, etc.) when a human is also in the scene. These tags
+  suppress the human and push the entity into the primary subject role,
+  which inverts the intended composition. Entity-alone scenes
+  (`character_role=null`) are the only case where appropriate focus
+  tags may be used to keep the inanimate or non-human entity prominent.
 
 #### 7.3.7 Character configuration
 
@@ -3117,11 +3425,11 @@ Agent 0b's `style_guide` output covers global, illustration-wide concerns:
   (e.g., "All scenes share warm afternoon lighting and a storybook-like
   framing"). Agents 1, 3, and 7 reference this when constructing prompts.
 
-The style LoRA applies globally to every visible entity in the frame,
-including any companion. This is the desired behavior (consistent look)
-but worth stating so reviewers do not flag it as a gap. See § 7.3.10
-for the "style LoRA caveat" describing the known limitation when the
-style LoRA dominates non-human rendering.
+The style LoRA applies globally to every visible element in the frame,
+including any non-human entity. This is the desired behavior
+(consistent look) but worth stating so reviewers do not flag it as a
+gap. See § 7.3.10 for the "style LoRA caveat" describing the known
+limitation when the style LoRA dominates non-human rendering.
 
 #### 7.3.9 Story-design principles (Agent 0b)
 
@@ -3140,12 +3448,15 @@ that violate these rules).
    into the *inner emotional* world of a single character — not their
    imagination, but their feelings. Scenes are emotional snapshots, not
    action set-pieces. Quiet, charged moments are preferred over busy ones.
-2. **Single-human moments, with optional non-human companion.** Every
+2. **Single-human moments, with optional non-human entity.** Every
    illustration point is a beat where exactly one of the three permitted
    human roles is on the page, optionally accompanied by exactly one
-   non-human companion from the brief's pool. Other characters can be
-   present in the prose between illustrations, but the illustrated
-   moments isolate the single human (plus, optionally, the companion).
+   non-human entity (animate or inanimate) drawn from the run's
+   `narrative_entities` register. Other characters can be present in
+   the prose between illustrations, but the illustrated moments isolate
+   the single human (plus, optionally, the entity). Entity-alone beats
+   (no human, single non-human entity) and pure-environment beats are
+   also permitted but capped (§ 7.1 Call 0b rule #13).
 3. **Concrete depictability.** Every illustrated moment carries an
    explicit facial expression, gesture/posture, or action that can be
    rendered as a Danbooru tag (see § 7.3.4). Abstract or symbolic
@@ -3173,13 +3484,17 @@ that violate these rules).
    the constraints, Agent 0b silently reshapes it rather than asking
    again (the chat phase is over by the time Agent 0b runs). It must not
    produce a story that breaks the constraints to satisfy a wish.
-8. **Companions earn their presence.** A companion in a scene must add
-   emotional or compositional weight to that beat (the character pets
-   the cat for comfort; the dragon perches watchfully on the boy's
-   shoulder; the robot stands beside her as she decides). A companion
-   that is simply "in the room" for decoration is worse than no
-   companion — it dilutes the human's prominence without serving the
-   story. If a scene works without a companion, do not add one.
+8. **Entities earn their presence.** A non-human entity in a scene
+   must add emotional or compositional weight to that beat — whether
+   it is a creature (the character pets the cat for comfort; the
+   dragon perches watchfully on the boy's shoulder; the robot stands
+   beside her as she decides) or an inanimate object (the gold pocket
+   watch she holds at the moment of decision; the locket she opens by
+   lamplight). An entity that is simply "in the frame" for decoration
+   is worse than no entity — it dilutes the focal subject's prominence
+   without serving the story. If a scene works without an entity, do
+   not add one. Entity-alone scenes (no human) are reserved for beats
+   where the entity itself *is* the story moment.
 
 These eight principles apply unchanged to **Agent 4** when it rewrites a
 paragraph at concept-restart time (§ 7.1 Call 4). Agent 4 receives the
@@ -3189,50 +3504,73 @@ additional constraint it has — and that Agent 0b does not — is that the
 shape of the story (number of paragraphs, number of illustrations,
 their ordering) is fixed at run creation and must not be altered.
 
-#### 7.3.10 Companion prompting guidance
+#### 7.3.10 Entity prompting guidance
 
 Generic principles that Agents 1, 3, and 7 follow when the
-illustration's `companion` field is non-null. **These principles apply
-regardless of the kind of non-human entity** — there are no
-entity-specific code paths anywhere in the implementation. All non-human
-handling is driven by the free-text `description` and category
-reasoning inside the agent prompts.
+illustration's `contains_entity_label` field is non-null. **These
+principles apply regardless of the kind of non-human entity** — there
+are no entity-specific code paths anywhere in the implementation. The
+agent reasons about each entity from its `label` and `kind`
+(`non_human_character` for living non-human creatures, `object` for
+inanimate items) as supplied in the run's `narrative_entities`
+register.
 
-- **Numeric tagging.** Use Danbooru-style numeric tags for the companion
-  where applicable (`1cat`, `1dog`, `1dragon`, `1robot`). The human is
-  still tagged with its `1girl` / `1boy` form per role. Do not use
-  `solo` when a companion is present.
-- **Interaction tagging.** Translate the `interaction` field into
-  concrete Danbooru-style interaction tags. Examples of the *form*
-  expected (not prescribing specific entities): `holding X`,
-  `X on shoulder`, `X in lap`, `riding X`, `petting X`, `X beside her`,
-  `X behind him`, `X looking up at her`.
-- **Size and prominence.** If the companion should be a meaningful
-  visual element rather than peripheral background, include explicit
-  size or prominence tags (`large X`, `X fills frame`, `close-up on X
-  and her`, `full body shown`). Without these the model often renders
-  the companion small and in a corner. Conversely, if the companion is
-  supposed to be peripheral, no extra emphasis is needed.
-- **Non-human anatomy negatives.** Non-human anatomy is less reliably
-  rendered than human anatomy. The agent derives appropriate negatives
-  from the companion's body plan rather than from its specific
-  identity:
+- **Numeric tagging.** Use Danbooru-style numeric tags for the entity
+  where applicable. For `kind="non_human_character"` use the animal /
+  creature form (`1cat`, `1dog`, `1dragon`, `1robot`). For
+  `kind="object"` use a singular object tag mirroring the label
+  (`1watch`, `1locket`, `1book`, `1lantern`). The human is still tagged
+  with its `1girl` / `1boy` form per role. Do not use `solo` when an
+  entity is present, regardless of kind.
+- **Interaction / placement tagging.** Translate the human-entity
+  relationship implied by the concept into concrete Danbooru-style
+  tags. For animate entities, examples of the *form* expected (not
+  prescribing specific entities): `holding X`, `X on shoulder`,
+  `X in lap`, `riding X`, `petting X`, `X beside her`, `X behind him`,
+  `X looking up at her`. For inanimate entities the same shape applies
+  with object-appropriate verbs: `holding X`, `X on desk`, `X in hand`,
+  `X on table`, `gazing at X`. For entity-alone scenes (no human), the
+  tags describe the entity's state and placement directly (`X resting
+  on windowsill`, `X open on table, lamplight`).
+- **Size and prominence.** If the entity should be a meaningful visual
+  element rather than peripheral background, include explicit size or
+  prominence tags (`large X`, `X fills frame`, `close-up on X and her`,
+  `full body shown`). Without these the model often renders the entity
+  small and in a corner. Conversely, if the entity is supposed to be
+  peripheral, no extra emphasis is needed.
+- **Non-human anatomy negatives** (for `kind="non_human_character"`).
+  Non-human anatomy is less reliably rendered than human anatomy. The
+  agent derives appropriate negatives from the entity's body plan
+  rather than from its specific identity:
   - For four-legged creatures: `extra legs, missing legs, malformed paws`.
   - For winged creatures: `deformed wings, asymmetric wings, broken wings`.
   - For mechanical entities: `bad mechanical design, malformed limbs,
     asymmetric mechanical parts`.
   - For serpentine creatures: `extra heads, broken body, segmented incorrectly`.
+- **Object-specific negatives** (for `kind="object"`). Inanimate
+  entities do not have anatomy but do have shape, material, and
+  legibility concerns the agent derives from the label:
+  - For mechanical / detailed objects (watches, instruments, gears):
+    `malformed mechanism, wrong number of dials, illegible details`.
+  - For text-bearing objects (books, signs, letters): `unreadable text,
+    garbled text, fake writing` — the workflow cannot reliably render
+    legible text, so the prompt should typically obscure the writing
+    surface or avoid close-ups of it.
+  - For symmetric objects (lockets, jars, mirrors): `asymmetric
+    silhouette, lopsided shape, distorted symmetry`.
+  - For multi-part assemblies (lanterns, instruments): `missing parts,
+    extra parts, misaligned components`.
 
-  The Agent 1 / Agent 3 system prompts include this as guidance — the
-  agent decides which category applies based on the
-  `companion.description` text. This is generic reasoning, not a
-  hardcoded lookup table.
-- **Style LoRA caveat.** When companion rendering looks "off" (e.g.,
-  a cat with anime-girl-like eyes due to the style LoRA dominating),
-  the style LoRA may need to be slightly reduced for that illustration.
-  This is not auto-tuned by the agents in MVP — it is a known
-  limitation. A future iteration may add a per-illustration style
-  weight override; for MVP we accept the default.
+  Agents 1 / 3 / 7 decide which category applies based on the
+  `label` text. This is generic reasoning, not a hardcoded lookup
+  table.
+- **Style LoRA caveat.** When entity rendering looks "off" (e.g.,
+  a cat with anime-girl-like eyes due to the style LoRA dominating, or
+  an object that takes on cartoon character traits), the style LoRA
+  may need to be slightly reduced for that illustration. This is not
+  auto-tuned by the agents in MVP — it is a known limitation. A future
+  iteration may add a per-illustration style weight override; for MVP
+  we accept the default.
 
 ### 7.4 Agent prompt files
 
