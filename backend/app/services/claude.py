@@ -166,7 +166,11 @@ class ClaudeClient:
 
     # ── Agent 0b: build_story ────────────────────────────────────────────────
 
-    async def build_story_i18n(self, input_dict: dict) -> BuildStoryResponse:
+    async def build_story_i18n(
+        self,
+        input_dict: dict,
+        validator_feedback: str | None = None,
+    ) -> BuildStoryResponse:
         """
         Build story with i18n support.
 
@@ -179,12 +183,27 @@ class ClaudeClient:
                 - companions: list of Companion dicts
                 - topic: str (full topic description)
                 - notes: str (optional notes)
+            validator_feedback: Optional plain-English description of why the
+                previous Agent 0b attempt was rejected by server-side
+                validators (pool fidelity or distribution rules). When
+                non-empty, it is appended to the user message so the agent
+                can correct course on the retry.
         """
         characters_json = json.dumps(
             [c.model_dump() for c in input_dict["characters"]], ensure_ascii=False, indent=2
         )
         companions_json = json.dumps(
             [c.model_dump() for c in input_dict["companions"]], ensure_ascii=False, indent=2
+        )
+        feedback_block = (
+            (
+                "\n\nYour previous response was REJECTED by the server-side "
+                "validator. Please fix the issue and produce a fresh response "
+                "that conforms to all rules in your system prompt. Validator "
+                f"feedback:\n{validator_feedback}\n"
+            )
+            if validator_feedback
+            else ""
         )
         user_text = (
             f"source_language: {input_dict['source_language']}\n"
@@ -193,7 +212,8 @@ class ClaudeClient:
             f"main_character_role: {input_dict['main_character_role']}\n\n"
             f"companions:\n{companions_json}\n\n"
             f"topic: {input_dict['topic']}\n\n"
-            f"notes: {input_dict.get('notes') or '(none)'}\n\n"
+            f"notes: {input_dict.get('notes') or '(none)'}\n"
+            f"{feedback_block}\n"
             "Respond with the JSON object specified in your instructions."
         )
         result = await self._call_with_retry(

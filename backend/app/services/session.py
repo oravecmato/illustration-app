@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass
 
 from app.constants import (
+    BUILD_STORY_VALIDATOR_RETRY,
     CONFIRMED_ACK,
     SESSION_MAX_MESSAGES,
     SESSION_MESSAGE_MAX_CHARS,
@@ -222,30 +223,75 @@ class SessionService:
             "notes": brief.notes,
         }
 
-        try:
-            story: BuildStoryResponse = await self.claude.build_story_i18n(build_input)
-        except ClaudeError as e:
-            await self.repo.update_session(
-                s,
-                state=SessionState.FAILED,
-                error_code="STORY_BUILD_FAILED",
-                error_message=str(e),
-            )
-            raise SessionError("STORY_BUILD_FAILED", str(e)) from e
-
-        # Server-side pool fidelity: every companion attached to an
-        # illustration must reference an entry in the brief's companions
-        # pool. The brief's pool may be empty, in which case no
-        # illustration may have a companion.
+        # Agent 0b call with a server-side retry loop. Each retry passes
+        # plain-English validator feedback back to the agent so it can
+        # correct course. Total attempts = 1 + BUILD_STORY_VALIDATOR_RETRY.
+        # Network/parse failures (ClaudeError) are NOT retried here — the
+        # Anthropic call already retries internally for JSON parse issues.
         pool = [c.description for c in brief.companions]
-        for ill in story.illustrations:
-            if ill.companion is None:
-                continue
-            if not companion_in_pool(ill.companion.description, pool):
-                msg = (
-                    f"Agent 0b proposed companion '{ill.companion.description}' for "
-                    f"scene_index={ill.scene_index} that is not in the agreed pool {pool}."
+        story: BuildStoryResponse | None = None
+        last_validator_msg: str | None = None
+        max_attempts = 1 + BUILD_STORY_VALIDATOR_RETRY
+        for attempt in range(1, max_attempts + 1):
+            try:
+                story = await self.claude.build_story_i18n(
+                    build_input, validator_feedback=last_validator_msg
                 )
+            except ClaudeError as e:
+                await self.repo.update_session(
+                    s,
+                    state=SessionState.FAILED,
+                    error_code="STORY_BUILD_FAILED",
+                    error_message=str(e),
+                )
+                raise SessionError("STORY_BUILD_FAILED", str(e)) from e
+
+            # Server-side pool fidelity: every companion attached to an
+            # illustration must reference an entry in the brief's
+            # companions pool. The pool may be empty, in which case no
+            # illustration may have a companion.
+            pool_violation: str | None = None
+            for ill in story.illustrations:
+                if ill.companion is None:
+                    continue
+                if not companion_in_pool(ill.companion.description, pool):
+                    pool_violation = (
+                        f"Illustration scene_index={ill.scene_index} proposes "
+                        f"companion '{ill.companion.description}' which is not "
+                        f"in the agreed companions pool {pool}. Use only "
+                        f"companions from that pool, or omit companion."
+                    )
+                    break
+
+            distribution_violation: str | None = None
+            if pool_violation is None:
+                # Cross-illustration distribution rules (auto pipeline
+                # only): every cast role >= 1, main >= 2, no side > main,
+                # no-human cap of 1/5, primary/secondary NH-character
+                # placement. See ``validate_illustration_distribution``
+                # in schemas.claude for the full list.
+                try:
+                    validate_illustration_distribution(
+                        brief, story.illustrations, story.reserved_entities
+                    )
+                except ValueError as e:
+                    distribution_violation = str(e)
+
+            if pool_violation is None and distribution_violation is None:
+                break  # Valid output — proceed to persistence.
+
+            last_validator_msg = pool_violation or distribution_violation
+            logger.warning(
+                "Agent 0b attempt %d/%d rejected by server-side validator: %s",
+                attempt,
+                max_attempts,
+                last_validator_msg,
+            )
+            if attempt == max_attempts:
+                if pool_violation is not None:
+                    msg = f"Agent 0b output violates pool fidelity: {pool_violation}"
+                else:
+                    msg = f"Agent 0b output violates distribution rules: {distribution_violation}"
                 await self.repo.update_session(
                     s,
                     state=SessionState.FAILED,
@@ -254,23 +300,7 @@ class SessionService:
                 )
                 raise SessionError("STORY_BUILD_FAILED", msg)
 
-        # Cross-illustration statistical-distribution rules (auto pipeline
-        # only): every cast role >= 1, main >= 2, no side > main, no-human
-        # cap of 1/5, primary/secondary NH-character placement rules. See
-        # ``validate_illustration_distribution`` in schemas.claude for the
-        # full list. On violation we fail the run with STORY_BUILD_FAILED;
-        # the user can restart the chat with an updated brief.
-        try:
-            validate_illustration_distribution(brief, story.illustrations, story.reserved_entities)
-        except ValueError as e:
-            msg = f"Agent 0b output violates distribution rules: {e}"
-            await self.repo.update_session(
-                s,
-                state=SessionState.FAILED,
-                error_code="STORY_BUILD_FAILED",
-                error_message=msg,
-            )
-            raise SessionError("STORY_BUILD_FAILED", msg) from e
+        assert story is not None  # loop either breaks with valid story or raises
 
         # Persist run + illustrations.
         import json as _json

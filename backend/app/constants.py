@@ -6,6 +6,11 @@ COMFYUI_POLL_TIMEOUT_S = 600
 COMFYUI_POLL_INTERVAL_S = 3
 MAX_CONCURRENT_BRANCHES = 5
 CLAUDE_JSON_RETRY = 2
+# Number of additional Agent 0b (build_story) attempts after the first
+# fails server-side semantic validation (pool fidelity or distribution
+# rules). Each retry passes the validator's plain-English feedback back
+# to the agent so it can correct course. Total attempts = 1 + retry.
+BUILD_STORY_VALIDATOR_RETRY = 2
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # Supported UI and story languages (§ 9.6, § 10)
