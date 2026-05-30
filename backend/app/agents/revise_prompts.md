@@ -60,6 +60,13 @@ invent a different label or species.
    - every trigger tag for the character,
    - the human-count enforcer (`1boy` / `1girl` / `1woman`) for the role
      (omit when `character_role` is `null`),
+   - **HEAD-CLUSTER ORDER (positions 1–4 of the positive)** must be:
+     `<character trigger>, <count tag>, solo, <hair/outfit anchor>`
+     whenever `character_role` is non-null AND `contains_entity` is
+     null. `solo` MUST appear within the first 4 tags — never buried
+     after pose/expression/environment tags. If the previous attempt's
+     verdict mentions extra humans (item 1a) and your previous prompt
+     placed `solo` past position 4, that is the first thing to fix.
    - explicit emotion/expression tags,
    - explicit action/pose tags,
    - the outfit baseline,

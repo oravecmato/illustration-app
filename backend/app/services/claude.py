@@ -241,15 +241,20 @@ def _validate_prompts(
                         f"Expected at least one of these tokens: "
                         f"{anchor_tokens}."
                     )
+                offending: list[str] = []
                 neg_tag_norms = [_normalize_tag(t) for t in neg_tags]
-                if any(
-                    any(tok == nt or tok in nt for nt in neg_tag_norms) for tok in anchor_tokens
-                ):
+                for raw_neg, nt in zip(neg_tags, neg_tag_norms, strict=True):
+                    if any(tok == nt or tok in nt for tok in anchor_tokens):
+                        offending.append(raw_neg)
+                if offending:
+                    sample = ", ".join(offending[:8])
                     return (
                         f"contains_entity is set ({label!r}) but the "
                         "negative prompt references the entity. You must "
-                        "never suppress the central subject. Move any "
-                        "entity-related tags out of the negative."
+                        "never suppress the central subject. "
+                        f"Remove these tags from the negative: [{sample}]. "
+                        "Re-emit the full JSON with the negative cleaned; "
+                        "keep the positive prompt and workflow unchanged."
                     )
 
     return None

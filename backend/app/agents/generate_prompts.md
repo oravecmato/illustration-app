@@ -59,9 +59,14 @@ You will receive the following context in the user message:
 
 2. `positive` MUST include ALL of:
    a) Every trigger tag supplied for the character.
-   b) A human-count enforcer matching the role: `1boy` for `male`, `1girl`
-      for `female`, `1woman` for `mother` (choose exactly one). Omit when
-      `character_role` is `null`.
+   b) **HEAD CLUSTER (positions 1–4) is fixed and ordered**:
+      `<character trigger>, <count tag>, solo, <hair/outfit anchor>`.
+      The count tag is `1boy` for `male`, `1girl` for `female`,
+      `1woman` for `mother`. `solo` MUST be present whenever the
+      character_role is non-null AND contains_entity is null —
+      placed within the first 4 tags, NOT buried after pose/expression
+      tags. CLIP weights front-loaded tokens highest; pushing `solo`
+      to position 20+ lets the model invent extra humans.
    c) Specific emotion/expression tags (e.g. `crying`, `determined
       expression`, `wide eyes`).
    d) Specific action/pose tags (e.g. `outstretched arm`, `kneeling`, `head
@@ -69,12 +74,9 @@ You will receive the following context in the user message:
    e) The outfit baseline supplied for the character.
    f) Environment/location and atmosphere tags (e.g. `classroom, desks,
       window, afternoon light`).
-   g) When `contains_entity` is `null`: add `solo` as a strong positive
-      cue (only meaningful when there is a human; otherwise simply have
-      no creature/character tags) so the model does not introduce extra
-      figures.
-   h) When `contains_entity` is non-null: do NOT include `solo`. Instead
-      encode the entity per § Entity prompting below.
+   g) When `contains_entity` is non-null: do NOT include `solo` (and do
+      NOT include a `1girl/1boy/1woman` count tag if `character_role`
+      is null). Encode the entity per § Entity prompting below.
 
 3. `negative` MUST include the full negative baseline that will be supplied
    in the user message (append scene-specific negatives after it).
