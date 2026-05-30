@@ -156,6 +156,106 @@ def _normalize_tag(tag: str) -> str:
     return s
 
 
+_COUNT_MODIFIER_TOKENS: frozenset[str] = frozenset(
+    {
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "multiple",
+        "many",
+        "several",
+        "duplicate",
+        "extra",
+        "additional",
+        "another",
+        "group",
+        "pair",
+        "trio",
+        "lots",
+        "bunch",
+    }
+)
+
+_COMMON_COLOR_TOKENS: frozenset[str] = frozenset(
+    {
+        "black",
+        "white",
+        "grey",
+        "gray",
+        "brown",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink",
+        "dark",
+        "light",
+        "tan",
+        "ginger",
+        "calico",
+        "tabby",
+        "spotted",
+        "striped",
+        "solid",
+        "albino",
+        "blonde",
+        "silver",
+        "golden",
+    }
+)
+
+
+def _is_duplicate_or_variant_suppressor(neg_norm: str, entity_words: set[str]) -> bool:
+    """Return True when the negative tag is targeting a duplicate or a
+    contradictory colour variant of the entity rather than the entity
+    itself.
+
+    Allowed cases:
+
+    - The negative tag carries a count modifier (``2cats``,
+      ``multiple cats``, ``duplicate cat``) — it suppresses extra
+      copies, not the central subject.
+    - The negative tag carries a colour that is NOT part of the entity
+      description (``black cat`` when entity is ``grey cat with white
+      paws``) — it suppresses colour-drift, not the entity.
+    """
+    if not neg_norm:
+        return False
+    # Tokenise the negative tag and also split off any leading digits
+    # glued to a word (Danbooru ``2cats`` style).
+    raw_words = neg_norm.split()
+    words: list[str] = []
+    for w in raw_words:
+        # Split a leading digit run from the rest (``2cats`` -> ``2``, ``cats``).
+        i = 0
+        while i < len(w) and w[i].isdigit():
+            i += 1
+        if 0 < i < len(w):
+            words.append(w[:i])
+            words.append(w[i:])
+        else:
+            words.append(w)
+    if any(w in _COUNT_MODIFIER_TOKENS for w in words):
+        return True
+    neg_colors = {w for w in words if w in _COMMON_COLOR_TOKENS}
+    entity_colors = {w for w in entity_words if w in _COMMON_COLOR_TOKENS}
+    if neg_colors - entity_colors:
+        return True
+    return False
+
+
 def _validate_prompts(
     *,
     response: GeneratePromptsResponse | RevisePromptsResponse,
@@ -243,8 +343,16 @@ def _validate_prompts(
                     )
                 offending: list[str] = []
                 neg_tag_norms = [_normalize_tag(t) for t in neg_tags]
+                entity_words = set(entity_norm.split())
                 for raw_neg, nt in zip(neg_tags, neg_tag_norms, strict=True):
                     if any(tok == nt or tok in nt for tok in anchor_tokens):
+                        if _is_duplicate_or_variant_suppressor(nt, entity_words):
+                            # Quantity prefix (2cats, multiple cats, duplicate
+                            # cat) or contradictory-colour variant (black cat
+                            # when entity is grey) — these suppress
+                            # duplicates / colour-drift, not the entity
+                            # itself. Allowed.
+                            continue
                         offending.append(raw_neg)
                 if offending:
                     sample = ", ".join(offending[:8])
