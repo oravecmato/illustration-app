@@ -351,6 +351,16 @@ Each entry:
     - If the scene features a narrative entity, the concept must
       describe what the entity is doing (e.g. `"curled on her lap,
       asleep"`), not just name it.
+    - **Avoid prescriptive micro-pose / body-config language.** The
+      renderer is unreliable at exact body configurations like
+      "head bowed over the book", "one-hand chin-rest", "leaning
+      forward across the fountain rim", "blowing across the bowl's
+      surface", "bread loaf tucked under one arm". Stay at the
+      ACTION level — `"reading at her desk"`, `"resting at the
+      fountain"`, `"baking at the oven"`, `"holding her shopping"` —
+      and let pose tags handle body details. Prescriptive micro-poses
+      lock the evaluator into rejecting near-misses as contradictions
+      and routinely consume the entire concept-attempt budget.
 - `concept_localized`: the same concept translated to `source_language`.
 - `character_role`: one of `male`, `female`, `mother`, or `null` (no
   human in this illustration). Subject to the statistical rules above.
