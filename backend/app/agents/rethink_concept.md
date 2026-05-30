@@ -240,6 +240,24 @@ hard constraints; outputs that violate them will be retried or rejected.
    "She remembers her grandmother" is not depictable; "She holds an old
    photo to her chest, eyes closed" is.
 
+   **Stay at the ACTION level, not the body-configuration level.** The
+   renderer is unreliable at exact body geometry — "head bowed over
+   the book", "cross-legged on the carpet leaning against the sofa",
+   "one-hand chin-rest", "leaning forward across the fountain rim",
+   "blowing across the bowl's surface", "bread tucked under one arm".
+   Each such concept loops as a near-miss because the renderer drew
+   the broader action class (sitting on the sofa, holding the book,
+   standing by the fountain) instead. Prefer broad recognisable beats
+   the model can hit reliably: `"reading at the lamp"`,
+   `"yawning over breakfast"`, `"laughing while playing with the
+   cat"`, `"holding the shopping in both arms"`. Pose tags downstream
+   will fill in body details; do NOT prescribe them in the concept.
+   If you are rewriting a failed concept whose verdict cited a
+   pose/body mismatch (e.g. "sitting on the sofa instead of
+   cross-legged on the carpet leaning against the sofa"), the fix is
+   to broaden — `"laughing while playing with the cat in the living
+   room"` — NOT to specify the body geometry more tightly.
+
 4. **No regional prompting and no inpainting.** The renderer cannot mask
    regions or fix details after the fact. Avoid scenes that depend on
    small objects being legible (text on paper, faces in a photo, exact

@@ -256,6 +256,32 @@ If multiple hints would each qualify as `primary` you must pick at
 most ONE; promote the rest to `secondary` or `supporting` per the
 caps above.
 
+**Alone-shot rule (HARD).** If the user's brief, `topic`, or `notes`
+explicitly describes a non-human entity in an alone moment without
+any human present (e.g. "the cat sleeps alone on the windowsill",
+"the dog waits by the door", "the lantern glows on the empty
+table"), you MUST either:
+
+  (a) promote that entity to `primary` importance and reserve it
+      for the corresponding slot, with that slot's `character_role`
+      set to `null` and `contains_entity_label` set to the entity's
+      label — only `primary` non-human-characters (or `supporting`
+      objects) may occupy an alone-shot slot;
+
+  OR
+
+  (b) rewrite the paragraph prose for that slot so the moment is no
+      longer entity-alone (e.g. add a human into the scene, or
+      remove the entity-focus from the paragraph entirely).
+
+You MUST NOT leave a paragraph that obviously focuses on an entity
+(by name, species, or distinctive feature) attached to a slot whose
+`contains_entity_label` is null. The renderer will keep drawing the
+entity from the paragraph context, the evaluator will keep rejecting
+it as anti-creature contamination, and the auto pipeline will
+exhaust its budget on an unsolvable structural mismatch. Choose (a)
+or (b); the third option (orphaned entity paragraph) is forbidden.
+
 **Register invariants (the server validates these):**
 
 - Labels are unique (case- and whitespace-insensitive).
