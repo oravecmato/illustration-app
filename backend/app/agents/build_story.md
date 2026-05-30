@@ -326,9 +326,31 @@ Each entry:
   before it). Choose the sentence or phrase that most directly inspires the
   visual.
 - `concept`: one-sentence English description of what the picture shows —
-  must name a concrete expression, gesture, or action. If the scene
-  features a narrative entity, the concept must describe what the entity
-  is doing (e.g. `"curled on her lap, asleep"`), not just name it.
+  must name a concrete expression, gesture, or action. **The concept
+  describes only what is visibly in the frame.** Concretely:
+    - It mentions the ONE human matching `character_role` (by name or
+      role) — never the other cast members. Even if the surrounding
+      paragraph describes both mother and daughter together, the
+      concept text for a `character_role="mother"` slot mentions ONLY
+      the mother (the daughter is off-frame for this image). Phrases
+      like "while her daughter kneels beside her", "as her son watches",
+      "hand on Ela's shoulder" are FORBIDDEN — they push the renderer
+      to draw a second human the cast triplet rule disallows.
+    - It mentions a narrative entity ONLY when `contains_entity_label`
+      is non-null AND only that one entity. If `contains_entity_label`
+      is `null`, the concept MUST NOT mention any animal, creature,
+      pet, or story-prop — even if the surrounding paragraph talks
+      about that creature. Phrases like "discovers the injured fox cub",
+      "reaches for the broken sword", "spots the messenger bird"
+      are FORBIDDEN when the entity is not reserved to this slot.
+    - When the concept depicts a human reacting to something off-frame
+      (a sound, a memory, an offstage event), describe the human's
+      gesture/expression and use deictic framing ("toward the dark
+      treeline", "down at something hidden in the ferns", "off to the
+      side") instead of naming the off-frame referent.
+    - If the scene features a narrative entity, the concept must
+      describe what the entity is doing (e.g. `"curled on her lap,
+      asleep"`), not just name it.
 - `concept_localized`: the same concept translated to `source_language`.
 - `character_role`: one of `male`, `female`, `mother`, or `null` (no
   human in this illustration). Subject to the statistical rules above.

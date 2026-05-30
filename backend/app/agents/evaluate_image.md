@@ -120,26 +120,36 @@ that the concept is the actual blocker, not the prompt.
 ## `nuance_only_failure` flag
 
 In addition to `ok` / `problem` / `reasoning` / `suggestion`, every
-verdict carries a boolean `nuance_only_failure`. The rule:
+verdict carries a boolean `nuance_only_failure`. The flag is
+**orthogonal to `problem`** — it describes the *failure axis*, not
+the routing decision. The rule:
 
 - On `ok: true`, ALWAYS emit `nuance_only_failure: false`.
-- On `ok: false`, emit `nuance_only_failure: true` ONLY when ALL of
-  the following hold:
-  1. `problem == "prompt"`.
-  2. The single failure axis is checklist item #3 — a rendered
+- On `ok: false`, emit `nuance_only_failure: true` whenever BOTH:
+  1. The single failure axis is checklist item #3 — a rendered
      expression / gesture in the **same emotional neighbourhood**
      as the concept's beat but not actually it (e.g. "serene"
      drawn as "faint smile", "quietly amazed" drawn as "softly
-     smiling", "concerned" drawn as "pensive").
-  3. Every OTHER axis passes cleanly: cast count (1a), entity
+     smiling", "concerned" drawn as "pensive"). The expression
+     must be neighbourly, not contradictory (sad drawn as smiling
+     does NOT count — that is a contradiction, not a nuance miss).
+  2. Every OTHER axis passes cleanly: cast count (1a), entity
      alignment (1b), character likeness (2), style (4), anatomy
      (5), safety (6), composition (7), and environment feasibility
      (8). No anatomy issues, no anti-creature contamination, no
      wrong outfit, no extra figure, no environment miss.
-- On any other failure (problem ≠ "prompt"; or problem == "prompt"
-  but the expression is contradictory rather than neighbourly; or
-  any other axis is failing alongside the nuance), emit
-  `nuance_only_failure: false`.
+- `problem` may be `"prompt"` OR `"concept"` — both are valid
+  carriers for a nuance-only failure. In particular, the escalation
+  rule above will often flip `problem` from `"prompt"` to
+  `"concept"` after repeated near-misses on the SAME expression
+  axis — in that case you MUST still emit `nuance_only_failure:
+  true` because the underlying image quality is still a nuance
+  near-miss. Do not let the escalation routing silently kill the
+  salvage candidacy of a perfectly composed image that only missed
+  on item #3.
+- On any other failure (any axis besides item #3 failing, or item
+  #3 failing with a contradictory expression rather than a
+  neighbourly one), emit `nuance_only_failure: false`.
 
 The flag does NOT change routing. The verdict still rejects the
 image and Agent 3 still revises. The flag is a downstream signal

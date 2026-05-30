@@ -71,25 +71,51 @@ def _build_retry_message(previous_raw: str, error: Exception) -> str:
 
 
 def _strip_json_fences(text: str) -> str:
-    """Best-effort recovery for agents that wrap JSON in Markdown fences.
+    """Best-effort recovery for agents that wrap JSON in Markdown fences
+    or add prose explanations around the JSON body.
 
-    Strips a single leading ```json / ``` fence and trailing ``` fence
-    (with surrounding whitespace) so ``json.loads`` can consume the body.
-    The agent prompts all forbid this, but the model occasionally lapses
-    — falling back here avoids a 502 over a cosmetic wrapping.
+    Strategy:
+    1. Strip a leading ```json / ``` fence (with optional language tag).
+    2. Truncate at the first standalone ``` closing fence if present.
+    3. If the result does not start with ``{`` (model emitted a prose
+       preamble like "Looking at the image:..."), find the first ``{``
+       and slice from there.
+
+    The agent prompts all forbid these wrappings, but the model
+    occasionally lapses — recovering here avoids burning a Claude
+    retry on a cosmetic issue.
     """
     stripped = text.strip()
     if stripped.startswith("```"):
-        # Drop opening fence + optional language tag on first line.
         first_newline = stripped.find("\n")
         if first_newline != -1:
             stripped = stripped[first_newline + 1 :]
         else:
             stripped = stripped[3:]
-        if stripped.endswith("```"):
-            stripped = stripped[:-3]
+        # Truncate at the next closing fence anywhere in the body so any
+        # trailing prose after ``` is dropped.
+        close = stripped.find("```")
+        if close != -1:
+            stripped = stripped[:close]
         stripped = stripped.strip()
+    if stripped and stripped[0] != "{":
+        # Drop any prose preamble before the JSON object.
+        brace = stripped.find("{")
+        if brace != -1:
+            stripped = stripped[brace:]
     return stripped
+
+
+def _parse_json_lenient(text: str):
+    """Parse JSON, tolerating trailing prose after the closing brace.
+
+    ``json.loads`` raises ``JSONDecodeError("Extra data: ...")`` when the
+    input contains valid JSON followed by garbage. We use ``raw_decode``
+    so the first JSON value is returned and trailing content is ignored.
+    """
+    decoder = json.JSONDecoder()
+    obj, _idx = decoder.raw_decode(text)
+    return obj
 
 
 _TAG_WEIGHT_RE = re.compile(r"\(([^():]+?)(?::\s*-?\d+(?:\.\d+)?)?\)")
@@ -396,7 +422,7 @@ class ClaudeClient:
             raw_text = response.content[0].text
 
             try:
-                data = json.loads(_strip_json_fences(raw_text))
+                data = _parse_json_lenient(_strip_json_fences(raw_text))
                 parsed = response_model(**data)
             except (json.JSONDecodeError, ValidationError) as e:
                 last_error = e

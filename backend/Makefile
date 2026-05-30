@@ -91,11 +91,22 @@ serve-bg:
 
 stop-bg:
 	@if [ -f $(UVICORN_PID) ] && kill -0 $$(cat $(UVICORN_PID)) 2>/dev/null; then \
-		kill $$(cat $(UVICORN_PID)); \
-		echo "Sent TERM to PID $$(cat $(UVICORN_PID))"; \
+		pid=$$(cat $(UVICORN_PID)); \
+		kill -TERM $$pid 2>/dev/null || true; \
+		echo "Sent TERM to PID $$pid"; \
+		for i in 1 2 3 4 5; do \
+			kill -0 $$pid 2>/dev/null || break; \
+			sleep 1; \
+		done; \
+		if kill -0 $$pid 2>/dev/null; then \
+			echo "PID $$pid still alive after 5s — sending KILL"; \
+			kill -KILL $$pid 2>/dev/null || true; \
+			sleep 1; \
+		fi; \
 	fi
-	@-pkill -f "$(UVICORN) $(UVICORN_APP)" 2>/dev/null || true
+	@-pkill -TERM -f "$(UVICORN) $(UVICORN_APP)" 2>/dev/null || true
 	@sleep 1
+	@-pkill -KILL -f "$(UVICORN) $(UVICORN_APP)" 2>/dev/null || true
 	@rm -f $(UVICORN_PID)
 	@echo "uvicorn stopped."
 

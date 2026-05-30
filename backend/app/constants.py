@@ -167,8 +167,13 @@ NEGATIVE_PROMPT_BASELINE = (
     "multiple characters, crowd, two girls, two boys, 2girls, 2boys, group"
 )
 
-# Soft cap on number of comma-separated tags in the negative prompt. CLIP's
-# token window is ~75 and Illustrious models start cancelling out additions
-# beyond that. Hard validator on Agents 1 and 3 rejects responses that
-# exceed this (see `_validate_prompts` in services/claude.py).
-MAX_NEGATIVE_TAGS = 60
+# Hard cap on number of comma-separated tags in the negative prompt. CLIP's
+# token window is ~75; we cap at the CLIP boundary because realistic scenes
+# legitimately need NSFW + anatomy + cast-extras + anti-creature +
+# anti-env-confusion + anti-expression-drift simultaneously, which totals
+# ~50-70 tags. A tighter cap (e.g. 60) was observed in Run #1 to reject
+# valid Agent 1/3 outputs repeatedly and burn the Claude retry budget
+# without delivering a usable render. Hard validator on Agents 1 and 3
+# rejects responses that exceed this (see `_validate_prompts` in
+# services/claude.py).
+MAX_NEGATIVE_TAGS = 75
