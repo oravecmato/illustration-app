@@ -126,13 +126,23 @@ the routing decision. The rule:
 
 - On `ok: true`, ALWAYS emit `nuance_only_failure: false`.
 - On `ok: false`, emit `nuance_only_failure: true` whenever BOTH:
-  1. The single failure axis is checklist item #3 — a rendered
-     expression / gesture in the **same emotional neighbourhood**
-     as the concept's beat but not actually it (e.g. "serene"
-     drawn as "faint smile", "quietly amazed" drawn as "softly
-     smiling", "concerned" drawn as "pensive"). The expression
-     must be neighbourly, not contradictory (sad drawn as smiling
-     does NOT count — that is a contradiction, not a nuance miss).
+  1. The single failure axis is checklist item #3 — covering both
+     expression near-misses AND pose/gesture near-misses, as long
+     as the rendered beat is in the **same neighbourhood** as the
+     concept's beat (not a contradiction):
+     - Expression neighbourhood: "serene" drawn as "faint smile",
+       "quietly amazed" drawn as "softly smiling", "concerned"
+       drawn as "pensive".
+     - Pose/gesture neighbourhood: "one-hand chin-rest" drawn as
+       "two-hand face-rest", "leaning forward on fountain rim"
+       drawn as "standing close to the fountain", "kneeling and
+       reaching" drawn as "crouching and reaching". The
+       framing/action class is correct; the body's exact
+       configuration differs.
+     A contradiction (sad drawn as smiling, "kneeling" drawn as
+     "standing back-to-camera", "head submerged in fountain
+     water" instead of "leaning over fountain") does NOT count —
+     that is a different action, not a nuance miss.
   2. Every OTHER axis passes cleanly: cast count (1a), entity
      alignment (1b), character likeness (2), style (4), anatomy
      (5), safety (6), composition (7), and environment feasibility
