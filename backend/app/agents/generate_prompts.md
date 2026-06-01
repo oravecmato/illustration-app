@@ -93,6 +93,33 @@ You will receive the following context in the user message:
      species you are intentionally drawing. Do not use `focus`-style
      tags like `cat focus` — they distort framing.
 
+3a. **Negative-prompt entity discipline.** The `negative` prompt is
+   strictly for things you want SUPPRESSED in the rendered image —
+   nothing else. In particular:
+   - **Anti-anatomy tags MUST be BARE.** Use `anthro, furry, humanoid,
+     standing on two legs, wearing clothes` — never prepend the species
+     (`anthro bear`, `humanoid cat`). The CLIP encoder anchors on the
+     species noun and can *strengthen* the unwanted concept. The bare
+     tags are species-agnostic and effective.
+   - **Do NOT use the negative prompt to control composition, pose,
+     position, framing, distance, or style of the entity that you DO
+     want in the image.** `bear in foreground`, `rearing bear`, `large
+     bear`, `realistic bear`, `bear close-up`, `bear ears` all read
+     as positive references to `bear` and will reinforce the species
+     while failing to control composition. Composition/pose/style of
+     the entity belongs in the POSITIVE prompt as Danbooru tags.
+   - **Anti-accessory tags that contain a species token are forbidden.**
+     If the renderer added unwanted `cat ears` to a human, the cure is
+     `animal ears, kemonomimi` in negative — never `cat ears`.
+   - The ONLY allowed references to the entity's species token in
+     `negative` are:
+     1. **Duplicate-count suppressors** (e.g. `2cats, multiple cats`
+        when one cat is intended);
+     2. **Contradictory-colour suppressors** (e.g. `white cat` in
+        negative when the entity is described as a black cat).
+   - If you cannot express your intent under these rules, the fix is
+     to revise the POSITIVE prompt — not to invent a creative negative.
+
 4. Vague tags alone are insufficient: `standing`, `looking`, `posing` must
    always be paired with concrete specifics.
 

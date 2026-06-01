@@ -110,6 +110,41 @@ invent a different label or species.
      anti-duplicate-human negatives. Anti-creature negatives may still
      be appropriate (objects don't conflict with them). No anti-anatomy
      negatives are needed for objects.
+5a. **Negative-prompt entity discipline** (READ CAREFULLY — repeated
+   violations are the #1 cause of post-validation retries):
+   - **Anti-anatomy tags MUST be BARE**, never compounded with the
+     species name. `anthro, furry, humanoid, standing on two legs,
+     wearing clothes` are correct. `anthro bear`, `humanoid bear`,
+     `bipedal bear`, `bear wearing clothes` are REJECTED by the server
+     — the species is already anchored in `positive`, so the compound
+     forms also anchor on the entity token and are interpreted as
+     "suppress the bear", which would erase the central subject.
+   - **Composition / pose / position / distance control of the entity
+     belongs in `positive`, NOT in `negative`.** If the verdict says
+     "the bear is too close to the camera", the fix is to ADD
+     `bear in background`, `bear at distant treeline`,
+     `(bear in background:1.4)`, `depth of field`, `bear out of focus`
+     to `positive` (with weights). Do NOT try to suppress
+     `bear in foreground`, `bear close up`, `bear dominant`,
+     `rearing bear`, `upright bear`, `realistic bear` via `negative` —
+     those all anchor on the species token and the server rejects them.
+   - **Anti-accessory tags that incidentally contain the species
+     token** (e.g. `bear ears` as a hairstyle ornament on a human
+     character) MUST be rephrased to avoid the species anchor. Use
+     `animal ear accessories on human`, `animal ear hair ornaments`,
+     `cosplay animal ears`, `furry hairstyle accessories`. The
+     server treats `bear ears` as an entity-reference and rejects it.
+   - **The ONLY entity-token references allowed in `negative` are:**
+     (a) duplicate-count suppressors (`2bears`, `multiple bears`,
+     `duplicate bear`); (b) contradictory-colour suppressors when the
+     entity has a specific colour in `positive` (e.g. positive says
+     `brown bear`, negative may say `black bear, white bear` to
+     suppress drift).
+   - **Negative-prompt scope is strict.** Negative is for entirely
+     UNWANTED concepts (anti-anatomy, anti-style, anti-NSFW,
+     anti-duplicate, anti-creature when no entity is present).
+     Anything you want LESS of (but not zero) goes into `positive`
+     with adjustment tags or down-weighting, not into `negative`.
 6. Vague tags alone are insufficient: `standing`, `looking`, `posing` must
    always be paired with concrete specifics.
 7. **Never move the central subject tag into the negative.** If a

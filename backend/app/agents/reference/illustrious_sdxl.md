@@ -50,6 +50,36 @@ memo and this doc disagree on a specific scene, the memo wins.
   (`cat, feline, kitten`) is fine for coverage of related concepts,
   but listing the literal same tag twice is wasted budget.
 
+### Scope: what belongs in the negative
+
+The negative prompt is strictly for things that must be **absent** from
+the rendered image. Two common abuses cancel themselves out and bloat
+the negative budget:
+
+1. **Composition/pose/framing/style control of a subject that IS in
+   the image.** Tags like `bear in foreground`, `large bear`, `rearing
+   bear`, `bear close-up`, `realistic bear` read as positive
+   references to `bear` — they reinforce the noun while failing to
+   move the composition. Composition, pose, distance, framing, and
+   style of an in-frame subject belong in the POSITIVE prompt.
+2. **Anti-anatomy tags with the species prepended.** Use the bare
+   anti-anatomy vocabulary (`anthro, furry, humanoid, standing on two
+   legs, wearing clothes`). Never write `anthro bear` or `humanoid
+   cat` — the species token anchors and strengthens the unwanted
+   concept. The bare tags are species-agnostic and effective.
+
+The only legitimate references to an in-frame entity's species token
+inside the negative prompt are:
+
+- **Duplicate-count suppressors** (`2cats, multiple cats` when one cat
+  is intended); and
+- **Contradictory-colour or contradictory-attribute suppressors**
+  (`white cat` in negative when the intended cat is black; `short
+  tail` in negative when the intended fox has a long bushy tail).
+
+If you cannot express your intent under these rules, revise the
+positive prompt — do not invent a creative negative.
+
 ## Count tags and the `1other` rule
 
 - The `1girl` / `1boy` / `1other` / `2girls` / `6+girls` family are

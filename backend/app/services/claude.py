@@ -360,7 +360,31 @@ def _validate_prompts(
                         f"contains_entity is set ({label!r}) but the "
                         "negative prompt references the entity. You must "
                         "never suppress the central subject. "
-                        f"Remove these tags from the negative: [{sample}]. "
+                        f"Remove these tags from the negative: [{sample}].\n"
+                        "Rules for negative-prompt entity discipline:\n"
+                        "  - Anti-anatomy tags MUST be BARE — `anthro, "
+                        "furry, humanoid, standing on two legs, wearing "
+                        f"clothes` — NEVER prefixed with the species ("
+                        f"`anthro {anchor_tokens[0]}` is rejected; the "
+                        "species is already anchored in the positive "
+                        "prompt, the compound is unnecessary).\n"
+                        "  - Composition/pose/style control of the entity "
+                        "belongs in the POSITIVE prompt, not the negative. "
+                        f"`{anchor_tokens[0]} in background`, "
+                        f"`{anchor_tokens[0]} distant`, "
+                        f"`quadruped {anchor_tokens[0]}` go in POSITIVE "
+                        "(optionally weighted). Do NOT try to suppress "
+                        f"`{anchor_tokens[0]} in foreground`, "
+                        f"`rearing {anchor_tokens[0]}`, "
+                        f"`realistic {anchor_tokens[0]}` via negative — "
+                        "those still anchor on the entity token.\n"
+                        "  - The only entity references allowed in "
+                        "negative are duplicate-count suppressors "
+                        f"(`2{anchor_tokens[0]}s`, "
+                        f"`multiple {anchor_tokens[0]}s`, "
+                        f"`duplicate {anchor_tokens[0]}`) and contradictory "
+                        "colour suppressors when the entity has a specific "
+                        "colour in positive.\n"
                         "Re-emit the full JSON with the negative cleaned; "
                         "keep the positive prompt and workflow unchanged."
                     )
@@ -810,14 +834,33 @@ class ClaudeClient:
             )
         if recent_failure_summaries:
             joined = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(recent_failure_summaries))
+            # Directive escalation hint ONLY when 2+ prior failures exist
+            # in the same concept. With a single prior failure we just show
+            # the list as context and let the system-prompt's "apply
+            # sparingly with only one entry" rule decide. Sending the
+            # directive after a single prior failure was empirically
+            # causing premature problem="concept" escalation (concepts
+            # exhausted after 2 prompt_attempts instead of 3).
+            if len(recent_failure_summaries) >= 2:
+                hint = (
+                    "If the current image fails for the same reason as any "
+                    "of the above and would call for the same prompt-level "
+                    'fix, consider emitting problem="concept" instead of '
+                    'problem="prompt" — repeated identical prompt revisions '
+                    "have not been working.\n"
+                )
+            else:
+                hint = (
+                    "Per your system-prompt escalation rule, apply concept "
+                    "escalation sparingly when only ONE prior failure is "
+                    "shown — prefer another prompt-level fix unless the "
+                    "current image is clearly repeating the exact same root "
+                    "cause.\n"
+                )
             recent_block = (
                 "\nrecent_failures (newest first, all within the current concept):\n"
                 f"{joined}\n"
-                "If the current image fails for the same reason as any of "
-                "the above and would call for the same prompt-level fix, "
-                'consider emitting problem="concept" instead of '
-                'problem="prompt" — repeated identical prompt revisions '
-                "have not been working.\n"
+                f"{hint}"
             )
         else:
             recent_block = ""
