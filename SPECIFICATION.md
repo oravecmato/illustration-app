@@ -2234,6 +2234,17 @@ Hard rules enforced by the prompt and re-checked server-side:
    contradictions (gaze direction reversal, fused fingers, missing
    props) that the salvage agent then cannot rescue because the
    verdict is a contradiction, not a nuance miss.
+6c. **Alone-shot rule for explicitly described entity moments (Phase 1 fix B15).**
+   When the user's brief explicitly describes an entity in an alone
+   moment (e.g. "a black kitten on the windowsill, looking out"),
+   Agent 0b MUST either promote that entity to `importance="primary"`
+   and place it in an alone-shot slot with the matching
+   `contains_entity_label` (and `character_role=null`), OR rewrite
+   the paragraph so the entity is no longer alone. The forbidden
+   pattern is an orphaned entity paragraph attached to an empty
+   slot (no human + no `contains_entity_label`). Run #9 scene 2
+   exhausted budget on exactly this mismatch — a cat-on-windowsill
+   paragraph paired with a `contains_entity_label=null` illustration.
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
    technical constraints (single human character optionally accompanied
@@ -2633,6 +2644,16 @@ Hard rules enforced by the prompt and re-checked server-side:
    / `verdict_suggestion`. If the verdict said "two hands too close to
    the mug caused fused fingers", the new concept must not put a hand
    near a mug; ideally it changes the action entirely.
+2a. **Broaden, don't tighten, on pose mismatches (Phase 1 fix B16).**
+   When the verdict cites a pose / body-geometry mismatch, Agent 4
+   MUST broaden the action ("reading at her desk", "resting at the
+   fountain") rather than reasserting a more precise body
+   configuration ("cross-legged on carpet leaning against sofa"). The
+   renderer is unreliable at exact body configurations, and a tighter
+   rewrite consistently loops the inner attempt budget on the same
+   miss (observed on Run #9 scene 3). Body details are the job of
+   pose tags emitted by Agent 1 / 3 — Agent 4 stays at action-level
+   diction.
 3. **Excerpt validity.** `scene_excerpt` MUST be a verbatim substring
    of the returned `paragraph_text` (whitespace-tolerant). The server
    re-checks this and re-prompts on failure (same validator path used
