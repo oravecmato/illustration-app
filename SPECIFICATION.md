@@ -2471,6 +2471,45 @@ on Call 1 and Call 3 output by `services/claude.py` (§ 7.1 hard
 validators) and re-prompted up to `CLAUDE_JSON_RETRY` times when the
 head cluster is wrong.
 
+**Negative-prompt entity discipline (Phase 1 fix B6 / B17 + Fáza B,
+shared with Call 3).** The `negative` prompt is constrained as
+follows; violations are hard-checked server-side and re-prompted up
+to `CLAUDE_JSON_RETRY` times. The validator's error enumerates the
+specific offending tags so the retry agent can target them.
+
+- *Bare anti-anatomy tags only.* Anti-anatomy entries MUST be bare
+  vocabulary (`anthro`, `furry`, `humanoid`, `kemonomimi`) and MUST
+  NOT prepend the entity species. Writing `anthro bear` actually
+  *strengthens* `bear` in the renderer's attention and was observed
+  to cause species-substitution drift.
+- *No composition / pose / framing / distance / style of the in-frame
+  subject in negative.* Those belong in `positive`. The `negative`
+  prompt is reserved for anti-anatomy, NSFW gating (§ 7.3.6
+  baseline), and the two narrow entity-token exceptions below.
+- *Anti-accessory generalisation.* Use neutral category words
+  (`animal ears`, `kemonomimi`) instead of species-specific accessory
+  tokens (`cat ears`) so the negative doesn't reinforce a wrong
+  species.
+- *Allowed entity-token negatives.* Two and only two patterns may
+  reference the entity label or its anchor token in `negative`:
+  1. **Duplicate / count suppressors** — `2cats`, `multiple cats`,
+     `two cats`, `three cats`, `duplicate cat`, `extra cat`,
+     etc., are explicitly allowed (B17). They suppress phantom
+     extras, not the central subject. The validator whitelists any
+     entry that carries a digit (0–9), a glued count form (`2cats`),
+     or a count modifier (`two`, `three`, `multiple`, `duplicate`,
+     `extra`, etc.) before the entity token.
+  2. **Contradictory-attribute suppressors** — when the entity
+     description fixes a colour (e.g. a grey cat), tags like
+     `black cat`, `dark cat`, `purple cat` are allowed because they
+     suppress *contradictory* colour drift. Tags that suppress the
+     entity's *own* colour are forbidden.
+
+The full reasoning, vocabulary, and worked examples live in
+`backend/app/agents/reference/illustrious_sdxl.md`, which is loaded
+into the Agents 1 / 3 / 4 / 4b system prompt with cache_control
+(§ 7.1 reference doc).
+
 **Output schema:**
 ```json
 {
@@ -2511,12 +2550,39 @@ from `character_role`.
 
 **Input:** image (base64), `current_concept` (English), `style_guide`,
 `character_role` (`male` / `female` / `mother` / `null`), the slot's
-locked `environment` (`{ label, kind, aspect }`), and the
-illustration's `contains_entity` (`NarrativeEntity | null`). The
-agent's checklist is entity-aware **and cast-aware** (§ 7.3.5 items
-1a + 1b + 1c) and additionally checks that the rendered scene matches
-the locked environment (lighting, structure, expected indoor/outdoor
-aspect).
+locked `environment` (`{ label, kind, aspect }`), the
+illustration's `contains_entity` (`NarrativeEntity | null`), and an
+optional `recent_failure_summaries: list[str] | null` carrying
+newest-first one-line summaries of the previous rejected verdicts
+for the *same concept* (capped at the last 3 attempts, reset on
+every concept rethink). The agent's checklist is entity-aware **and
+cast-aware** (§ 7.3.5 items 1a + 1b + 1c) and additionally checks
+that the rendered scene matches the locked environment (lighting,
+structure, expected indoor/outdoor aspect), and includes an
+*unwanted-element audit* of `positive_prompt` (§ 7.3.5 — catches
+homonym misfires such as the `muzzle` snout/restraint ambiguity by
+checking whether any positive tag plausibly induced an element
+flagged in the rendered image).
+
+**Concept-escalation rule (Phase 1 fix B + Fáza A gating).** Agent 2
+is instructed to escalate `problem` from `"prompt"` to `"concept"`
+when the *same failure mode* repeats across attempts of the current
+concept — i.e. when this verdict's failure description matches the
+substance of one or more entries in `recent_failure_summaries`. This
+keeps the inner loop from burning all 3 prompt attempts on a tag
+revision that the renderer will never honour. The system prompt
+defines this as a "sparingly applied" rule.
+
+**User-message reinforcement (Fáza A).** The orchestrator only
+appends the explicit escalation directive to the user message when
+`len(recent_failure_summaries) >= 2`. With 0 or 1 prior failures
+the user message instead carries a softer "apply sparingly"
+reinforcement. Earlier (pre-Fáza-A) behavior always appended the
+hard directive, which combined with the system prompt's
+"sparingly" rule caused premature concept rethinks — concepts
+were exhausted in 2 prompt attempts instead of the spec-intended
+3. Gating on `>= 2` restores the 3-attempt inner budget while
+still escalating decisively on persistent failure.
 
 **Output schema:**
 ```json
