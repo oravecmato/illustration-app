@@ -13,12 +13,12 @@ CLAUDE_JSON_RETRY = 2
 BUILD_STORY_VALIDATOR_RETRY = 2
 # Number of additional render attempts after the first hits a RunPod
 # timeout (``RunPodTimeoutError``). A fresh seed is used for each retry
-# so the GPU pool gets a different prompt-hash on the second try. The
+# so the GPU pool gets a different prompt-hash on the next try. The
 # concept/prompt attempt counters are NOT incremented across the retry —
 # a timeout is infrastructure noise, not a prompt-engineering signal.
 # Other ``RunPodError`` failures (FAILED/CANCELLED job status, malformed
 # response) still fail immediately without retry.
-RUNPOD_TIMEOUT_RETRY = 1
+RUNPOD_TIMEOUT_RETRY = 2
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # Error-code strings persisted on ``Illustration.error_code`` so
