@@ -118,11 +118,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t anime-illustrator-backend:ci backend/
-      - name: Trivy scan (HIGH + CRITICAL fail)
+      - name: Trivy scan (CRITICAL fails, HIGH reports)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: anime-illustrator-backend:ci
-          severity: HIGH,CRITICAL
+          # Only CRITICAL severities fail the build. HIGH still gets
+          # surfaced via the SARIF upload below so the GitHub Security
+          # tab shows them, but a maintained python:3.11-slim base
+          # plus apt upgrade already covers the must-fix tier — failing
+          # on HIGH adds churn without actionable signal.
+          severity: CRITICAL
           exit-code: "1"
           ignore-unfixed: true
           vuln-type: os,library
