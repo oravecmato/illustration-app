@@ -865,10 +865,10 @@ Each state transition writes to DB and emits one SSE event. The new
 SSE events `illustration_entity_updated` and
 `illustration_environment_updated` are documented in § 8.4.
 
-### Render-call sub-loop: seed selection and seed-lock
+### Render-call sub-loop: timeout retry and seed-lock
 
 The single line `image = runpod.run_workflow(workflow_with_prompts)`
-in the pseudocode above is actually a small loop owned by the
+in the pseudocode above is actually a small retry loop owned by the
 orchestrator, identical between the auto pipeline and § 6A manual
 dispatch:
 
@@ -2473,6 +2473,16 @@ non-null the agent must incorporate it per § 7.3.10 (entity prompting
 guidance) and apply the conditional adjustments to the negative
 baseline described in § 7.3.6.
 
+The user message also carries the **combined negative baseline**
+for this scene — the global `NEGATIVE_PROMPT_BASELINE` (§ 10) plus,
+when `character_role` is non-null and the matching `character_config`
+entry has a `negative_baseline` field set, that per-character string
+appended (§ 7.3.6 "Per-character negative baseline"; § 7.3.7). Agent 1
+MUST include every tag from the combined baseline verbatim in
+`negative`. Hard-validated server-side; missing-required-tag failures
+are re-prompted up to `CLAUDE_JSON_RETRY` times with the omitted tags
+enumerated.
+
 `prompting_notes` semantics:
 
 - In the **auto pipeline**, the orchestrator passes the current
@@ -2712,7 +2722,11 @@ optional `prompting_notes: string | null` (the current
 `illustrations.prompting_notes` value, see § 6 prompting-notes
 lifecycle). When `contains_entity` is non-null the same entity
 guidance applies as in Call 1 (§ 7.3.10 + the § 7.3.6 conditional
-negative adjustments).
+negative adjustments). The combined negative baseline (global +
+optional per-character `negative_baseline`) is passed in the user
+message exactly as for Call 1 (§ 7.3.6); Agent 3 MUST keep every
+tag from it in `negative` — removal is only allowed for non-baseline
+scene-specific entries.
 
 **Output schema (autoregressive field order is binding):**
 
@@ -3479,9 +3493,12 @@ Hard rules enforced by the prompt:
    prompt makes clear that Agent 7 is not a side channel to bypass
    the constraints Agent 6 enforces upstream.
 2. **Stay within the § 7.3.6 negative-prompt baseline.** All
-   safety/anatomy/quality/multi-character negatives from the
-   baseline must remain in `negative`. Agent 7 may add scene- or
-   feedback-specific negatives on top of them.
+   safety/anatomy/quality/multi-character negatives from the global
+   baseline AND every tag from the per-character `negative_baseline`
+   (if any; § 7.3.6 "Per-character negative baseline", passed in the
+   user message exactly as for Agent 1 / Agent 3) must remain in
+   `negative`. Agent 7 may add scene- or feedback-specific negatives
+   on top of them.
 3. **Honor the agreed concept first.** When user feedback conflicts
    with the agreed concept (e.g. the user contradicts an element of
    the concept that was previously confirmed), Agent 7 prefers the
@@ -3670,27 +3687,10 @@ rules from "guidance" to "contract".
   reject an excerpt that's otherwise correct. On failure the error
   message includes both the excerpt and the relevant paragraph slice
   so the retry agent can target the mismatch.
-- **Negative-prompt bloat cap.** `negative` prompt comma-separated
-  tag count must be ≤ `MAX_NEGATIVE_TAGS` (= 75; § 10). Tighter caps
-  were observed to reject valid Agent 1 / 3 output repeatedly
-  because realistic scenes legitimately need ~50–70 tags
-  simultaneously to cover NSFW + anatomy + cast-extras +
-  anti-creature + anti-env-confusion + anti-expression-drift. CLIP's
-  token window is ~75, so capping at the CLIP boundary is the
-  natural ceiling.
-- **Workflow ↔ character_role coherence.** `workflow == "single-lora"`
-  requires `character_role != null`; `workflow == "no-lora"` requires
-  `character_role == null`. Any other combination is rejected (§ 7.1
-  Call 1 / Call 3).
-- **Head-cluster discipline for `solo` (Phase 1 fix B8).** When
-  `character_role` is non-null AND `contains_entity` is null,
-  positions 1–4 of `positive` MUST be
-  `<character trigger>, <count tag>, solo, <hair/outfit anchor>`.
-  Re-prompted with a targeted error pointing at the offending head.
 - **Entity-in-negative validator (Phase 1 fixes B6 + B17).** Rejects
-  Call 1 / Call 3 responses whose `negative` prompt contains a tag
-  with an anchor token derived from `contains_entity.label`, with
-  two narrow whitelists:
+  Call 1 / Call 3 / Call 7 responses whose `negative` prompt
+  contains a tag with an anchor token derived from
+  `contains_entity.label`, with two narrow whitelists:
   - *Duplicate / count suppressors* — entries carrying a digit, a
     glued count form (`2cats`), or a count modifier (`two`,
     `three`, `multiple`, `duplicate`, `extra`) are allowed.
@@ -3702,6 +3702,31 @@ rules from "guidance" to "contract".
   The error message enumerates the specific offending tags AND the
   rule each one breaks, so the retry agent can self-correct in one
   pass rather than guessing.
+- **Negative-prompt bloat cap.** `negative` prompt comma-separated
+  tag count must be ≤ `MAX_NEGATIVE_TAGS` (= 75; § 10). Tighter caps
+  were observed to reject valid Agent 1 / 3 output repeatedly
+  because realistic scenes legitimately need ~50–70 tags
+  simultaneously to cover NSFW + anatomy + cast-extras +
+  anti-creature + anti-env-confusion + anti-expression-drift. CLIP's
+  token window is ~75, so capping at the CLIP boundary is the
+  natural ceiling.
+- **Head-cluster discipline for `solo` (Phase 1 fix B8).** When
+  `character_role` is non-null AND `contains_entity` is null,
+  positions 1–4 of `positive` MUST be
+  `<character trigger>, <count tag>, solo, <hair/outfit anchor>`.
+  Re-prompted with a targeted error pointing at the offending head.
+- **Workflow ↔ character_role coherence.** `workflow == "single-lora"`
+  requires `character_role != null`; `workflow == "no-lora"` requires
+  `character_role == null`. Any other combination is rejected (§ 7.1
+  Call 1 / Call 3).
+- **Required-negative-baseline coverage.** `negative` MUST contain
+  every tag from the combined negative baseline passed in the user
+  message — the global `NEGATIVE_PROMPT_BASELINE` (§ 10) plus the
+  per-character `negative_baseline` (§ 7.3.6 / § 7.3.7) when the
+  scene's role has one. Comparison is whitespace- and case-tolerant
+  per tag. On failure the error message enumerates the omitted tags
+  so the retry agent can re-add them in one pass. Applies to Call 1,
+  Call 3, and Call 7 output.
 
 #### 7.1.Y Illustrious / Danbooru reference doc (cached system-prompt fragment)
 
@@ -3930,6 +3955,31 @@ optionally one `mother`, with `mother` only allowed when at least one of
 `male` / `female` is also present. Agent 0a enforces this during
 gathering (§ 7.1, Call 0a).
 
+**Ear-jacks suppression for `female` (Kyoka Jiro).** Kyoka's LoRA
+bakes her canonical ear-jack feature (Danbooru `ear jacks` — small
+audio-jack plugs hanging from her earlobes) into the model weights,
+but the project's editorial choice is that Kyoka MUST NOT be
+rendered with ear jacks under any circumstances. Two complementary
+mechanisms enforce this:
+
+1. The `female` entry's `trigger_tags` MUST NOT contain `ear jacks`
+   or any of its synonyms. Naming the feature in the positive
+   prompt re-anchors it on top of what the LoRA already encodes.
+2. The `female` entry carries a per-character `negative_baseline`
+   field (§ 7.3.6, § 7.3.7) listing `ear jacks` together with the
+   nearby Danbooru synonyms and visual confusables (e.g.
+   `earphone jack`, `headphone jack`, `jack plug`, `mechanical
+   ears`). The orchestrator injects this string into the user
+   message for Agents 1, 3, and 7 alongside the global
+   `NEGATIVE_PROMPT_BASELINE`, and the agents MUST include every
+   tag from it verbatim in `negative`. The hard validator on
+   Agents 1 / 3 / 7 rejects any output whose `negative` omits a
+   required per-character baseline tag.
+
+The suppression is character-scoped — it applies only to scenes
+whose `character_role == "female"`. Other roles (and entity-alone
+or no-character scenes) receive only the global baseline.
+
 The mapping lives in `backend/app/constants.py` as a dictionary so that
 non-prompt code can also reference it. Trigger words and baseline visual
 descriptors for each character are loaded from configuration (see
@@ -4109,6 +4159,32 @@ baseline includes at minimum:
 The exact baseline string lives in `backend/app/constants.py` so it is
 reusable and consistent across agents 1 and 3.
 
+**Per-character negative baseline (June 2026).** In addition to the
+global baseline above, individual `character_config.json` entries
+MAY carry an optional `negative_baseline: string` field (§ 7.3.7).
+Its purpose is to suppress LoRA-baked visual features that the
+project deliberately does NOT want rendered for that specific
+character — features that the LoRA learned during training and
+will otherwise emit by default, regardless of whether they are
+named in the positive prompt.
+
+When the scene's `character_role` resolves to an entry with a
+`negative_baseline`, the orchestrator appends that string to the
+global baseline before constructing the user message for Agents 1,
+3, and 7. The agents MUST include every tag from the resulting
+combined baseline in their `negative` output (verbatim — same bare
+Danbooru tag rule as the global baseline; § 7.3.6 above). The hard
+validator (§ 7.1 hard validators) enumerates any missing required
+tags so the retry agent can correct in one pass.
+
+Entries WITHOUT a `negative_baseline` field receive only the
+global baseline — the field is opt-in per character. Entity-alone
+and no-character scenes (where `character_role` is `null`) never
+receive a per-character baseline since no character is in frame.
+
+The canonical example is the `female` entry: see § 7.3.2 for the
+ear-jacks suppression rationale.
+
 **Hard rule — bare Danbooru tags only; never natural-language
 negations.** Both `positive` and `negative` must contain comma-
 separated bare tags. Natural-language negation phrases like
@@ -4167,8 +4243,9 @@ with the following shape:
   "female": {
     "display_name": "Kyoka Jiro",
     "lora_filename": "...",
-    "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair, ear jacks",
-    "outfit_baseline": "..."
+    "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair",
+    "outfit_baseline": "...",
+    "negative_baseline": "ear jacks, earphone jack, headphone jack, jack plug, mechanical ears"
   },
   "mother": {
     "display_name": "Inko Midoriya",
@@ -4183,6 +4260,16 @@ The exact trigger tags and outfit baselines are filled in by the operator
 when the LoRAs are downloaded (the values shown above are illustrative).
 The implementation must read this file at startup and refuse to run if it
 is malformed or any required role is missing.
+
+The `negative_baseline` field is **optional** — it is present only
+on entries whose LoRA bakes in a visual feature the project
+deliberately wants to suppress (§ 7.3.6 "Per-character negative
+baseline"). When absent, the scene receives only the global
+`NEGATIVE_PROMPT_BASELINE` (§ 10). When present, the orchestrator
+appends it to the global baseline before passing the combined
+string to Agents 1, 3, and 7 in the user message — they MUST
+include every tag from the combined baseline in their `negative`
+output.
 
 The `CHARACTER_LORA` placeholder in the ComfyUI workflow is filled from
 `character_config[role].lora_filename` at render time, based on the role
@@ -6447,6 +6534,7 @@ Defined in `backend/app/constants.py`:
 | `BUILD_STORY_VALIDATOR_RETRY`     | 2     | Additional Agent 0b (`build_story`) attempts after the first fails server-side *semantic* validation (pool-fidelity, distribution rules, alone-shot rule, etc.). Each retry replays the failed turn with the validator's plain-English feedback appended to the user message so Agent 0b can correct course. Total attempts = `1 + BUILD_STORY_VALIDATOR_RETRY`. Independent of `CLAUDE_JSON_RETRY`, which handles parse-level failures. |
 | `RUNPOD_TIMEOUT_RETRY`            | 2     | Additional render attempts after a `RunPodTimeoutError`. Each retry uses a *fresh* `SEED` so the next attempt does not queue behind the same prompt-hash on the same slow worker. Counters (`concept_attempt`, `prompt_attempt`) are NOT bumped across timeout retries (§ 6 render sub-loop, § 7.2.4). Other `RunPodError` failures (FAILED / CANCELLED / malformed response) still fail immediately without retry. |
 | `MAX_NEGATIVE_TAGS`               | 75    | Hard cap on comma-separated tag count in Agent 1 / 3 / 7 `negative` prompts. Capped at the CLIP token-window boundary (~75); tighter caps (e.g. 60) were observed to reject valid Agent outputs repeatedly because realistic scenes legitimately need ~50–70 tags (NSFW + anatomy + cast-extras + anti-creature + anti-env-confusion + anti-expression-drift). Enforced by `_validate_prompts` in `services/claude.py` (§ 7.1 hard validators). |
+| `NEGATIVE_PROMPT_BASELINE`        | (string) | The global safety / anatomy / quality / multi-character baseline string included verbatim in every Agent 1 / 3 / 7 `negative` output (§ 7.3.6). At runtime, the orchestrator appends the per-character `negative_baseline` from `character_config[role]` (when present) before sending the combined string to the agent in the user message. Hard validator enforces required-tag coverage on output. |
 | `ERROR_CODE_RENDER_TIMEOUT`       | `"RENDER_TIMEOUT"` | String persisted on `illustrations.error_code` when the render sub-loop exhausts every timeout retry (§ 7.2.4, § 8.6). |
 | `ERROR_CODE_RENDER_FAILED`        | `"RENDER_FAILED"`  | String persisted on `illustrations.error_code` when RunPod returns a non-timeout error (§ 7.2.4, § 8.6). |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
@@ -6898,6 +6986,90 @@ to chase 100 % line coverage.
     somehow implied a different cast shape, the dispatch reuses
     `illustrations.current_workflow` (it never re-reads any
     workflow hint from Agent 7's output).
+
+**Phase 1 hard-validator and retry coverage (§ 7.1 hard validators,
+§ 7.2.4, § 6 render sub-loop):**
+
+- **`test_claude.py` (entity-in-negative validator).** Construct
+  Call 1 / Call 3 / Call 7 responses whose `negative` prompt
+  contains: (a) a bare entity-anchor tag (must be rejected with an
+  enumerated error message naming the offending tag); (b) a
+  whitelisted duplicate-count suppressor like `2cats` or
+  `multiple cats` (must pass when entity is a cat); (c) a
+  whitelisted contradictory-colour suppressor like `black cat` when
+  the entity is described as grey (must pass); (d) a forbidden
+  same-colour suppressor like `grey cat` when entity is grey (must
+  be rejected). Assert the re-prompt user message enumerates the
+  offending tags and the rules.
+- **`test_claude.py` (negative-prompt bloat).** Assert
+  `_validate_prompts` rejects a response whose `negative` carries
+  more than `MAX_NEGATIVE_TAGS` (= 75) comma-separated entries, and
+  passes one at exactly the cap.
+- **`test_claude.py` (head-cluster `solo` discipline).** For a
+  scene with non-null `character_role` and null `contains_entity`,
+  assert that a `positive` whose first 4 tags are NOT
+  `<trigger>, <count>, solo, <hair/outfit>` is rejected with a
+  targeted error pointing at the offending head.
+- **`test_claude.py` (per-character negative baseline injection).**
+  When `character_role` resolves to a `character_config` entry
+  carrying a `negative_baseline` (e.g. `female` →
+  `"ear jacks, earphone jack, …"`), assert that the user message
+  for Agents 1, 3, and 7 includes the combined baseline (global +
+  per-character). When `character_role` is `null` OR the entry has
+  no `negative_baseline`, assert only the global baseline is sent.
+- **`test_claude.py` (required-negative-baseline coverage validator).**
+  Assert `_validate_prompts` rejects an Agent 1 / 3 / 7 response
+  whose `negative` omits any tag from the combined baseline that
+  was passed in the user message; the error message enumerates the
+  omitted tags. Assert a response that includes every required tag
+  (whitespace- and case-tolerant) passes.
+- **`test_claude.py` (whitespace-tolerant excerpt).** Assert that
+  an Agent 0b / Agent 4 / Agent 4b response whose `scene_excerpt`
+  differs from the corresponding paragraph slice *only* in
+  consecutive whitespace passes the validator; differing
+  substantive content is rejected with both strings in the error.
+- **`test_claude.py` (JSON parser hardening).** Round-trip:
+  Markdown-fenced response with trailing prose after the closing
+  fence parses; a response with prose preamble before `{` parses;
+  trailing content after a valid object parses (no "Extra data"
+  exception). Mirrors Phase 1 fix B3.
+- **`test_claude.py` (concept-escalation gating, Fáza A).** With
+  `recent_failure_summaries = []` or one entry, assert the user
+  message contains the soft "apply sparingly" reinforcement and
+  does NOT contain the hard escalation directive. With `>= 2`
+  entries, assert the hard directive IS appended.
+- **`test_branch.py` (timeout retry loop).** Mock
+  `runpod.run_workflow` to raise `RunPodTimeoutError` once then
+  return a valid PNG; assert the branch makes 2 calls total, the
+  second with a *different* seed, and the verdict pipeline runs
+  normally (counters not bumped). Mock 3× consecutive
+  `RunPodTimeoutError`; assert the branch transitions to `FAILED`
+  with `error_code = "RENDER_TIMEOUT"` and `error_message` mentions
+  the timeout.
+- **`test_branch.py` (non-timeout RunPod error).** Mock
+  `RunPodError` (not the timeout subclass); assert immediate
+  `FAILED` with `error_code = "RENDER_FAILED"` and exactly one call
+  (no retry).
+- **`test_branch.py` (seed-lock).** Mock the verdict on attempt 1 as
+  `problem="prompt"` + `nuance_only_failure=true` and on attempt 2
+  as `ok=true`. Assert the seed on attempt 2 EQUALS the seed on
+  attempt 1. Then run a parallel scenario where attempt 1's
+  verdict has `nuance_only_failure=false`; assert the seed on
+  attempt 2 DIFFERS.
+- **`test_branch.py` (prompting_notes lifecycle).** Mock Agent 3 to
+  emit a non-null `prompting_notes_update` on attempt 2; assert the
+  illustrations row's `prompting_notes` is overwritten. Then mock
+  Agent 4b firing; assert `prompting_notes` is wiped to NULL.
+- **`test_workflow.py` (SEED placeholder).** Assert
+  `replace_placeholders` substitutes an integer node (not a
+  string) when `SEED` is mapped to an int, and that the existing
+  string placeholders still substitute string nodes.
+- **`test_schemas.py` (autoregressive field order).** Assert
+  `RevisePromptsResponse.model_json_schema()` lists
+  `revision_summary` as the FIRST field; assert
+  `RethinkConceptResponse.model_json_schema()` lists
+  `narrative_continuity_check` FIRST; same for
+  `RethinkEnvironmentResponse`.
 
 ### 11.2 Backend integration (`tests/integration/`)
 
