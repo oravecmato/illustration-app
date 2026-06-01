@@ -2375,6 +2375,27 @@ The `prompting_notes` input is optional in both schema and runtime —
 omitting it or passing `null` is identical from Agent 1's
 perspective.
 
+**Auto-pipeline `positive`-prompt head-cluster discipline (Phase 1 fix B8).**
+When `character_role` is non-null AND `contains_entity` is null
+(i.e. a single human, no narrative entity in frame), Agent 1 MUST
+place the *singular-subject* anchor at the very front of `positive`,
+in this exact order, before any pose / expression / environment /
+style tags:
+
+```
+<character trigger>, <count tag e.g. 1girl/1boy>, solo, <hair/outfit anchor>
+```
+
+The reason is mechanical: CLIP weights drop off rapidly with token
+position, and observed render bugs (phantom second humans in scenes
+0 / 2 / 3 of Run #3) traced to `solo` showing up at character
+positions 75–699 of `positive`, far past the cluster CLIP actually
+attends to. Hoisting `solo` and the count tag into positions 1–4
+forces the renderer to treat the scene as single-subject. Hard-checked
+on Call 1 and Call 3 output by `services/claude.py` (§ 7.1 hard
+validators) and re-prompted up to `CLAUDE_JSON_RETRY` times when the
+head cluster is wrong.
+
 **Output schema:**
 ```json
 {
@@ -3408,6 +3429,17 @@ rules from "guidance" to "contract".
   requires `character_role != null`; `workflow == "no-lora"` requires
   `character_role == null`. Any other combination is rejected (§ 7.1
   Call 1 / Call 3).
+- **Head-cluster discipline for `solo` (Phase 1 fix B8).** When
+  `character_role` is non-null AND `contains_entity` is null,
+  positions 1–4 of `positive` MUST be
+  `<character trigger>, <count tag>, solo, <hair/outfit anchor>`.
+  Re-prompted with a targeted error pointing at the offending head.
+- **Entity-in-negative validator (Phase 1 fix B6).** Rejects
+  Call 1 / Call 3 responses whose `negative` prompt contains a tag
+  with an anchor token derived from `contains_entity.label`. On
+  failure the error message enumerates the specific offending tags
+  so the retry agent can self-correct in one pass rather than
+  guessing.
 
 #### 7.1.Y Illustrious / Danbooru reference doc (cached system-prompt fragment)
 
