@@ -118,15 +118,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t anime-illustrator-backend:ci backend/
-      - name: Trivy scan (CRITICAL fails, HIGH reports)
+      # First scan: table format → stdout, so the CVE list is visible in
+      # the workflow log without round-tripping through SARIF artifacts.
+      # exit-code=0 here so this step never fails on its own — the second
+      # (gating) scan owns the policy decision.
+      - name: Trivy scan (diagnostic, table → log)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: anime-illustrator-backend:ci
-          # Only CRITICAL severities fail the build. HIGH still gets
-          # surfaced via the SARIF upload below so the GitHub Security
-          # tab shows them, but a maintained python:3.11-slim base
-          # plus apt upgrade already covers the must-fix tier — failing
-          # on HIGH adds churn without actionable signal.
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: table
+
+      # Second scan: SARIF for the GitHub Security tab + the actual gate.
+      # Only CRITICAL severities fail the build. HIGH still gets surfaced
+      # via the SARIF upload + the diagnostic step above, but on a
+      # maintained python:3.11-slim base with apt upgrade already
+      # applied, HIGH-tier churn isn't actionable enough to gate deploys.
+      - name: Trivy scan (CRITICAL fails, SARIF → Security tab)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: anime-illustrator-backend:ci
           severity: CRITICAL
           exit-code: "1"
           ignore-unfixed: true
