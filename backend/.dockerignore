@@ -1,0 +1,30 @@
+# Local dev artefacts
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local DB + generated images (production uses the /data volume)
+data/
+output/
+
+# Tests + tooling — not shipped in production image
+tests/
+Makefile
+start.sh
+
+# Local secrets + screenshots that live next to the backend in dev
+.env
+.env.*
+*.png
+
+# VCS + editor noise
+.git/
+.gitignore
+.vscode/
+.idea/

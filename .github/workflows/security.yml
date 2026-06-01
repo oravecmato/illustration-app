@@ -1,0 +1,129 @@
+name: Security
+
+# Separate, always-on security layer. Runs on every PR + push to main,
+# plus a weekly scheduled scan to catch newly-disclosed CVEs against an
+# unchanged dependency graph.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 04:17 UTC — odd minute so we don't share a thundering herd
+    # with everyone else's hourly cron.
+    - cron: "17 4 * * 1"
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # for CodeQL + Trivy SARIF uploads
+  actions: read
+
+jobs:
+  # ── 1. Secret leakage ────────────────────────────────────────────────────
+  gitleaks:
+    name: Gitleaks (committed secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks scans full history
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Python dependency vulnerabilities ─────────────────────────────────
+  pip-audit:
+    name: pip-audit (Python deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend + pip-audit
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install pip-audit
+      - name: Audit installed env (fails on any known CVE)
+        run: pip-audit --strict
+
+  # ── 3. npm dependency vulnerabilities ────────────────────────────────────
+  npm-audit:
+    name: npm audit (Node deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Audit (fail on high+)
+        run: npm audit --audit-level=high --omit=dev
+
+  # ── 4. SAST via CodeQL (free for public repos) ───────────────────────────
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # ── 5. Container image scan (Trivy) ──────────────────────────────────────
+  # Builds the backend image and scans filesystem + OS + language deps for
+  # CVEs. Runs on every PR/push so a vulnerable base image is caught before
+  # the deploy workflow rebuilds the same Dockerfile.
+  trivy:
+    name: Trivy (backend image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t anime-illustrator-backend:ci backend/
+      - name: Trivy scan (HIGH + CRITICAL fail)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: anime-illustrator-backend:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: sarif
+          output: trivy-results.sarif
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-backend-image

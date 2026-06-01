@@ -1,0 +1,49 @@
+# Fly.io app config for Anime Illustrator backend.
+#
+# Deploy from this directory:
+#   cd backend && fly deploy
+#
+# One-time setup:
+#   fly apps create anime-illustrator-api
+#   fly volumes create data --region fra --size 1
+#   fly secrets set ANTHROPIC_API_KEY=... RUNPOD_API_KEY=... RUNPOD_ENDPOINT_ID=...
+
+app           = "anime-illustrator-api"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# /data holds the SQLite DB + generated images. Single shared volume per app
+# because the in-process orchestrator pins us to one machine — see [http_service]
+# below (auto_stop_machines = false, min_machines_running = 1).
+[mounts]
+  source      = "data"
+  destination = "/data"
+
+[env]
+  DATABASE_URL    = "sqlite+aiosqlite:////data/app.db"
+  OUTPUT_DIR      = "/data/output"
+  ALLOWED_ORIGIN  = "https://anime-illustrator.pages.dev"
+
+[http_service]
+  internal_port       = 8000
+  force_https         = true
+  # Auto-stop would kill 15-25 min orchestrator runs mid-flight. Keep always-on.
+  auto_stop_machines  = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes           = ["app"]
+
+  [[http_service.checks]]
+    interval     = "30s"
+    timeout      = "5s"
+    grace_period = "30s"
+    method       = "GET"
+    path         = "/health"
+
+[[vm]]
+  size      = "shared-cpu-1x"
+  memory    = "256mb"  # bump to 512mb if Anthropic streams trigger OOM
+  cpu_kind  = "shared"
+  cpus      = 1

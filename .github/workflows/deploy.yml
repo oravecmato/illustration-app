@@ -1,0 +1,131 @@
+name: Deploy
+
+# Triggered after Backend CI, Frontend CI, and Security all complete
+# successfully on main. The gate job verifies each required workflow is
+# green for the same commit before any deploy step runs.
+
+on:
+  workflow_run:
+    workflows: ["Backend CI", "Frontend CI", "Security"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:   # manual fallback for one-off redeploys
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a running deploy
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ── Gate: ensure all required CI workflows are green for THIS commit ─────
+  gate:
+    name: Verify CI green for commit
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHA="${{ github.sha }}"
+          else
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved SHA: $SHA"
+
+      - name: Check each required workflow on this SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for wf in "Backend CI" "Frontend CI" "Security"; do
+            echo "Checking '$wf' for $SHA..."
+            CONCLUSION=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$wf" \
+              --commit "$SHA" \
+              --limit 1 \
+              --json conclusion --jq '.[0].conclusion // "missing"')
+            echo "  → $CONCLUSION"
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "::error::'$wf' is '$CONCLUSION' for $SHA — refusing to deploy."
+              exit 1
+            fi
+          done
+
+  # ── Backend → Fly.io ─────────────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy backend to Fly
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy (build remotely on Fly's builders)
+        working-directory: backend
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --wait-timeout 300
+
+      - name: Smoke test /health
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if curl -fsS https://anime-illustrator-api.fly.dev/health; then
+              echo " ← /health OK"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::/health did not respond after deploy"; exit 1
+
+  # ── Frontend → Cloudflare Pages ─────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy frontend to Cloudflare Pages
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install + build
+        working-directory: frontend
+        # VITE_API_BASE is baked into the bundle at build time. Not a secret
+        # (it's the public URL of the Fly backend) but it MUST be set here or
+        # api.ts falls back to http://localhost:8000 in production.
+        env:
+          VITE_API_BASE: https://anime-illustrator-api.fly.dev
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy frontend/dist --project-name=anime-illustrator --branch=main --commit-dirty=true

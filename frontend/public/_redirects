@@ -1,0 +1,13 @@
+# Transparently proxy backend-served static assets (generated illustration PNGs)
+# from this Cloudflare Pages origin to the Fly backend, so the relative URLs
+# returned by the API (e.g. /static/runs/<id>/scene_0.png) resolve from the
+# Pages domain without backend or frontend code changes.
+#
+# Trailing `200` makes this a server-side rewrite (proxy), not a redirect.
+/static/*  https://anime-illustrator-api.fly.dev/static/:splat  200
+
+# SPA fallback for vue-router history mode — deep links like /runs/<id> must
+# serve index.html instead of 404'ing. Cloudflare Pages usually does this
+# automatically for missing files, but we're explicit so the contract is
+# documented in source and host-portable.
+/*         /index.html                                          200
