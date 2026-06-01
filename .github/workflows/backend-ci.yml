@@ -5,11 +5,12 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
+  # No path filter on push:main — deploy.yml's gate requires Backend CI,
+  # Frontend CI, and Security to all be green for the same SHA, so every
+  # main push must run every CI workflow even if its diff only touches
+  # one tree.
   push:
     branches: [main]
-    paths:
-      - "backend/**"
-      - ".github/workflows/backend-ci.yml"
 
 concurrency:
   group: backend-ci-${{ github.ref }}

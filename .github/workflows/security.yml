@@ -55,7 +55,10 @@ jobs:
           pip install -e .
           pip install pip-audit
       - name: Audit installed env (fails on any known CVE)
-        run: pip-audit --strict
+        # --skip-editable so pip-audit doesn't try to look up our own
+        # editable-installed package on PyPI (it's not published). Without
+        # this, --strict would treat the skip as a failure.
+        run: pip-audit --strict --skip-editable
 
   # ── 3. npm dependency vulnerabilities ────────────────────────────────────
   npm-audit:
