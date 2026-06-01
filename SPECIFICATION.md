@@ -2225,6 +2225,15 @@ Hard rules enforced by the prompt and re-checked server-side:
    member or an off-screen entity caused phantom-extra renders in
    Run #1 (e.g. Scene 0 mentioned the fox cub despite
    `contains_entity_label=null`).
+6b. **Action-level diction, not micro-pose (Phase 1 fix B14).** The
+   `concept` stays at action-level vocabulary ("reading at her
+   desk", "resting at the fountain") and lets pose tags emitted by
+   Agent 1 handle body details. Micro-pose phrasing
+   ("absorbed in book, head bowed", "one-hand chin-rest", "leaning
+   over fountain rim") is observed to drive the renderer into
+   contradictions (gaze direction reversal, fused fingers, missing
+   props) that the salvage agent then cannot rescue because the
+   verdict is a contradiction, not a nuance miss.
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
    technical constraints (single human character optionally accompanied
