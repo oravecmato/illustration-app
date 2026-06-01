@@ -256,11 +256,59 @@ def _is_duplicate_or_variant_suppressor(neg_norm: str, entity_words: set[str]) -
     return False
 
 
+def combined_negative_baseline(
+    character_role: str | None,
+    character_config: dict,
+) -> str:
+    """Return the global ``NEGATIVE_PROMPT_BASELINE`` plus the optional
+    per-character ``negative_baseline`` from ``character_config[role]``,
+    comma-joined. When ``character_role`` is ``None`` or the role's
+    entry carries no ``negative_baseline`` field, the global baseline is
+    returned unchanged. § 7.3.6 "Per-character negative baseline".
+    """
+    if character_role is None:
+        return NEGATIVE_PROMPT_BASELINE
+    entry = character_config.get(character_role) or {}
+    per_char = (entry.get("negative_baseline") or "").strip()
+    if not per_char:
+        return NEGATIVE_PROMPT_BASELINE
+    return f"{NEGATIVE_PROMPT_BASELINE}, {per_char}"
+
+
+def _validate_required_negative_tags(
+    negative: str,
+    required_baseline: str,
+) -> str | None:
+    """Verify every comma-separated tag in ``required_baseline`` is
+    present in ``negative`` (whitespace- and case-tolerant per tag).
+    Returns ``None`` on success, or an error string enumerating the
+    omitted tags so the retry agent can re-add them in one pass.
+    § 7.1 hard validators: "Required-negative-baseline coverage".
+    """
+    required = [_normalize_tag(t) for t in _tag_list(required_baseline)]
+    required = [t for t in required if t]
+    if not required:
+        return None
+    present = {_normalize_tag(t) for t in _tag_list(negative)}
+    missing = [t for t in required if t not in present]
+    if not missing:
+        return None
+    sample = ", ".join(missing[:8])
+    return (
+        "negative prompt is missing required-baseline tags: "
+        f"[{sample}]. Every tag from the negative_baseline passed in "
+        "the user message MUST appear verbatim in `negative` "
+        "(case- and whitespace-insensitive). Re-emit the full JSON "
+        "with the missing tags added; keep everything else unchanged."
+    )
+
+
 def _validate_prompts(
     *,
     response: GeneratePromptsResponse | RevisePromptsResponse,
     contains_entity: dict | None,
     expected_workflow: str | None = None,
+    required_negative_baseline: str | None = None,
 ) -> str | None:
     """Hard validators applied to Agent 1 / Agent 3 prompt responses.
 
@@ -311,6 +359,11 @@ def _validate_prompts(
             "concept should be suppressed exactly once — dedupe and "
             "re-emit."
         )
+
+    if required_negative_baseline is not None:
+        err = _validate_required_negative_tags(response.negative, required_negative_baseline)
+        if err is not None:
+            return err
 
     if contains_entity is not None:
         label = (contains_entity.get("label") or "").strip()
@@ -742,6 +795,8 @@ class ClaudeClient:
             else ""
         )
 
+        negative_baseline = combined_negative_baseline(character_role, character_config)
+
         if character_role:
             char_entry = character_config[character_role]
             char_display = CHARACTER_ROLE_MAP[character_role]
@@ -756,7 +811,7 @@ class ClaudeClient:
                 f"concept: {current_concept}\n"
                 f"{contains_entity_line}\n"
                 f"{notes_line}\n"
-                f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+                f"negative_baseline (MUST appear in negative):\n{negative_baseline}\n\n"
                 'Respond with JSON: {"workflow": "single-lora", '
                 '"positive": "...", "negative": "..."}'
             )
@@ -769,7 +824,7 @@ class ClaudeClient:
                 f"concept: {current_concept}\n"
                 f"{contains_entity_line}\n"
                 f"{notes_line}\n"
-                f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+                f"negative_baseline (MUST appear in negative):\n{negative_baseline}\n\n"
                 'Respond with JSON: {"workflow": "no-lora", "positive": "...", "negative": "..."}'
             )
 
@@ -780,6 +835,7 @@ class ClaudeClient:
                 response=parsed,  # type: ignore[arg-type]
                 contains_entity=contains_entity,
                 expected_workflow=expected_workflow,
+                required_negative_baseline=negative_baseline,
             )
 
         result = await self._call_with_retry(
@@ -957,6 +1013,7 @@ class ClaudeClient:
             f"current_workflow: {current_prompts.workflow}\n"
             "(keep the same workflow; Agent 3 never switches LoRA mode)\n"
         )
+        negative_baseline = combined_negative_baseline(character_role, character_config)
         user_text = (
             f"{character_block}"
             f"{workflow_line}"
@@ -970,7 +1027,7 @@ class ClaudeClient:
             f"verdict_problem: {verdict.problem}\n"
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
-            f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+            f"negative_baseline (MUST appear in negative):\n{negative_baseline}\n\n"
             "Respond with JSON in EXACTLY this field order — revision_summary "
             "FIRST so its decisions condition the new positive/negative you "
             'generate afterwards: {"revision_summary": {"kept": [...], '
@@ -987,6 +1044,7 @@ class ClaudeClient:
                 response=parsed,  # type: ignore[arg-type]
                 contains_entity=contains_entity,
                 expected_workflow=expected_workflow,
+                required_negative_baseline=negative_baseline,
             )
 
         result = await self._call_with_retry(
@@ -1376,6 +1434,7 @@ class ClaudeClient:
             else ""
         )
 
+        negative_baseline = combined_negative_baseline(character_role, character_config)
         user_text = (
             f"{character_block}"
             f"style_positive: {style_guide.overall_style_positive}\n"
@@ -1386,13 +1445,21 @@ class ClaudeClient:
             f"last_negative_prompt: {last_negative_prompt}\n\n"
             f"user_feedback (raw post-image user prose, may be noisy):\n{user_feedback}\n\n"
             f"{notes_block}"
-            f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
+            f"negative_baseline (MUST appear in negative):\n{negative_baseline}\n\n"
             'Respond with JSON: {"positive": "...", "negative": "..."}'
         )
+
+        def _validator(parsed: BaseModel) -> str | None:
+            return _validate_required_negative_tags(
+                parsed.negative,  # type: ignore[attr-defined]
+                negative_baseline,
+            )
+
         result = await self._call_with_retry(
             messages=[{"role": "user", "content": user_text}],
             response_model=ManualRevisePromptsResponse,
             system=self._system_for("manual_revise_prompts"),
+            post_validator=_validator,
         )
         return result  # type: ignore[return-value]
 

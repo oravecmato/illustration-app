@@ -9,7 +9,8 @@
     "display_name": "Kyoka Jiro",
     "lora_filename": "Mitsuki_Bakugo_and_females.safetensors",
     "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair",
-    "outfit_baseline": "school uniform, ua uniform, black jacket"
+    "outfit_baseline": "school uniform, ua uniform, black jacket",
+    "negative_baseline": "ear jacks, earphone jack, headphone jack, jack plug, mechanical ears"
   },
   "mitsuki_bakugo": {
     "display_name": "Mitsuki Bakugo",
