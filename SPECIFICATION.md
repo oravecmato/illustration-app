@@ -361,6 +361,24 @@ renamed; Alembic replaces it.
   start the backend so Alembic creates a fresh schema, and re-run
   whatever data was needed. There is no production data to preserve.
 
+**Post-baseline column additions (Phase-1 prompt engineering, May–June 2026)**
+
+The following migrations sit on top of the baseline and add the
+diagnostic columns described later in this section. They are listed
+here so reviewers can trace each behavioural feature to its schema
+change:
+
+- `fc05c0c3da51` — `illustrations.prompting_notes TEXT NULL` (extends
+  the manual flow's prompting-notes memo to the auto pipeline; see
+  § 7.1 Call 1 / Call 3 + § 6 prompting-notes wipe rule).
+- `8ed262ed0c65` — `illustration_attempt_history.seed BIGINT NULL`
+  (KSampler seed traceability; see § 6 seed-lock mechanism).
+- `7d0bc17f54f8` — `illustration_attempt_history.revision_summary_json
+  TEXT NULL` (Agent 3 autoregressive diff plan; see § 7.1 Call 3).
+- `04f7093dac00` — `illustrations.error_code TEXT NULL` (separates
+  RunPod render failures from prompt-engineering exhaustion; see
+  § 7.2.4 + § 8.6).
+
 **Tests**
 
 - Backend tests continue to use a temporary SQLite file per test for
@@ -469,6 +487,7 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `environment_label`      | TEXT NULL    | Denormalised label of this slot's environment (the source of truth is `runs.environments_json[scene_index]`). Cached on the illustration row so the orchestrator can hand Agent 1 / 3 / 4 the environment constraint without joining. **Mutable only by Agent 4b** when it swaps the slot's environment. Nullable only for legacy pre-Alembic rows. |
 | `environment_aspect`     | TEXT NULL    | Denormalised aspect for this slot: `single`, `inside`, or `outside`. Same mutation rules as `environment_label`. Nullable only for legacy pre-Alembic rows. |
 | `prompting_notes`        | TEXT NULL    | Cumulative **English-only** prompt-engineering memo for this illustration. Two writers: (a) Agent 6 in the § 6A manual flow (sourced from `manual_illustration_sessions.prompting_notes` and copied across on success); (b) Agent 3 in the auto pipeline via its optional `prompting_notes_update` output (§ 7.1 Call 3). Read by Agent 1 on the *next* concept dispatch and by Agent 3 on every revision. **Wiped to NULL by Agent 4b** when the slot's environment is swapped (renderer lessons learned against the previous env may not transfer). Migration `fc05c0c3da51`. |
+| `error_code`             | TEXT NULL    | Per-illustration diagnostic tag separating *infrastructure* failures from *prompt-engineering* exhaustion on the terminal `FAILED` state. Populated alongside `error_message` whenever the branch falls to `FAILED` because of a render-side fault. Defined values: `RENDER_TIMEOUT` (RunPod 600 s poll exhausted or remote `TIMED_OUT` after `RUNPOD_TIMEOUT_RETRY` retries with fresh seeds; § 7.2.4); `RENDER_FAILED` (RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`; not retried). NULL when the branch failed for other reasons (e.g. concept/prompt budget exhaustion with no salvage + no manual recovery) — those are reported via `runs.error_code` instead (§ 8.6). Honoured by both auto and manual paths. Migration `04f7093dac00`. |
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
@@ -869,10 +888,40 @@ dispatch:
    the prompts, character LoRA, style fragments, and the seed. The
    `SEED` placeholder substitutes an integer JSON node (not a string)
    so ComfyUI's KSampler sees a numeric seed.
-3. **Dispatch.** The orchestrator submits the workflow to RunPod and
-   waits up to `COMFYUI_POLL_TIMEOUT_S` (= 600). Failure modes and
-   the timeout-retry mechanism that wraps this step are documented
-   separately in § 7.2.4 (error classification).
+3. **Dispatch + classify.** The orchestrator submits the workflow to
+   RunPod and waits up to `COMFYUI_POLL_TIMEOUT_S` (= 600). One of:
+   - **Success** — the image bytes are returned and the render block
+     exits the sub-loop normally.
+   - **`RunPodTimeoutError`** — raised by `services/runpod.py` on
+     either local poll-loop exhaustion or remote status `TIMED_OUT`
+     (§ 7.2.4). Counts as infrastructure noise, not a
+     prompt-engineering signal.
+   - Any other `RunPodError` (`FAILED`, `CANCELLED`, malformed
+     response) — treated as a permanent fault.
+4. **Retry on timeout.** Up to `RUNPOD_TIMEOUT_RETRY` (= 1) additional
+   attempts are made on `RunPodTimeoutError`, each with a *fresh*
+   seed (the seed-lock is not honoured across timeout retries because
+   the prompt-hash collision is the suspected cause). The
+   `concept_attempt` / `prompt_attempt` counters are **NOT** bumped
+   across timeout retries — the branch is still trying to complete
+   the same logical attempt. Each retry writes its own row to
+   `illustration_attempt_history` only if it produces a verdict; pure
+   timeouts that never become verdicts are not history rows.
+5. **Terminal classification.** If all `1 + RUNPOD_TIMEOUT_RETRY`
+   attempts time out, the branch transitions directly to `FAILED`
+   with `error_code = RENDER_TIMEOUT` (§ 5 illustrations table,
+   § 8.6 error codes). If RunPod returned a non-timeout error, the
+   branch transitions to `FAILED` with
+   `error_code = RENDER_FAILED` and no retry. Both terminal cases
+   bypass the inner prompt-attempt loop and the salvage / manual
+   recovery flows (those exist to address *prompt-engineering*
+   exhaustion, not GPU-pool flakiness).
+
+The same sub-loop runs inside the § 6A manual dispatcher; the only
+difference is that a timeout exhaustion in the manual flow consumes
+one `manual_attempts` increment and surfaces `MANUAL_RENDER_FAILED`
+in the chat instead of transitioning the illustration to `FAILED`
+(unless the manual budget is now also exhausted).
 
 ### Prompting-notes lifecycle inside one branch
 
@@ -3793,6 +3842,47 @@ go to ComfyUI in English regardless of the run's `source_language`
 **Image storage:** `OUTPUT_DIR/runs/<run_id>/scene_<scene_index>.png`. The
 relative path (relative to `OUTPUT_DIR`) is stored in `illustrations.image_path`.
 
+#### 7.2.4 Error classification and timeout-retry semantics
+
+`services/runpod.py` raises two distinct exception types so callers
+can treat them differently:
+
+- **`RunPodError`** — the base class. Raised on remote status
+  `FAILED` / `CANCELLED`, malformed response, or any other
+  non-timeout fault. Indicates a *permanent* problem: workflow
+  validation error, authentication failure, missing model weights,
+  etc. Retrying with the same payload will not heal these.
+- **`RunPodTimeoutError(RunPodError)`** — subclass raised on local
+  poll-loop exhaustion (`COMFYUI_POLL_TIMEOUT_S` = 600 s elapsed
+  with no terminal status from the GPU pool) AND on remote status
+  `TIMED_OUT`. Indicates *infrastructure noise* (queue backlog,
+  worker assigned to a stuck job, transient pool capacity dip) that
+  has a fair chance of resolving on a retry against a different
+  worker.
+
+The branch render sub-loop (§ 6) distinguishes the two by exception
+type:
+
+- `RunPodTimeoutError` is retried up to `RUNPOD_TIMEOUT_RETRY` (= 1;
+  § 10) additional times, each with a *fresh* seed
+  (`random.randint(0, 2**32 - 1)`) so the next attempt does not
+  queue behind the same prompt-hash on the same slow worker. The
+  `concept_attempt` / `prompt_attempt` counters are NOT incremented
+  across timeout retries — a timeout is not a prompt-engineering
+  signal. If all `1 + RUNPOD_TIMEOUT_RETRY` attempts time out, the
+  branch transitions to `FAILED` with
+  `illustrations.error_code = "RENDER_TIMEOUT"` (§ 8.6).
+- Any other `RunPodError` (`FAILED`, `CANCELLED`, parse error) is
+  surfaced immediately as `FAILED` with
+  `illustrations.error_code = "RENDER_FAILED"` and no retry.
+
+The same classification governs the § 6A manual dispatcher
+(`services/manual.py::_dispatch_render`). A manual-flow timeout
+consumes one `manual_attempts` increment and posts
+`MANUAL_RENDER_FAILED` in the chat instead of transitioning the
+illustration to `FAILED` outright (unless the manual budget is also
+exhausted).
+
 ---
 
 ### 7.3 Creative brief for prompt design
@@ -5129,6 +5219,22 @@ The following `error_code` values are defined for MVP.
 |------------------------|--------------------------------------------------------------------------------------------------|
 | `INTERNAL_ERROR`       | Any unhandled exception in the orchestrator after the run was already created.                   |
 
+**Per-illustration** (`illustrations.error_code` — populated on the
+terminal `FAILED` transition when the cause was a render-side
+fault; see § 5 illustrations table, § 6 render sub-loop, § 7.2.4):
+
+| `error_code`           | Meaning                                                                                          |
+|------------------------|--------------------------------------------------------------------------------------------------|
+| `RENDER_TIMEOUT`       | RunPod render exhausted both the local `COMFYUI_POLL_TIMEOUT_S` (= 600 s) poll budget AND all `RUNPOD_TIMEOUT_RETRY` (= 1) retries with fresh seeds, OR remote returned `TIMED_OUT` on every attempt. Infrastructure noise, NOT a prompt-engineering signal; per-concept/prompt counters are not bumped. Surfaced to the frontend via the snapshot/SSE so analytics can separate infrastructure failures from prompt-engineering exhaustion. |
+| `RENDER_FAILED`        | RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`. Not retried because workflow / auth / weights problems will not heal on retry. |
+
+`illustrations.error_code` remains NULL on `FAILED` rows whose
+cause was concept/prompt budget exhaustion plus salvage rejection
+plus manual exhaustion — those are prompt-engineering failures the
+existing `manual_attempts_consumed`/`error_message` view already
+explains. The column only carries a code when the render call
+itself was the proximate cause.
+
 **Translation endpoint** (HTTP-only, not persisted on any row):
 
 | `error_code`           | Meaning                                                                                          |
@@ -6339,7 +6445,10 @@ Defined in `backend/app/constants.py`:
 | `MAX_CONCURRENT_BRANCHES`         | 5     | Async semaphore over branches (= MAX_ILLUSTRATIONS for MVP)       |
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
 | `BUILD_STORY_VALIDATOR_RETRY`     | 2     | Additional Agent 0b (`build_story`) attempts after the first fails server-side *semantic* validation (pool-fidelity, distribution rules, alone-shot rule, etc.). Each retry replays the failed turn with the validator's plain-English feedback appended to the user message so Agent 0b can correct course. Total attempts = `1 + BUILD_STORY_VALIDATOR_RETRY`. Independent of `CLAUDE_JSON_RETRY`, which handles parse-level failures. |
+| `RUNPOD_TIMEOUT_RETRY`            | 1     | Additional render attempts after a `RunPodTimeoutError`. Each retry uses a *fresh* `SEED` so the next attempt does not queue behind the same prompt-hash on the same slow worker. Counters (`concept_attempt`, `prompt_attempt`) are NOT bumped across timeout retries (§ 6 render sub-loop, § 7.2.4). Other `RunPodError` failures (FAILED / CANCELLED / malformed response) still fail immediately without retry. |
 | `MAX_NEGATIVE_TAGS`               | 75    | Hard cap on comma-separated tag count in Agent 1 / 3 / 7 `negative` prompts. Capped at the CLIP token-window boundary (~75); tighter caps (e.g. 60) were observed to reject valid Agent outputs repeatedly because realistic scenes legitimately need ~50–70 tags (NSFW + anatomy + cast-extras + anti-creature + anti-env-confusion + anti-expression-drift). Enforced by `_validate_prompts` in `services/claude.py` (§ 7.1 hard validators). |
+| `ERROR_CODE_RENDER_TIMEOUT`       | `"RENDER_TIMEOUT"` | String persisted on `illustrations.error_code` when the render sub-loop exhausts every timeout retry (§ 7.2.4, § 8.6). |
+| `ERROR_CODE_RENDER_FAILED`        | `"RENDER_FAILED"`  | String persisted on `illustrations.error_code` when RunPod returns a non-timeout error (§ 7.2.4, § 8.6). |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
 | `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 9 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, rethink_environment, translate, manual_concept, manual_revise_prompts, salvage_review) |
