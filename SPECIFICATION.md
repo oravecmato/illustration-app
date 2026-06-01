@@ -507,6 +507,8 @@ without re-rendering.
 | `negative_prompt`        | TEXT         | The negative prompt sent to ComfyUI for this attempt                      |
 | `verdict_json`           | TEXT         | Verbatim `EvaluateImageResponse.model_dump_json()` (includes `ok`, `problem`, `reasoning`, `suggestion`, `nuance_only_failure`) |
 | `nuance_only_failure`    | BOOLEAN      | Denormalised mirror of `verdict_json.nuance_only_failure` — indexed for the cheap pre-filter query "any salvageable attempt for this illustration?" |
+| `seed`                   | BIGINT NULL  | The KSampler seed used for this render. Captured for traceability so future post-mortems can confirm bit-identical-image bugs without re-hashing the PNG, and so the in-branch *seed-lock* mechanism (§ 6 — when the previous verdict was `nuance_only_failure=true` AND `problem="prompt"`, the next attempt reuses the same seed to steer within the same composition) is auditable. Nullable only for legacy rows captured before migration `8ed262ed0c65`. |
+| `revision_summary_json`  | TEXT NULL    | Verbatim `RevisePromptsResponse.revision_summary` (§ 7.1 Call 3) — the explicit `kept` / `removed` / `added` / `reweighted` / `restructured` diff plan Agent 3 must emit *before* the new prompts so the act of enumerating the diff conditions the autoregressive generation. NULL on history rows that were not produced by a revision dispatch (initial Agent 1 calls, or any row written before migration `7d0bc17f54f8`). |
 | `created_at`             | DATETIME     |                                                                           |
 
 Indexes:
@@ -843,6 +845,59 @@ return failure  # (in the sense that the auto loop did not succeed)
 Each state transition writes to DB and emits one SSE event. The new
 SSE events `illustration_entity_updated` and
 `illustration_environment_updated` are documented in § 8.4.
+
+### Render-call sub-loop: seed selection and seed-lock
+
+The single line `image = runpod.run_workflow(workflow_with_prompts)`
+in the pseudocode above is actually a small loop owned by the
+orchestrator, identical between the auto pipeline and § 6A manual
+dispatch:
+
+1. **Seed selection.** A 32-bit unsigned integer is generated for the
+   KSampler `SEED` placeholder (§ 7.2.1). The default is a fresh
+   `random.randint(0, 2**32 - 1)` per render. **Seed-lock exception:**
+   when the *previous* evaluator verdict for this branch carried both
+   `problem == "prompt"` AND `nuance_only_failure == true`, the
+   orchestrator reuses the previous attempt's seed so the revision
+   steers within the same composition rather than rolling a new layout.
+   The seed-lock is reset on any concept rethink (Agent 4), any
+   environment rethink (Agent 4b), and the start of a new branch.
+   The seed actually used is persisted on
+   `illustration_attempt_history.seed`.
+2. **Workflow build.** The selected `single-lora` / `no-lora` workflow
+   template is materialised by `replace_placeholders` (§ 7.2.1) with
+   the prompts, character LoRA, style fragments, and the seed. The
+   `SEED` placeholder substitutes an integer JSON node (not a string)
+   so ComfyUI's KSampler sees a numeric seed.
+3. **Dispatch.** The orchestrator submits the workflow to RunPod and
+   waits up to `COMFYUI_POLL_TIMEOUT_S` (= 600). Failure modes and
+   the timeout-retry mechanism that wraps this step are documented
+   separately in § 7.2.4 (error classification).
+
+### Prompting-notes lifecycle inside one branch
+
+The `illustrations.prompting_notes` column (§ 5) is an English-only
+memo with **two writers** and a defined wipe condition:
+
+- **Auto pipeline writer.** Agent 3 (`revise_prompts`, § 7.1 Call 3)
+  may emit `prompting_notes_update`. When non-null, the orchestrator
+  *overwrites* the column with the new value (no server-side merging).
+  Agent 3 sees the prior value as `prompting_notes` input on its next
+  invocation, and Agent 1 sees the current value at the start of the
+  next concept iteration.
+- **Manual flow writer.** Agent 6 (§ 7.1 Call 6) writes to
+  `manual_illustration_sessions.prompting_notes` during § 6A
+  collaboration. The session-level memo is the canonical store while
+  the manual flow is in charge; on resolution the latest value is
+  also mirrored onto `illustrations.prompting_notes` so a subsequent
+  auto-pipeline regeneration (if any) inherits the manual lessons.
+- **Wipe condition (Agent 4b).** When Agent 4b
+  (`rethink_environment`) swaps the slot's locked environment, the
+  orchestrator sets `prompting_notes = NULL` on the same write that
+  persists the new environment. Renderer lessons learned against the
+  previous environment may not transfer (e.g. a tag that worked in a
+  "library" may misfire in a "forest clearing"); resetting to NULL is
+  safer than blindly carrying notes forward.
 
 ---
 
@@ -2536,17 +2591,59 @@ must be reported with `nuance_only_failure=false`. See § 7.3.5.
 
 **Input:** current `prompts`, last `verdict`, `current_concept`
 (English), `style_guide`, `character_role` (`male` / `female` /
-`mother` / `null`), the slot's locked `environment`, and the
-illustration's `contains_entity` (`NarrativeEntity | null`). When
-`contains_entity` is non-null the same entity guidance applies as in
-Call 1 (§ 7.3.10 + the § 7.3.6 conditional negative adjustments).
+`mother` / `null`), the slot's locked `environment`, the
+illustration's `contains_entity` (`NarrativeEntity | null`), and the
+optional `prompting_notes: string | null` (the current
+`illustrations.prompting_notes` value, see § 6 prompting-notes
+lifecycle). When `contains_entity` is non-null the same entity
+guidance applies as in Call 1 (§ 7.3.10 + the § 7.3.6 conditional
+negative adjustments).
 
-**Output schema:** same as Call 1 (i.e. `{ positive, negative,
-workflow }`). The `workflow` selection rule is identical to Call 1 and
-is hard-enforced server-side. Agent 3 almost always returns the same
-workflow as the previous attempt — it has no reason to switch
-workflows just because a prompt failed — but the field is still
-required and re-validated to keep the contract uniform.
+**Output schema (autoregressive field order is binding):**
+
+```json
+{
+  "revision_summary": {
+    "kept":         ["string"],
+    "removed":      ["string"],
+    "added":        ["string"],
+    "reweighted":   ["string (tag + new weight or position)"],
+    "restructured": ["string (free-form note, e.g. 'hoisted solo into HEAD-CLUSTER')"]
+  },
+  "positive": "string",
+  "negative": "string",
+  "workflow": "single-lora" | "no-lora",
+  "prompting_notes_update": "string (English-only; full replacement of illustrations.prompting_notes) | null"
+}
+```
+
+- **`revision_summary` is REQUIRED and MUST come first.** This is an
+  autoregressive-conditioning device, not a post-hoc audit: the act
+  of enumerating which tags Agent 3 plans to `keep` / `remove` /
+  `add` / `reweight` / `restructure` *before* writing the new
+  `positive` and `negative` strings steers the new prompts left-to-
+  right. Each list may be empty but the keys must be present. Pydantic
+  field order in `schemas/claude.py` determines JSON serialization
+  order; the prompt file (`agents/revise_prompts.md`) reinforces it
+  with "Begin your output with `revision_summary`". The verbatim
+  object is persisted on `illustration_attempt_history.revision_
+  summary_json` (§ 5).
+- **`positive` / `negative`** — same content rules as Call 1
+  (head-cluster discipline, negative-prompt entity discipline). All
+  hard validators applied to Call 1 output (§ 7.1 hard validators)
+  also apply to Call 3 output.
+- **`workflow`** — same selection rule as Call 1, hard-enforced. Agent
+  3 almost always returns the same workflow as the previous attempt;
+  the field is required so the contract stays uniform.
+- **`prompting_notes_update`** — OPTIONAL string; the auto-pipeline
+  analogue of the manual flow's `ManualConceptResponse.prompting_
+  notes_update`. When non-null, the orchestrator **overwrites**
+  `illustrations.prompting_notes` with this value (no merging).
+  When null, the prior value is preserved. Used to capture a renderer
+  lesson Agent 3 wants to carry forward to the next concept iteration
+  (e.g. "this character's LoRA fails on glasses tags; rely on
+  `eyewear` instead"). Wiped by Agent 4b on environment swap (§ 6
+  prompting-notes lifecycle).
 
 #### Call 4 — `rethink_concept`
 
@@ -2599,9 +2696,10 @@ particular *moment* the paragraph crystallizes can change as needed.
   of truth for Agents 1 / 2 / 3); the paragraph and the
   `concept_localized` go in `source_language`.
 
-**Output schema:**
+**Output schema (autoregressive field order is binding):**
 ```json
 {
+  "narrative_continuity_check": "string (1–3 sentence English self-audit — see rule #9; MUST come first)",
   "workflow": "single-lora" | "no-lora",
   "concept": "string (canonical English concept, meaningfully different from failed_concept)",
   "concept_localized": "string (the same concept in source_language) | null when source_language='en'",
@@ -2609,10 +2707,20 @@ particular *moment* the paragraph crystallizes can change as needed.
   "scene_excerpt": "string (a verbatim substring of paragraph_text — the new excerpt this concept depicts)",
   "character_role": "male" | "female" | "mother" | null,
   "contains_entity_label": "string (label of the entity present in this rewrite)" | null,
-  "entity_action": "keep" | "drop" | "claim_floating" | "none",
-  "narrative_continuity_check": "string (1–3 sentence English self-audit Agent 4 writes after drafting paragraph_text — see rule #9)"
+  "entity_action": "keep" | "drop" | "claim_floating" | "none"
 }
 ```
+
+`narrative_continuity_check` is the FIRST field on the JSON output
+(June 2026 reordering). The reason is autoregressive conditioning,
+not auditability: declaring the prev → new → next continuity plan
+*before* drafting `paragraph_text` actually steers the new paragraph
+toward continuity, whereas placing it last (the original schema
+position) made it a post-hoc rationalisation that frequently failed
+to match the paragraph the agent ended up writing. Pydantic field
+declaration order in `schemas/claude.py` determines JSON
+serialization order; the `rethink_concept.md` prompt also instructs
+"Begin your output with `narrative_continuity_check`" explicitly.
 
 `character_role` is **also rewritable** by Agent 4 (it was already in
 Call 4's narrative scope but was implicit; making it explicit clarifies
@@ -2790,10 +2898,11 @@ Loop integration (§ 6 loop semantics):
   non-conflicting replacement. Dual-rule violations are re-prompted
   server-side.
 
-**Output schema:** mirrors Agent 4 plus a fresh `environment`:
+**Output schema (autoregressive field order is binding — mirrors Agent 4):**
 
 ```json
 {
+  "narrative_continuity_check": "string (1–3 sentence English self-audit; MUST come first — same autoregressive rationale as Agent 4)",
   "workflow": "single-lora" | "no-lora",
   "concept": "string",
   "concept_localized": "string | null when source_language='en'",
@@ -2806,8 +2915,7 @@ Loop integration (§ 6 loop semantics):
     "label": "string",
     "kind": "indoor" | "outdoor" | "dual",
     "aspect": "single" | "inside" | "outside"
-  },
-  "narrative_continuity_check": "string (1–3 sentence English self-audit)"
+  }
 }
 ```
 
@@ -3526,6 +3634,7 @@ equality, regardless of JSON path):
 - `CHARACTER_LORA`            (required in `single-lora.json`; absent in `no-lora.json`)
 - `STYLE_POSITIVE_PROMPT`     (required in both files)
 - `STYLE_NEGATIVE_PROMPT`     (required in both files)
+- `SEED`                      (required in both files — KSampler integer seed)
 
 The workflow author composes style and scene prompts together inside the
 workflow itself. The recommended convention is to use two CLIP Text Encode
@@ -3545,6 +3654,21 @@ Mapping:
 | `CHARACTER_LORA`                | `character_config[role].lora_filename` (see § 7.3.7) — used only by `single-lora.json` |
 | `STYLE_POSITIVE_PROMPT`         | Call 0b → `style_guide.overall_style_positive` |
 | `STYLE_NEGATIVE_PROMPT`         | Call 0b → `style_guide.overall_style_negative` |
+| `SEED`                          | Orchestrator-generated 32-bit unsigned int (`random.randint(0, 2**32 - 1)`), with the *seed-lock* exception described in § 6 (reuse previous seed on `problem="prompt"` AND `nuance_only_failure=true`). Substitutes an integer JSON node, not a string, so ComfyUI's KSampler receives a numeric seed. The seed in force is persisted on `illustration_attempt_history.seed`. |
+
+**Why a placeholder rather than a hardcoded seed.** Earlier MVP
+workflow JSONs (`single-lora.json`, `no-lora.json`,
+`default.json`) shipped with a hardcoded integer in the KSampler
+`seed` field. The result was that every render with the same
+workflow produced a bit-identical PNG regardless of prompt
+revisions — confirmed by hashing the six fox-cub history images
+from Phase 1 Run B and finding identical MD5s. Replacing the
+constant with a per-render `SEED` placeholder was the root-cause
+fix for the "Agent 3 revisions never visibly changed the image"
+class of bug. `services/workflow.py::replace_placeholders` was
+updated to accept `dict[str, str | int]` so non-string values
+substitute the matching node verbatim, preserving the integer
+type.
 
 If a placeholder is not found in the workflow JSON, log a warning but
 continue. Track which placeholders were found, for diagnostics.
