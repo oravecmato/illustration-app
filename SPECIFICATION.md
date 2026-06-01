@@ -150,6 +150,7 @@ Agent 0a and Agent 5.
 anime-illustrator/
 ├── backend/
 │   ├── pyproject.toml
+│   ├── Makefile                    # Allowlisted dev targets: test, lint, fmt, check, migrate, revision, serve-bg, restart-bg, stop-bg
 │   ├── .env.example
 │   ├── alembic.ini                 # Alembic config (script_location, etc.)
 │   ├── alembic/
