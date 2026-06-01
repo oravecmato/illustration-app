@@ -898,7 +898,7 @@ dispatch:
      prompt-engineering signal.
    - Any other `RunPodError` (`FAILED`, `CANCELLED`, malformed
      response) — treated as a permanent fault.
-4. **Retry on timeout.** Up to `RUNPOD_TIMEOUT_RETRY` (= 1) additional
+4. **Retry on timeout.** Up to `RUNPOD_TIMEOUT_RETRY` (= 2) additional
    attempts are made on `RunPodTimeoutError`, each with a *fresh*
    seed (the seed-lock is not honoured across timeout retries because
    the prompt-hash collision is the suspected cause). The
@@ -3863,7 +3863,7 @@ can treat them differently:
 The branch render sub-loop (§ 6) distinguishes the two by exception
 type:
 
-- `RunPodTimeoutError` is retried up to `RUNPOD_TIMEOUT_RETRY` (= 1;
+- `RunPodTimeoutError` is retried up to `RUNPOD_TIMEOUT_RETRY` (= 2;
   § 10) additional times, each with a *fresh* seed
   (`random.randint(0, 2**32 - 1)`) so the next attempt does not
   queue behind the same prompt-hash on the same slow worker. The
@@ -5225,7 +5225,7 @@ fault; see § 5 illustrations table, § 6 render sub-loop, § 7.2.4):
 
 | `error_code`           | Meaning                                                                                          |
 |------------------------|--------------------------------------------------------------------------------------------------|
-| `RENDER_TIMEOUT`       | RunPod render exhausted both the local `COMFYUI_POLL_TIMEOUT_S` (= 600 s) poll budget AND all `RUNPOD_TIMEOUT_RETRY` (= 1) retries with fresh seeds, OR remote returned `TIMED_OUT` on every attempt. Infrastructure noise, NOT a prompt-engineering signal; per-concept/prompt counters are not bumped. Surfaced to the frontend via the snapshot/SSE so analytics can separate infrastructure failures from prompt-engineering exhaustion. |
+| `RENDER_TIMEOUT`       | RunPod render exhausted both the local `COMFYUI_POLL_TIMEOUT_S` (= 600 s) poll budget AND all `RUNPOD_TIMEOUT_RETRY` (= 2) retries with fresh seeds, OR remote returned `TIMED_OUT` on every attempt. Infrastructure noise, NOT a prompt-engineering signal; per-concept/prompt counters are not bumped. Surfaced to the frontend via the snapshot/SSE so analytics can separate infrastructure failures from prompt-engineering exhaustion. |
 | `RENDER_FAILED`        | RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`. Not retried because workflow / auth / weights problems will not heal on retry. |
 
 `illustrations.error_code` remains NULL on `FAILED` rows whose
@@ -6445,7 +6445,7 @@ Defined in `backend/app/constants.py`:
 | `MAX_CONCURRENT_BRANCHES`         | 5     | Async semaphore over branches (= MAX_ILLUSTRATIONS for MVP)       |
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
 | `BUILD_STORY_VALIDATOR_RETRY`     | 2     | Additional Agent 0b (`build_story`) attempts after the first fails server-side *semantic* validation (pool-fidelity, distribution rules, alone-shot rule, etc.). Each retry replays the failed turn with the validator's plain-English feedback appended to the user message so Agent 0b can correct course. Total attempts = `1 + BUILD_STORY_VALIDATOR_RETRY`. Independent of `CLAUDE_JSON_RETRY`, which handles parse-level failures. |
-| `RUNPOD_TIMEOUT_RETRY`            | 1     | Additional render attempts after a `RunPodTimeoutError`. Each retry uses a *fresh* `SEED` so the next attempt does not queue behind the same prompt-hash on the same slow worker. Counters (`concept_attempt`, `prompt_attempt`) are NOT bumped across timeout retries (§ 6 render sub-loop, § 7.2.4). Other `RunPodError` failures (FAILED / CANCELLED / malformed response) still fail immediately without retry. |
+| `RUNPOD_TIMEOUT_RETRY`            | 2     | Additional render attempts after a `RunPodTimeoutError`. Each retry uses a *fresh* `SEED` so the next attempt does not queue behind the same prompt-hash on the same slow worker. Counters (`concept_attempt`, `prompt_attempt`) are NOT bumped across timeout retries (§ 6 render sub-loop, § 7.2.4). Other `RunPodError` failures (FAILED / CANCELLED / malformed response) still fail immediately without retry. |
 | `MAX_NEGATIVE_TAGS`               | 75    | Hard cap on comma-separated tag count in Agent 1 / 3 / 7 `negative` prompts. Capped at the CLIP token-window boundary (~75); tighter caps (e.g. 60) were observed to reject valid Agent outputs repeatedly because realistic scenes legitimately need ~50–70 tags (NSFW + anatomy + cast-extras + anti-creature + anti-env-confusion + anti-expression-drift). Enforced by `_validate_prompts` in `services/claude.py` (§ 7.1 hard validators). |
 | `ERROR_CODE_RENDER_TIMEOUT`       | `"RENDER_TIMEOUT"` | String persisted on `illustrations.error_code` when the render sub-loop exhausts every timeout retry (§ 7.2.4, § 8.6). |
 | `ERROR_CODE_RENDER_FAILED`        | `"RENDER_FAILED"`  | String persisted on `illustrations.error_code` when RunPod returns a non-timeout error (§ 7.2.4, § 8.6). |
