@@ -91,36 +91,53 @@ rewrite), with the dropped entity becoming a ghost of this slot.
 
 ## What you must produce
 
-A single JSON object with TEN fields:
+A single JSON object with TEN fields. **Field order matters: emit
+`narrative_continuity_check` FIRST — decide how the rewrite (with its
+new environment) will flow from prev to next and what story-level
+purpose it must serve BEFORE drafting `environment` and `paragraph_text`.
+The rest of the fields MUST reflect that plan.**
 
-1. `workflow` — `"single-lora"` or `"no-lora"`, consistent with
+This is not a post-hoc audit. Because your output is generated
+left-to-right, articulating the trio ⟨previous, new-intent, next⟩ —
+including which replacement environment you're committing to and why
+the swap will not feel like a teleport — ends up in your context
+BEFORE you generate the environment and the new paragraph, which
+naturally steers them toward satisfying the plan. Drafting them first
+and writing a polishing audit afterwards defeats the purpose.
+
+1. `narrative_continuity_check` — 1–3 English sentences written BEFORE
+   `environment` and `paragraph_text`. Explain in plain English:
+   (a) the flow from `previous_paragraph_text` to the planned new
+   `paragraph_text` to `next_paragraph_text` (the environment change
+   must not feel like a teleport — name briefly which replacement
+   environment you intend to use and why the move is plausible),
+   (b) the story-level purpose of the rewrite (what it advances,
+   deepens, or resolves). Required, non-empty. The remaining fields
+   MUST stay consistent with the plan you just declared here.
+2. `workflow` — `"single-lora"` or `"no-lora"`, consistent with
    `character_role`.
-2. `environment` — the replacement environment as
+3. `environment` — the replacement environment as
    `{ "label": string, "kind": "indoor"|"outdoor"|"dual", "aspect":
    "single"|"inside"|"outside" }`. Concrete locale-specific label (no
    ``"izba"``, ``"vonku"``); kind/aspect must follow the same rules as
    Agent 0b (aspect=`"single"` when kind ∈ `indoor`/`outdoor`; aspect ∈
-   `inside`/`outside` when kind=`dual`).
-3. `paragraph_text` — rewritten paragraph (in `source_language`,
+   `inside`/`outside` when kind=`dual`). MUST match the replacement
+   intent declared in `narrative_continuity_check`.
+4. `paragraph_text` — rewritten paragraph (in `source_language`,
    1–4 sentences). Must serve a real story purpose, flow smoothly with
-   the neighbours, and place the character (if any) inside the new
-   environment.
-4. `scene_excerpt` — VERBATIM substring of `paragraph_text`.
-5. `concept` — one-sentence English concept naming a concrete
+   the neighbours (exactly as declared in `narrative_continuity_check`),
+   and place the character (if any) inside the new environment.
+5. `scene_excerpt` — VERBATIM substring of `paragraph_text`.
+6. `concept` — one-sentence English concept naming a concrete
    expression/gesture/action, depictable inside the new environment.
-6. `concept_localized` — translation of `concept` to `source_language`.
-7. `character_role` — one of `male`, `female`, `mother`, or `null`.
+7. `concept_localized` — translation of `concept` to `source_language`.
+8. `character_role` — one of `male`, `female`, `mother`, or `null`.
    The same statistical-discipline rules as Agent 4 apply: do not push
    the run into an unsatisfiable validator state.
-8. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
+9. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
    `"none"`. Semantics identical to Agent 4 (see that prompt's table).
-9. `contains_entity_label` — `null` or the VERBATIM `label` of an entry
-   in `narrative_entities`. Must be consistent with `entity_action`.
-10. `narrative_continuity_check` — 1–3 English sentences auditing
-    (a) the flow from `previous_paragraph_text` to the new
-    `paragraph_text` to `next_paragraph_text` (the environment change
-    must not feel like a teleport), and (b) the story-level purpose of
-    the rewrite. Non-empty.
+10. `contains_entity_label` — `null` or the VERBATIM `label` of an entry
+    in `narrative_entities`. Must be consistent with `entity_action`.
 
 ## Story-design principles (MANDATORY)
 
@@ -159,19 +176,19 @@ prose, no commentary:
 
 ```json
 {
+  "narrative_continuity_check": "1–3 English sentences declaring the prev → new → next flow (naming the replacement environment you will use and why the swap is plausible) AND the story purpose of the rewrite",
   "workflow": "single-lora" | "no-lora",
   "environment": {
     "label": "string in source_language",
     "kind": "indoor" | "outdoor" | "dual",
     "aspect": "single" | "inside" | "outside"
   },
-  "paragraph_text": "prose in source_language — the rewritten paragraph",
+  "paragraph_text": "prose in source_language — the rewritten paragraph, consistent with the plan above",
   "scene_excerpt": "verbatim substring of paragraph_text (in source_language)",
   "concept": "English concept naming expression / gesture / action",
   "concept_localized": "concept translated to source_language",
   "character_role": "male" | "female" | "mother" | null,
   "entity_action": "keep" | "drop" | "claim_floating" | "none",
-  "contains_entity_label": null | "verbatim label from narrative_entities",
-  "narrative_continuity_check": "1–3 English sentences auditing prev → new → next flow AND the story purpose of the rewrite"
+  "contains_entity_label": null | "verbatim label from narrative_entities"
 }
 ```

@@ -97,6 +97,38 @@ explicitly:
   `princess` to disambiguate.
 - `glasses` (eyewear) vs `glass` (material). Use `eyewear` or
   `eyeglasses` for clarity.
+- **`muzzle`** is a hard homonym: it means BOTH "an animal's snout"
+  AND "a strap/cage restraint worn over the snout (a dog/fox muzzle
+  device)". On Illustrious the device sense wins frequently enough
+  that the tag is unsafe for describing animal anatomy. Never use
+  `muzzle` to describe an animal's face. For the snout, use
+  `snout`, `vulpine face`, `canine face`, `small black nose`,
+  `pointed snout`, or species-specific descriptors. If the
+  restraint device must be excluded explicitly, add `muzzle
+  (object), restraint, leash, harness, collar` to the negative.
+
+## Quadruped animal anatomy
+
+Illustrious / SDXL anime checkpoints render quadrupeds passably but
+have known weak spots:
+
+- **Tails**: the most common anatomy failure for foxes, wolves,
+  cats, and dogs is a malformed or double tail (extra tail
+  attached at the wrong angle, tail merged into the back, missing
+  tail). Always include a descriptive tail tag in the positive
+  (`bushy fox tail, single tail, long tail curled around body`)
+  and ALWAYS include `extra tail, two tails, multiple tails,
+  malformed tail` in the negative for any tailed quadruped.
+- **Paws**: similar to hand anatomy on humans. Add `paws` (or
+  `four paws`) positively, and `extra paws, malformed paws,
+  deformed paws, six toes` negatively.
+- **Species fidelity for under-trained species**: the base
+  Illustrious checkpoint has strong cat/dog/bird knowledge and
+  noticeably weaker fox/wolf/stag knowledge. Foxes in particular
+  drift toward cats (similar silhouette, much more training data).
+  Stack species-specific tags: `red fox cub, vulpine, kit, orange
+  fur, white belly, black socks, pointed ears, fluffy fox tail`,
+  and put `cat, kitten, feline, tabby` in the negative.
 
 ## Style-LoRA caveat (MHA single-character LoRAs)
 

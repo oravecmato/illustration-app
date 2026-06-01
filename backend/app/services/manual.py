@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 
 from app.constants import (
     MANUAL_BUDGET_EXHAUSTED,
@@ -825,6 +826,7 @@ class ManualService:
             "CHARACTER_LORA": char_lora,
             "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
             "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
+            "SEED": random.randint(0, 2**32 - 1),
         }
         workflow, _ = replace_placeholders(workflow_template, replacements)
 

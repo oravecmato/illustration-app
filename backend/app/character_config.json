@@ -8,8 +8,20 @@
   "female": {
     "display_name": "Kyoka Jiro",
     "lora_filename": "Mitsuki_Bakugo_and_females.safetensors",
-    "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair, ear jacks",
+    "trigger_tags": "jirou kyouka, short hair, black hair, dark purple hair",
     "outfit_baseline": "school uniform, ua uniform, black jacket"
+  },
+  "mitsuki_bakugo": {
+    "display_name": "Mitsuki Bakugo",
+    "lora_filename": "Mitsuki_Bakugo_and_females.safetensors",
+    "trigger_tags": "bakugou mitsuki, blonde hair, short spiky hair, red eyes, mature female",
+    "outfit_baseline": "casual clothes, white blouse, dark pants, earrings"
+  },
+  "fuyumi_todoroki": {
+    "display_name": "Fuyumi Todoroki",
+    "lora_filename": "Mitsuki_Bakugo_and_females.safetensors",
+    "trigger_tags": "todoroki fuyumi, white hair, red streaks, two-tone hair, low ponytail, glasses, heterochromia",
+    "outfit_baseline": "turtleneck sweater, cream sweater, long skirt, modest clothing"
   },
   "mother": {
     "display_name": "Inko Midoriya",

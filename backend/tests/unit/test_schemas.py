@@ -352,14 +352,76 @@ def test_evaluate_image_rejects_missing_reasoning():
 # ---- RevisePromptsResponse ----
 
 
+VALID_REVISION_SUMMARY = {
+    "kept": ["brave knight", "armor"],
+    "removed": [],
+    "added": ["enchanted forest", "magical"],
+    "reweighted": [],
+    "restructured": False,
+    "restructure_reason": None,
+}
+
+VALID_REVISE_PROMPTS = {
+    **VALID_GENERATE_PROMPTS,
+    "revision_summary": VALID_REVISION_SUMMARY,
+}
+
+
 def test_revise_prompts_accepts_valid():
-    resp = RevisePromptsResponse(**VALID_GENERATE_PROMPTS)
+    resp = RevisePromptsResponse(**VALID_REVISE_PROMPTS)
     assert resp.negative == "blurry, deformed"
+    assert resp.revision_summary.added == ["enchanted forest", "magical"]
+    assert resp.revision_summary.restructured is False
 
 
 def test_revise_prompts_rejects_missing():
     with pytest.raises(ValidationError):
         RevisePromptsResponse(positive="x")
+
+
+def test_revise_prompts_rejects_missing_revision_summary():
+    """revision_summary is required — it's the field that anchors the CoT plan."""
+    data = {k: v for k, v in VALID_REVISE_PROMPTS.items() if k != "revision_summary"}
+    with pytest.raises(ValidationError):
+        RevisePromptsResponse(**data)
+
+
+def test_revision_summary_restructured_requires_reason():
+    data = {
+        **VALID_REVISE_PROMPTS,
+        "revision_summary": {**VALID_REVISION_SUMMARY, "restructured": True},
+    }
+    with pytest.raises(ValidationError, match="restructure_reason"):
+        RevisePromptsResponse(**data)
+
+
+def test_revision_summary_restructured_with_reason_accepts():
+    data = {
+        **VALID_REVISE_PROMPTS,
+        "revision_summary": {
+            **VALID_REVISION_SUMMARY,
+            "restructured": True,
+            "restructure_reason": "Head cluster reordered to put solo at position 3.",
+        },
+    }
+    resp = RevisePromptsResponse(**data)
+    assert resp.revision_summary.restructured is True
+
+
+def test_revision_summary_reweighted_round_trips():
+    data = {
+        **VALID_REVISE_PROMPTS,
+        "revision_summary": {
+            **VALID_REVISION_SUMMARY,
+            "reweighted": [
+                {"tag": "looking down", "from_weight": 1.0, "to_weight": 1.2},
+                {"tag": "serene", "from_weight": 1.4, "to_weight": 1.0},
+            ],
+        },
+    }
+    resp = RevisePromptsResponse(**data)
+    assert len(resp.revision_summary.reweighted) == 2
+    assert resp.revision_summary.reweighted[0].to_weight == 1.2
 
 
 # ---- RethinkConceptResponse ----

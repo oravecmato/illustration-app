@@ -492,6 +492,42 @@ class ClaudeClient:
         blocks.append({"type": "text", "text": agent_prompt})
         return blocks
 
+    async def warmup_reference_cache(self) -> None:
+        """Pre-warm the ephemeral cache for reference docs.
+
+        Fires one minimal request per unique reference-doc set so that
+        subsequent parallel agent calls hit the cache instead of racing
+        to create it. Called serially before the pipeline kicks off
+        parallel branches. Failures are logged and swallowed — cache
+        warmup is a perf optimization, not correctness.
+        """
+        if not self._references:
+            return
+        seen: set[tuple[str, ...]] = set()
+        for agent_key, ref_keys in AGENT_REFERENCE_USAGE.items():
+            active = tuple(rk for rk in ref_keys if rk in self._references)
+            if not active or active in seen:
+                continue
+            seen.add(active)
+            system = self._system_for(agent_key)
+            try:
+                response = await self._client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=1,
+                    system=system,
+                    messages=[{"role": "user", "content": "warmup"}],
+                )
+                usage = getattr(response, "usage", None)
+                logger.info(
+                    "Reference cache warmup (%s): cache_creation=%s cache_read=%s input=%s",
+                    "+".join(active),
+                    getattr(usage, "cache_creation_input_tokens", None),
+                    getattr(usage, "cache_read_input_tokens", None),
+                    getattr(usage, "input_tokens", None),
+                )
+            except Exception as e:
+                logger.warning("Reference cache warmup failed (%s): %s", "+".join(active), e)
+
     async def _call_with_retry(
         self,
         messages: list[dict],
@@ -741,6 +777,7 @@ class ClaudeClient:
         character_config: dict,
         contains_entity: dict | None = None,
         recent_failure_summaries: list[str] | None = None,
+        positive_prompt: str | None = None,
     ) -> EvaluateImageResponse:
         """Evaluate an image against the 8-point checklist.
 
@@ -784,6 +821,12 @@ class ClaudeClient:
             )
         else:
             recent_block = ""
+        positive_prompt_block = (
+            f"\npositive_prompt (the full tag string sent to the renderer for this "
+            f"image, verbatim):\n{positive_prompt}\n"
+            if positive_prompt
+            else ""
+        )
         messages = [
             {
                 "role": "user",
@@ -804,6 +847,7 @@ class ClaudeClient:
                             f"Concept: {current_concept}\n"
                             f"{contains_entity_line}\n"
                             f"Global style: {style_guide.overall_style_positive}\n"
+                            f"{positive_prompt_block}"
                             f"{recent_block}\n"
                             "Respond with JSON per your instructions."
                         ),
@@ -884,9 +928,14 @@ class ClaudeClient:
             f"verdict_reasoning: {verdict.reasoning}\n"
             f"verdict_suggestion: {verdict.suggestion}\n\n"
             f"negative_baseline (MUST appear in negative):\n{NEGATIVE_PROMPT_BASELINE}\n\n"
-            'Respond with JSON: {"workflow": "single-lora"|"no-lora", '
-            '"positive": "...", "negative": "...", '
-            '"prompting_notes_update": "..." or null}'
+            "Respond with JSON in EXACTLY this field order — revision_summary "
+            "FIRST so its decisions condition the new positive/negative you "
+            'generate afterwards: {"revision_summary": {"kept": [...], '
+            '"removed": [...], "added": [...], "reweighted": '
+            '[{"tag": "...", "from_weight": <float>, "to_weight": <float>}, ...], '
+            '"restructured": <bool>, "restructure_reason": "..." or null}, '
+            '"workflow": "single-lora"|"no-lora", "positive": "...", '
+            '"negative": "...", "prompting_notes_update": "..." or null}'
         )
         expected_workflow = current_prompts.workflow
 

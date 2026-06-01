@@ -93,6 +93,16 @@ def test_character_lora_sourced_per_illustration_role():
         assert result["lora_node"]["inputs"]["lora_name"] == expected_lora
 
 
+def test_seed_int_substitution_preserves_type():
+    """SEED is an int value; the placeholder string is replaced by an int,
+    not a stringified int — ComfyUI's KSampler expects a numeric seed."""
+    workflow = {"sampler": {"inputs": {"seed": "SEED", "steps": 25}}}
+    result, missing = replace_placeholders(workflow, {"SEED": 1234567890})
+    assert result["sampler"]["inputs"]["seed"] == 1234567890
+    assert isinstance(result["sampler"]["inputs"]["seed"], int)
+    assert missing == []
+
+
 def test_combined_placeholder_in_single_node():
     """A single text field may contain 'STYLE_POSITIVE_PROMPT, POSITIVE_PROMPT' — both replaced."""
     workflow = {"node": {"inputs": {"text": "STYLE_POSITIVE_PROMPT, POSITIVE_PROMPT"}}}

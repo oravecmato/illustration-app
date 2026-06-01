@@ -183,6 +183,8 @@ class RunRepository:
         negative_prompt: str,
         verdict_json: str,
         nuance_only_failure: bool,
+        seed: int | None = None,
+        revision_summary_json: str | None = None,
     ) -> IllustrationAttemptHistory:
         row = IllustrationAttemptHistory(
             illustration_id=illustration_id,
@@ -204,6 +206,8 @@ class RunRepository:
             negative_prompt=negative_prompt,
             verdict_json=verdict_json,
             nuance_only_failure=nuance_only_failure,
+            seed=seed,
+            revision_summary_json=revision_summary_json,
         )
         self.session.add(row)
         await self.session.commit()

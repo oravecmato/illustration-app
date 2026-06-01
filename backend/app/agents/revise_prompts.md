@@ -178,13 +178,69 @@ Your output MUST include a `workflow` field. It MUST match
 `current_workflow` from the input — Agent 3 never switches LoRA mode.
 Workflow swaps are the exclusive responsibility of Agent 4 / Agent 4b.
 
+## Revision summary (emit FIRST in your output)
+
+**Begin your output with `revision_summary` — decide what to keep,
+remove, add, and reweight BEFORE generating the new `positive` and
+`negative`. The new prompts MUST reflect that plan.**
+
+This is not a post-hoc audit. Field order matters: because your output
+is generated left-to-right, the tags you enumerate in
+`revision_summary.kept` end up in your context BEFORE you generate the
+new `positive`, which naturally steers you to actually include them.
+Likewise, declaring `removed` and `reweighted` first makes those
+decisions concrete instead of drifting during prompt generation.
+
+Sub-fields:
+
+- `kept`: list of tags from `current_positive` and `current_negative`
+  that you are preserving verbatim (same surface form, same weight).
+  Be honest — if you reweighted a tag, it does NOT go in `kept`; it
+  goes in `reweighted`.
+- `removed`: list of tags from `current_positive` / `current_negative`
+  that you are dropping entirely. Include conflicting overweighted
+  duplicates, stale legacy tags, and any natural-language negations
+  you stripped per principle 3b.
+- `added`: list of brand-new tags you are introducing (in their final
+  surface form, including any weight syntax e.g. `(serene:1.3)`).
+- `reweighted`: list of objects `{tag, from_weight, to_weight}` for
+  tags whose attention weight you changed. `from_weight` of `1.0`
+  means the tag was previously unweighted. Removing a weight (going
+  back to bare tag) is `to_weight: 1.0`.
+- `restructured`: boolean. Set to `true` ONLY when you reordered the
+  head cluster, wholesale-rewrote either prompt, or made changes whose
+  shape is not captured by the kept/removed/added/reweighted lists.
+  Most revisions are surgical and should keep this `false`.
+- `restructure_reason`: short English sentence explaining WHY a
+  restructure was necessary. REQUIRED when `restructured: true`;
+  set to `null` otherwise.
+
+After emitting `revision_summary`, generate `workflow`, `positive`,
+`negative`, and `prompting_notes_update` consistent with the plan you
+just declared. Be honest in the summary — it is persisted to attempt
+history for downstream analysis. Drifting between the declared plan
+and the actual emitted prompts (e.g. listing a tag in `kept` but not
+including it in `positive`, or sneaking in a new tag not in `added`)
+defeats the purpose of the structure and will show up clearly in
+diagnostic review.
+
 ## Output format
 
 Respond with this JSON object and nothing else — no Markdown fences, no
-prose, no commentary:
+prose, no commentary. Field order is REQUIRED to be exactly as below:
 
 ```json
 {
+  "revision_summary": {
+    "kept": ["tag", "tag", "..."],
+    "removed": ["tag", "..."],
+    "added": ["tag", "(tag:1.3)", "..."],
+    "reweighted": [
+      { "tag": "looking down", "from_weight": 1.0, "to_weight": 1.2 }
+    ],
+    "restructured": false,
+    "restructure_reason": null
+  },
   "workflow": "single-lora" | "no-lora",
   "positive": "...",
   "negative": "...",

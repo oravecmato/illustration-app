@@ -130,27 +130,50 @@ rewrite. Active entity count per slot stays ≤ 1, but ghosts are allowed.
 
 ## What you must produce
 
-A single JSON object with NINE fields:
+A single JSON object with NINE fields. **Field order matters: emit
+`narrative_continuity_check` FIRST — decide how the new paragraph will
+flow from prev to next and what story-level purpose it must serve BEFORE
+drafting `paragraph_text`. The `paragraph_text` (and everything that
+follows from it: `scene_excerpt`, `concept`) MUST reflect that plan.**
 
-1. `workflow` — `"single-lora"` when `character_role` is non-null, or
+This is not a post-hoc audit. Because your output is generated
+left-to-right, the trio ⟨previous, new-intent, next⟩ you articulate in
+`narrative_continuity_check` ends up in your context BEFORE you generate
+the new paragraph, which naturally steers you to actually write a
+paragraph that satisfies it. Drafting `paragraph_text` first and then
+writing a polishing audit afterwards defeats the purpose.
+
+1. `narrative_continuity_check` — a 1–3-sentence English self-audit
+   written BEFORE `paragraph_text`. Read the trio ⟨previous, planned new,
+   next⟩ as a whole, then explain in plain English:
+   (a) how the new paragraph will flow from `previous_paragraph_text`
+   and into `next_paragraph_text` (no jarring jumps in time, place,
+   mood, or referent),
+   (b) the story-level purpose the new paragraph will serve (what it
+   advances, deepens, or resolves) — proving that it is not just
+   filler bent to fit the picture.
+   Required, non-empty. The remaining fields MUST stay consistent with
+   the plan you just declared here.
+2. `workflow` — `"single-lora"` when `character_role` is non-null, or
    `"no-lora"` when `character_role` is `null`. This dictates which ComfyUI
    workflow file the server will use. The server will reject your output if
    `workflow` does not match `character_role`.
-2. `paragraph_text` — a rewritten version of the current paragraph (in
+3. `paragraph_text` — a rewritten version of the current paragraph (in
    `source_language`, 1–4 short sentences). It must:
    - serve a real story purpose (advance, deepen, or close an emotional
      beat). It must NOT be filler-text bent to fit a pretty picture;
    - remain inside the locked environment (no relocation);
    - flow smoothly from `previous_paragraph_text` and into
-     `next_paragraph_text` — see the continuity check below.
-3. `scene_excerpt` — a VERBATIM substring of your new `paragraph_text`
+     `next_paragraph_text` — exactly as declared in
+     `narrative_continuity_check`.
+4. `scene_excerpt` — a VERBATIM substring of your new `paragraph_text`
    (in `source_language`). It must be the sentence or phrase that most
    directly inspires the new illustration.
-4. `concept` — a one-sentence English description of the new illustration.
+5. `concept` — a one-sentence English description of the new illustration.
    It must name a concrete facial expression, gesture/posture, or action
    and must be depictable inside `current_environment`.
-5. `concept_localized` — the same concept translated to `source_language`.
-6. `character_role` — return the `character_role` from the inputs, OR
+6. `concept_localized` — the same concept translated to `source_language`.
+7. `character_role` — return the `character_role` from the inputs, OR
    **change it to `null`** if the rewrite genuinely belongs as a no-human
    shot (entity-alone or pure setting focus). When doing so, double-check
    `role_counts_so_far`:
@@ -159,7 +182,7 @@ A single JSON object with NINE fields:
     - If switching to `null` would drop a cast role's appearance count
       below 1, or push a side role above the main role, keep the
       existing `character_role`.
-7. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
+8. `entity_action` — one of `"keep"`, `"drop"`, `"claim_floating"`, or
    `"none"`. This is a discriminator the server uses to validate
    `contains_entity_label` against the live `narrative_entities` register
    atomically. Pick it according to:
@@ -192,20 +215,10 @@ A single JSON object with NINE fields:
      genuinely leaves it off-screen (the bucket 1 "reserved but
      not active" sub-case where you choose to keep it ghosted).
      `contains_entity_label` MUST be `null`.
-8. `contains_entity_label` — either `null` or the VERBATIM `label` of an
+9. `contains_entity_label` — either `null` or the VERBATIM `label` of an
    entry in `narrative_entities`. Must be consistent with
    `entity_action` per the table above. The server validates this
    atomically against the live register and rejects mismatches.
-9. `narrative_continuity_check` — a 1–3-sentence English self-audit you
-   write *after* drafting `paragraph_text`. Read the trio ⟨previous,
-   new, next⟩ as a whole, then explain in plain English:
-   (a) how `paragraph_text` flows from `previous_paragraph_text` and
-   into `next_paragraph_text` (no jarring jumps in time, place, mood, or
-   referent),
-   (b) the story-level purpose the new paragraph serves (what it
-   advances, deepens, or resolves) — proving that it is not just filler
-   bent to fit the picture. This field is required and MUST be a
-   non-empty string.
 
 ## Story-design principles (MANDATORY — read carefully)
 
@@ -309,14 +322,14 @@ prose, no commentary:
 
 ```json
 {
+  "narrative_continuity_check": "1–3 English sentences declaring the prev → new → next flow AND the story purpose the new paragraph will serve",
   "workflow": "single-lora" | "no-lora",
-  "paragraph_text": "prose in source_language — the rewritten paragraph",
+  "paragraph_text": "prose in source_language — the rewritten paragraph, consistent with the plan above",
   "scene_excerpt": "verbatim substring of paragraph_text (in source_language)",
   "concept": "English concept naming expression / gesture / action",
   "concept_localized": "concept translated to source_language",
   "character_role": "male" | "female" | "mother" | null,
   "entity_action": "keep" | "drop" | "claim_floating" | "none",
-  "contains_entity_label": null | "verbatim label from narrative_entities",
-  "narrative_continuity_check": "1–3 English sentences auditing prev → new → next flow AND the story purpose of the new paragraph"
+  "contains_entity_label": null | "verbatim label from narrative_entities"
 }
 ```

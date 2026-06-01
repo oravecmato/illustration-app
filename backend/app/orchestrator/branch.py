@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 
 from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
 from app.db.models import Illustration, IllustrationAttemptHistory, IllustrationState
@@ -321,6 +322,15 @@ async def run_branch(
         # sees this list and is instructed to escalate to problem="concept"
         # when the same failure mode repeats.
         recent_failure_summaries: list[str] = []
+        # Seed-lock state for the inner (prompt-revision) loop. Both reset
+        # every outer iteration because a concept/environment rewrite makes
+        # the previous seed's composition no longer a relevant reference.
+        # When the previous verdict was a nuance-only near-miss, we keep
+        # the same seed for ONE next attempt so the prompt revision steers
+        # within the same composition instead of resampling the whole
+        # latent. Otherwise we reroll. See "seed-lock rule" docstring above.
+        previous_seed: int | None = None
+        lock_seed_next: bool = False
         for prompt_attempt in range(1, MAX_PROMPT_ATTEMPTS_PER_CONCEPT + 1):
             if cancel_flag.is_set():
                 await transition(IllustrationState.CANCELLED)
@@ -355,13 +365,34 @@ async def run_branch(
             else:
                 workflow_template_to_use = workflow_template
 
-            # Build workflow with current prompts + style guide
+            # Build workflow with current prompts + style guide.
+            # SEED selection — see "seed-lock rule" comment where
+            # ``previous_seed`` / ``lock_seed_next`` are initialised.
+            # Default is a fresh random seed per render so prompt
+            # revisions actually move the diffusion process. When the
+            # previous attempt in this concept missed only on nuance
+            # (item #3, near-miss), we reuse that seed for one attempt
+            # so the prompt edit refines within the same composition.
+            if lock_seed_next and previous_seed is not None:
+                seed = previous_seed
+                logger.info(
+                    "seed-lock: reusing seed %d for prompt_attempt %d (previous "
+                    "verdict was nuance_only_failure)",
+                    seed,
+                    prompt_attempt,
+                )
+            else:
+                seed = random.randint(0, 2**32 - 1)
+            # Consume the lock; next attempt re-decides based on the
+            # verdict we are about to receive.
+            lock_seed_next = False
             replacements = {
                 "POSITIVE_PROMPT": prompts.positive,
                 "NEGATIVE_PROMPT": prompts.negative,
                 "CHARACTER_LORA": char_lora,
                 "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
                 "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
+                "SEED": seed,
             }
             workflow, _ = replace_placeholders(workflow_template_to_use, replacements)
 
@@ -394,6 +425,7 @@ async def run_branch(
                     character_config=char_config,
                     contains_entity=await _current_entity(),
                     recent_failure_summaries=recent_failure_summaries or None,
+                    positive_prompt=prompts.positive,
                 )
             except Exception as e:
                 logger.error("evaluate_image failed: %s", e)
@@ -417,6 +449,19 @@ async def run_branch(
                 recent_failure_summaries.insert(0, summary)
                 del recent_failure_summaries[3:]
 
+            # Update seed-lock state based on this verdict. We only lock
+            # when the verdict was a nuance-only near-miss AND the inner
+            # loop will continue (i.e. problem routes back to Agent 3 for
+            # prompt revision). On problem="concept" or "environment" the
+            # outer loop will reset both flags anyway, but we also clear
+            # explicitly here so the intent is local.
+            if not verdict.ok and verdict.nuance_only_failure and verdict.problem == "prompt":
+                previous_seed = seed
+                lock_seed_next = True
+            else:
+                previous_seed = None
+                lock_seed_next = False
+
             # Persist the immutable attempt-history snapshot (§ 5).
             # Done before the success branch so successful attempts are
             # also recorded (verdict.ok=true rows exist for audit /
@@ -439,6 +484,7 @@ async def run_branch(
                 character_role=character_role,
                 prompts=prompts,
                 verdict=verdict,
+                seed=seed,
             )
 
             if verdict.ok:
@@ -836,7 +882,16 @@ async def _persist_attempt_history(
     character_role: str | None,
     prompts,
     verdict,
+    seed: int,
 ) -> None:
+    # Agent 3's RevisePromptsResponse carries `revision_summary`; Agent 1's
+    # GeneratePromptsResponse does not. Persist the JSON only when present
+    # so the column is NULL on the first attempt of each concept (clean
+    # signal of "no revision happened here").
+    revision_summary_json: str | None = None
+    rev_summary = getattr(prompts, "revision_summary", None)
+    if rev_summary is not None:
+        revision_summary_json = rev_summary.model_dump_json()
     """Append one ``illustration_attempt_history`` row capturing the
     current attempt's snapshot (§ 5). Called once per Agent 2 verdict,
     regardless of ``verdict.ok``.
@@ -875,6 +930,8 @@ async def _persist_attempt_history(
         negative_prompt=prompts.negative,
         verdict_json=verdict.model_dump_json(),
         nuance_only_failure=bool(verdict.nuance_only_failure),
+        seed=seed,
+        revision_summary_json=revision_summary_json,
     )
 
 

@@ -11,17 +11,22 @@ PLACEHOLDER_KEYS = [
     "CHARACTER_LORA",
     "STYLE_POSITIVE_PROMPT",
     "STYLE_NEGATIVE_PROMPT",
+    "SEED",
 ]
 
 
 def replace_placeholders(
     workflow: dict,
-    replacements: dict[str, str],
+    replacements: dict[str, str | int],
 ) -> tuple[dict, list[str]]:
     """Replace placeholder strings in workflow recursively.
 
     Returns a deep copy of the workflow with replacements applied, and a list
     of placeholder keys that were not found anywhere in the workflow.
+
+    Replacement values may be strings or ints. Non-string values (e.g. SEED)
+    substitute the entire matching string node, preserving the value's type
+    so ComfyUI receives a numeric seed rather than a string.
     """
     workflow_copy = copy.deepcopy(workflow)
     found: set[str] = set()
@@ -32,7 +37,7 @@ def replace_placeholders(
     return workflow_copy, missing
 
 
-def _replace_recursive(obj, replacements: dict[str, str], found: set[str]) -> object:
+def _replace_recursive(obj, replacements: dict[str, str | int], found: set[str]) -> object:
     if isinstance(obj, dict):
         for k, v in obj.items():
             obj[k] = _replace_recursive(v, replacements, found)

@@ -484,17 +484,61 @@ class EvaluateImageResponse(BaseModel):
         return self
 
 
+class ReweightChange(BaseModel):
+    """A single attention-weight adjustment Agent 3 declares it is making."""
+
+    tag: str
+    from_weight: float
+    to_weight: float
+
+
+class RevisionSummary(BaseModel):
+    """Agent 3's explicit diff plan against the previous ``current_positive``
+    / ``current_negative``.
+
+    Emitted FIRST in the response (before ``positive`` and ``negative``) so
+    the act of enumerating ``kept`` / ``removed`` / ``added`` / ``reweighted``
+    actually steers the autoregressive generation of the new prompts —
+    rather than degrading into a post-hoc audit. See ``revise_prompts.md``
+    for the discipline.
+    """
+
+    kept: list[str]
+    removed: list[str]
+    added: list[str]
+    reweighted: list[ReweightChange]
+    restructured: bool = False
+    restructure_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_restructure_reason(self) -> "RevisionSummary":
+        if self.restructured and not (self.restructure_reason and self.restructure_reason.strip()):
+            raise ValueError(
+                "restructure_reason is required (non-empty string) when restructured=true"
+            )
+        if not self.restructured and self.restructure_reason is not None:
+            # Tolerate but normalise — keep the audit trail tidy.
+            self.restructure_reason = None
+        return self
+
+
 class RevisePromptsResponse(BaseModel):
     """Agent 3 output.
 
-    Same prompt fields as Agent 1, plus ``prompting_notes_update`` — the
-    auto-pipeline analogue of the manual flow's ``prompting_notes``
-    discipline (see ``ManualConceptResponse``). Agent 3 uses it to record
-    renderer-specific empirical lessons learned during retries so the
-    next iteration's Agent 3 (and Agent 1 on concept rewrites) can build
-    on them instead of rediscovering the same failure modes.
+    Field order matters: ``revision_summary`` is emitted FIRST, before
+    ``positive`` and ``negative``, so the agent's declared diff plan
+    conditions the generation of the actual new prompts (autoregressive
+    forward-planning leverage). See ``revise_prompts.md``.
+
+    Carries ``prompting_notes_update`` — the auto-pipeline analogue of the
+    manual flow's ``prompting_notes`` discipline (see
+    ``ManualConceptResponse``). Agent 3 uses it to record renderer-specific
+    empirical lessons learned during retries so the next iteration's Agent
+    3 (and Agent 1 on concept rewrites) can build on them instead of
+    rediscovering the same failure modes.
     """
 
+    revision_summary: RevisionSummary
     workflow: Literal["single-lora", "no-lora"]
     positive: str
     negative: str
@@ -539,10 +583,14 @@ class RethinkConceptResponse(BaseModel):
           slot (no reservation existed, no claim made).
 
     ``narrative_continuity_check`` is a 1–3 sentence English self-audit
-    Agent 4 must write *after* drafting ``paragraph_text``; see Agent 4
-    prompt for details.
+    Agent 4 must emit FIRST — BEFORE ``paragraph_text`` — so that
+    articulating the prev→new→next flow and the new paragraph's
+    story-level purpose actually conditions the autoregressive generation
+    of ``paragraph_text`` (rather than degrading into a post-hoc audit).
+    See ``rethink_concept.md`` for the discipline.
     """
 
+    narrative_continuity_check: str
     workflow: Literal["single-lora", "no-lora"]
     concept: str
     concept_localized: str
@@ -551,7 +599,6 @@ class RethinkConceptResponse(BaseModel):
     scene_excerpt: str
     contains_entity_label: str | None = None
     entity_action: Literal["keep", "drop", "claim_floating", "none"] = "none"
-    narrative_continuity_check: str
 
     @model_validator(mode="after")
     def _validate(self) -> "RethinkConceptResponse":
@@ -583,9 +630,16 @@ class RethinkEnvironmentResponse(BaseModel):
     """Agent 4b output. Mirrors Agent 4's entity-placement contract;
     additionally emits a fresh ``Environment`` because this agent's
     raison d'être is swapping the locked environment for a slot.
+
+    Same field-ordering discipline as ``RethinkConceptResponse``:
+    ``narrative_continuity_check`` is emitted FIRST so the declared
+    prev→new→next flow conditions the generation of ``paragraph_text``
+    instead of acting as a post-hoc audit. See ``rethink_environment.md``.
     """
 
+    narrative_continuity_check: str
     workflow: Literal["single-lora", "no-lora"]
+    environment: Environment
     concept: str
     concept_localized: str
     character_role: Literal["male", "female", "mother"] | None
@@ -593,8 +647,6 @@ class RethinkEnvironmentResponse(BaseModel):
     scene_excerpt: str
     contains_entity_label: str | None = None
     entity_action: Literal["keep", "drop", "claim_floating", "none"] = "none"
-    environment: Environment
-    narrative_continuity_check: str
 
     @model_validator(mode="after")
     def _validate(self) -> "RethinkEnvironmentResponse":

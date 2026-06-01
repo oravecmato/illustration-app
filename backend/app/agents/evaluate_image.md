@@ -93,6 +93,33 @@ The image is OK only when ALL of the following hold:
   (`rethink_environment`), the only agent allowed to swap the
   environment. Use this verdict sparingly.
 
+## Unwanted-element audit (`positive_prompt`)
+
+The user message includes a `positive_prompt` block carrying the exact
+tag string that was sent to the renderer for THIS image. Use it as a
+diagnostic aid:
+
+- Whenever you spot an extra element in the image that is not part of
+  the `concept`, not described by `contains_entity`, and not naturally
+  or logically expected in the scene's context (e.g. a muzzle/restraint
+  on a fox, a leash on a bird, jewelry the concept never mentioned, a
+  prop in the character's hand the concept never put there), scan the
+  `positive_prompt` for any tag that could have triggered that
+  rendering — including English homonyms whose other meaning is the
+  unwanted element. Concrete example: the tag `muzzle` means both "an
+  animal's snout" and "a restraint device worn over the snout"; when
+  the renderer draws a fox cub wearing a muzzle-restraint, that tag is
+  almost certainly the cause.
+- When you find such a tag, your `suggestion` MUST name the exact tag
+  and instruct Agent 3 to remove it (and, if needed, replace it with a
+  non-ambiguous synonym — e.g. `snout`, `vulpine face`, `small black
+  nose` instead of `muzzle`). This routes as `problem="prompt"`. Do
+  NOT escalate this kind of failure to `concept` on the first
+  occurrence; the prompt has a clear, fixable defect.
+- When the unwanted element has no obvious causal tag in the
+  `positive_prompt`, treat it as a regular renderer drift and apply
+  the normal classification rules below.
+
 ## Escalation rule (`recent_failures`)
 
 When the user message includes a `recent_failures` block, it lists the

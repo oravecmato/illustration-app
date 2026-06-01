@@ -13,6 +13,7 @@ from app.schemas.claude import (
     RethinkConceptResponse,
     RethinkEnvironmentResponse,
     RevisePromptsResponse,
+    RevisionSummary,
     StyleGuide,
 )
 
@@ -30,6 +31,14 @@ PROMPTS = GeneratePromptsResponse(
 )
 
 REVISED_PROMPTS = RevisePromptsResponse(
+    revision_summary=RevisionSummary(
+        kept=["brave knight", "forest"],
+        removed=[],
+        added=[],
+        reweighted=[],
+        restructured=False,
+        restructure_reason=None,
+    ),
     workflow="single-lora",
     positive="brave knight, forest",
     negative="blurry",
@@ -47,6 +56,14 @@ VERDICT_FAIL_PROMPT = EvaluateImageResponse(
     problem="prompt",
     reasoning="Too blurry",
     suggestion="Make it sharper",
+)
+
+VERDICT_FAIL_PROMPT_NUANCE = EvaluateImageResponse(
+    ok=False,
+    problem="prompt",
+    reasoning="Expression is in the same neighbourhood as the concept but not the exact beat.",
+    suggestion="Push the expression tag harder.",
+    nuance_only_failure=True,
 )
 
 VERDICT_FAIL_CONCEPT = EvaluateImageResponse(
@@ -546,3 +563,187 @@ async def test_environment_rethink_rejects_label_collision():
     claude.rethink_environment.assert_called_once()
     assert ill.state == IllustrationState.FAILED
     assert "collides" in (ill.error_message or "")
+
+
+# ---- Seed-lock rule (nuance_only_failure) ---------------------------------
+
+
+async def _run_branch_capturing_seeds(ill, claude, runpod_side_effect):
+    """Run a branch and return the list of seeds sent into runpod."""
+    from app.orchestrator.branch import run_branch as _run_branch
+
+    captured_seeds: list[int] = []
+
+    def _find_seed(obj):
+        if isinstance(obj, dict):
+            if "seed" in obj and isinstance(obj["seed"], int):
+                return obj["seed"]
+            for v in obj.values():
+                s = _find_seed(v)
+                if s is not None:
+                    return s
+        elif isinstance(obj, list):
+            for item in obj:
+                s = _find_seed(item)
+                if s is not None:
+                    return s
+        return None
+
+    async def capture(workflow):
+        # The branch loads the real workflow file (matching prompts.workflow)
+        # from disk, so the structure is the ComfyUI graph — scan for KSampler's
+        # numeric seed wherever it sits.
+        seed_val = _find_seed(workflow)
+        assert seed_val is not None, f"no numeric seed found in workflow: {workflow!r}"
+        captured_seeds.append(seed_val)
+        return await runpod_side_effect()
+
+    runpod = AsyncMock()
+    runpod.run_workflow.side_effect = capture
+
+    repo = AsyncMock()
+    repo.update_illustration = AsyncMock(side_effect=lambda i, **kwargs: _apply(i, **kwargs))
+    stub_run = MagicMock()
+    stub_run.narrative_entities_json = "[]"
+    stub_run.environments_json = "[]"
+    stub_run.story_blocks_json = None
+    stub_run.main_character_role = "male"
+    repo.get_run = AsyncMock(return_value=stub_run)
+    repo.update_run = AsyncMock(return_value=stub_run)
+    repo.session = MagicMock()
+    event_bus = AsyncMock()
+
+    workflow_template = {
+        "node": {
+            "inputs": {
+                "lora": "CHARACTER_LORA",
+                "positive": "POSITIVE_PROMPT",
+                "negative": "NEGATIVE_PROMPT",
+                "style_pos": "STYLE_POSITIVE_PROMPT",
+                "style_neg": "STYLE_NEGATIVE_PROMPT",
+                "seed": "SEED",
+            }
+        }
+    }
+
+    async def _stub_open_manual_flow(i, source_language):
+        await repo.update_illustration(i, state=IllustrationState.MANUAL_CHATTING)
+
+    fake_service = MagicMock()
+    fake_service.open_manual_flow = AsyncMock(side_effect=_stub_open_manual_flow)
+
+    with (
+        patch("app.orchestrator.branch.ManualService", return_value=fake_service),
+        patch("app.orchestrator.branch.ManualRepository", return_value=MagicMock()),
+    ):
+        await _run_branch(
+            illustration=ill,
+            style_guide=STYLE_GUIDE,
+            workflow_template=workflow_template,
+            output_dir="/tmp",
+            claude=claude,
+            runpod=runpod,
+            repo=repo,
+            event_bus=event_bus,
+            cancel_flag=asyncio.Event(),
+            character_config=CHARACTER_CONFIG,
+            story_title="Test",
+            source_language="sk",
+            story_blocks=[
+                {"type": "paragraph", "text": "Test paragraph."},
+                {"type": "illustration", "scene_index": 0},
+            ],
+        )
+    return captured_seeds
+
+
+@pytest.mark.asyncio
+async def test_seed_locked_after_nuance_only_failure():
+    """Verdict 1 = nuance-only failure → verdict 2's render must reuse the same seed."""
+    ill = make_illustration()
+    claude, _ = make_services()
+    claude.evaluate_image.side_effect = [VERDICT_FAIL_PROMPT_NUANCE, VERDICT_OK]
+
+    async def _img():
+        return IMAGE_BYTES
+
+    seeds = await _run_branch_capturing_seeds(ill, claude, _img)
+    assert ill.state == IllustrationState.COMPLETED
+    assert len(seeds) == 2
+    assert seeds[0] == seeds[1], f"seed-lock failed: {seeds!r}"
+
+
+@pytest.mark.asyncio
+async def test_seed_rerolls_after_non_nuance_failure():
+    """Verdict 1 = ordinary prompt failure → verdict 2's render must use a DIFFERENT seed."""
+    ill = make_illustration()
+    claude, _ = make_services()
+    claude.evaluate_image.side_effect = [VERDICT_FAIL_PROMPT, VERDICT_OK]
+
+    async def _img():
+        return IMAGE_BYTES
+
+    seeds = await _run_branch_capturing_seeds(ill, claude, _img)
+    assert ill.state == IllustrationState.COMPLETED
+    assert len(seeds) == 2
+    # 32-bit random space ⇒ collision probability ~2^-32, safe to assert inequality.
+    assert seeds[0] != seeds[1], f"expected reroll, got identical seeds: {seeds!r}"
+
+
+@pytest.mark.asyncio
+async def test_seed_lock_consumed_after_one_attempt():
+    """Lock applies for exactly ONE attempt: nuance-only → reuse → ordinary failure → reroll."""
+    ill = make_illustration()
+    claude, _ = make_services()
+    # 3 failures (max), branch then enters manual flow. We only need to inspect
+    # the seed pattern across the 3 renders within the single concept.
+    claude.evaluate_image.side_effect = [
+        VERDICT_FAIL_PROMPT_NUANCE,  # attempt 1 → lock for attempt 2
+        VERDICT_FAIL_PROMPT,  # attempt 2 (seed reused) → lock cleared
+        VERDICT_FAIL_PROMPT,  # attempt 3 (fresh seed)
+        # Concept restart → new random seed for the new concept's first render.
+        # Then we let it succeed to terminate the branch cleanly.
+        VERDICT_OK,
+    ]
+
+    async def _img():
+        return IMAGE_BYTES
+
+    seeds = await _run_branch_capturing_seeds(ill, claude, _img)
+    assert ill.state == IllustrationState.COMPLETED
+    assert len(seeds) == 4
+    # attempt 1 vs 2: locked → equal
+    assert seeds[0] == seeds[1]
+    # attempt 2 vs 3: lock consumed → different (reroll)
+    assert seeds[1] != seeds[2]
+    # attempt 3 vs first attempt of new concept: different (outer reset + reroll)
+    assert seeds[2] != seeds[3]
+
+
+@pytest.mark.asyncio
+async def test_seed_resets_on_concept_change():
+    """Nuance-only failure on the LAST prompt attempt of concept 1 must NOT
+    leak the seed into concept 2's first render — the outer loop reset
+    clears ``previous_seed`` and ``lock_seed_next``."""
+    ill = make_illustration()
+    claude, _ = make_services()
+    # 3 nuance-only failures → concept exhausted → new concept → success.
+    claude.evaluate_image.side_effect = [
+        VERDICT_FAIL_PROMPT_NUANCE,
+        VERDICT_FAIL_PROMPT_NUANCE,
+        VERDICT_FAIL_PROMPT_NUANCE,
+        VERDICT_OK,
+    ]
+
+    async def _img():
+        return IMAGE_BYTES
+
+    seeds = await _run_branch_capturing_seeds(ill, claude, _img)
+    assert ill.state == IllustrationState.COMPLETED
+    assert len(seeds) == 4
+    # Within concept 1: all three attempts locked together (each verdict
+    # was nuance-only, so each subsequent attempt reused the previous seed).
+    assert seeds[0] == seeds[1] == seeds[2]
+    # Concept change wipes the lock — first render of concept 2 must use a
+    # fresh random seed.
+    assert seeds[3] != seeds[2]

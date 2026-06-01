@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -229,10 +229,21 @@ class IllustrationAttemptHistory(Base):
     current_workflow: Mapped[str] = mapped_column(String, nullable=False)
     positive_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     negative_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    # Agent 3's declared diff plan (RevisionSummary), JSON-encoded.
+    # NULL on the FIRST attempt of every concept because that attempt's
+    # prompts come from Agent 1 (GeneratePromptsResponse — no diff to
+    # report). Non-null on every subsequent attempt where prompts came
+    # from Agent 3 (RevisePromptsResponse).
+    revision_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     verdict_json: Mapped[str] = mapped_column(Text, nullable=False)
     nuance_only_failure: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # ComfyUI KSampler seed used for this render. Stored so the salvage
+    # agent can detect whether attempts shared a seed (and thus are
+    # bit-identical regardless of prompt revisions). Nullable for rows
+    # written before the SEED placeholder was introduced.
+    seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     illustration: Mapped["Illustration"] = relationship(

@@ -67,6 +67,12 @@ async def run_pipeline(
         # Refresh snapshot with starting illustration state.
         _update_snapshot(event_bus, run, illustrations)
 
+        # Pre-warm the Anthropic ephemeral cache for reference docs so
+        # the first parallel batch of agent calls hits cache instead of
+        # racing to create it. Serial single request; safe to no-op
+        # when references are disabled (e.g. in tests).
+        await claude.warmup_reference_cache()
+
         # Run branches in parallel with semaphore
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_BRANCHES)
 
