@@ -172,7 +172,10 @@ anime-illustrator/
 │   │   │   ├── rethink_environment.md # Agent 4b — swap a slot's locked environment
 │   │   │   ├── manual_concept.md   # Agent 6 — § 6A manual chat concept design
 │   │   │   ├── manual_revise_prompts.md # Agent 7 — § 6A manual chat prompt revision
-│   │   │   └── translate.md        # Agent 5 — on-demand translations
+│   │   │   ├── salvage.md          # Agent 8 — post-exhaustion salvage reviewer (§ 7.1 Call 8)
+│   │   │   ├── translate.md        # Agent 5 — on-demand translations
+│   │   │   └── reference/
+│   │   │       └── illustrious_sdxl.md  # Curated Illustrious / Danbooru primer cached into Agents 1 / 3 / 4 / 4b system prompts (§ 7.1.Y)
 │   │   ├── db/
 │   │   │   ├── models.py           # SQLAlchemy ORM models
 │   │   │   ├── session.py          # async engine + session factory
@@ -465,6 +468,7 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `contains_entity_label`  | TEXT NULL    | Label of the `NarrativeEntity` (non-human character or object) visually present in this scene, or NULL when the scene contains no entity. The actual entity record (`{label, kind, importance, reserved_for_scene_index}`) lives on `runs.narrative_entities_json` and is matched by normalised label. **Mutable** — Agent 4 and Agent 4b may set it (`entity_action="keep"` / `"claim_floating"`), clear it (`entity_action="drop"`), or leave it null (`entity_action="none"`). Once a label is *first* placed in a slot whose reservation was floating, the entity's `reserved_for_scene_index` is permanently set to that slot. Replaces the legacy `companion_description` + `companion_interaction` columns. |
 | `environment_label`      | TEXT NULL    | Denormalised label of this slot's environment (the source of truth is `runs.environments_json[scene_index]`). Cached on the illustration row so the orchestrator can hand Agent 1 / 3 / 4 the environment constraint without joining. **Mutable only by Agent 4b** when it swaps the slot's environment. Nullable only for legacy pre-Alembic rows. |
 | `environment_aspect`     | TEXT NULL    | Denormalised aspect for this slot: `single`, `inside`, or `outside`. Same mutation rules as `environment_label`. Nullable only for legacy pre-Alembic rows. |
+| `prompting_notes`        | TEXT NULL    | Cumulative **English-only** prompt-engineering memo for this illustration. Two writers: (a) Agent 6 in the § 6A manual flow (sourced from `manual_illustration_sessions.prompting_notes` and copied across on success); (b) Agent 3 in the auto pipeline via its optional `prompting_notes_update` output (§ 7.1 Call 3). Read by Agent 1 on the *next* concept dispatch and by Agent 3 on every revision. **Wiped to NULL by Agent 4b** when the slot's environment is swapped (renderer lessons learned against the previous env may not transfer). Migration `fc05c0c3da51`. |
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
@@ -2211,6 +2215,16 @@ Hard rules enforced by the prompt and re-checked server-side:
    (rule #13), the concept must instead name a concrete, depictable
    moment in the *environment* (lighting, weather, a specific object
    in frame).
+6a. **Concept-field in-frame discipline (Phase 1 fix B1).** The
+   `concept` describes only what is *visibly* in the frame. Agent 0b
+   MUST NOT name the *other* cast member (only the active
+   `character_role`'s character is named) and MUST NOT name a
+   non-reserved narrative entity. Off-frame referents are addressed
+   with deictic framing ("toward the dark treeline", "down at
+   something hidden in the ferns"). Naming a cast triplet's third
+   member or an off-screen entity caused phantom-extra renders in
+   Run #1 (e.g. Scene 0 mentioned the fox cub despite
+   `contains_entity_label=null`).
 7. **Story-design discipline** (§ 7.3.9) — the story must be deliberately
    built around scenes that are illustratable under the MVP's hard
    technical constraints (single human character optionally accompanied
@@ -2337,9 +2351,14 @@ baseline described in § 7.3.6.
 
 `prompting_notes` semantics:
 
-- In the **auto pipeline** (§ 6 loops, Step 0 → Step 4 dispatches),
-  `prompting_notes` is always `null` — Agent 1 behaves exactly as it
-  did before this field existed.
+- In the **auto pipeline**, the orchestrator passes the current
+  `illustrations.prompting_notes` value (§ 5). It is `null` on the
+  very first dispatch of a branch, and may become non-null later if
+  Agent 3 (`revise_prompts`, Call 3) emits a `prompting_notes_update`
+  on a prior revision in the same branch. When non-null, Agent 1
+  reflects the lessons in `positive` / `negative` without restating
+  them. The memo is wiped to `null` by Agent 4b on environment swap
+  (§ 6 prompting-notes lifecycle).
 - In the **collaboration mode** (§ 6A.4 step 3.3, `concept_confirmed`
   dispatch), the server passes the current
   `manual_illustration_sessions.prompting_notes` value (null until
@@ -2426,13 +2445,31 @@ or
 
 `nuance_only_failure` MUST be `false` whenever `ok` is `true`. When
 `ok` is `false`, it MAY be `true` *only* when the rendered scene fails
-the checklist solely on item #3 expression/gesture nuance drift inside
-the same emotional neighbourhood as the concept, AND every other
-checklist axis (1a cast, 1b entity, 1c environment, 2 character
-recognition, 4 style, 5 anatomy, 6 safety, 7 composition) passes. The
-flag never alters Agent 2's per-attempt routing; it only marks
-attempts the salvage agent (§ 7.1 Call 8) may revisit after the auto
-loop exhausts. See § 7.3.5.
+the checklist solely on item #3 expression/gesture/pose **near-miss**
+drift inside the same emotional or postural neighbourhood as the
+concept, AND every other checklist axis (1a cast, 1b entity, 1c
+environment, 2 character recognition, 4 style, 5 anatomy, 6 safety,
+7 composition) passes. The flag is *decoupled from `problem`* (Phase
+1 fix B4): a near-miss attempt that triggers concept escalation
+(`problem="concept"`) is still allowed to carry
+`nuance_only_failure=true`, so the salvage agent (§ 7.1 Call 8) sees
+it as a candidate. The flag never alters Agent 2's per-attempt
+routing; it only marks attempts the salvage agent may revisit after
+the auto loop exhausts.
+
+The "near-miss" scope is deliberately broad (Phase 1 fix B13). It
+covers both:
+
+- **Expression near-misses** — e.g. concept calls for "serene"
+  but the renderer produced "faint smile".
+- **Pose / gesture near-misses** — e.g. concept calls for
+  "one-hand chin-rest" but the renderer produced "two-hand
+  face-rest"; or the gesture is the same family but a slightly
+  different limb configuration.
+
+A contradiction-grade miss (gaze direction reversed, action
+fundamentally different, body parts swapped) does NOT qualify and
+must be reported with `nuance_only_failure=false`. See § 7.3.5.
 
 **Routing semantics for `problem`:**
 
@@ -3331,6 +3368,71 @@ Hard rules enforced by the prompt and re-checked server-side:
 6. **Single output.** Agent 8 returns exactly one JSON object per
    call; no Markdown fences, no prefatory text, no trailing
    commentary (same rule as Agents 0b–5, 7).
+
+#### 7.1.X Hard validators in `services/claude.py`
+
+In addition to per-call schema validation done by Pydantic, a small
+suite of *content* validators rejects structurally-valid responses
+that violate semantic invariants and re-prompts up to
+`CLAUDE_JSON_RETRY` times. They were added in Phase 1
+(May–June 2026) after diagnostic runs showed Claude routinely
+satisfied the JSON schema while violating prompt-engineering rules
+the system prompt had merely *requested*. The validators move those
+rules from "guidance" to "contract".
+
+- **JSON parser hardening (Phase 1 fix B3).**
+  `_strip_json_fences` truncates at the first inner ```` ``` ````
+  fence rather than only when it sits at the very end of the message,
+  catching trailing prose after the closing fence; `_parse_json_lenient`
+  uses `JSONDecoder.raw_decode` so trailing content after a valid
+  JSON object no longer raises "Extra data"; and a fallback slices
+  from the first `{` to catch prose preamble before the JSON object.
+  These three fixes eliminated the bulk of `CLAUDE_JSON_RETRY` burn
+  observed on Run #1.
+- **Whitespace-tolerant excerpt validator.** `scene_excerpt` must be
+  a verbatim substring of `paragraph_text` (Agent 0b, Agent 4,
+  Agent 4b). The check normalises consecutive whitespace before
+  comparing, so a newline or two spaces in the paragraph don't
+  reject an excerpt that's otherwise correct. On failure the error
+  message includes both the excerpt and the relevant paragraph slice
+  so the retry agent can target the mismatch.
+- **Negative-prompt bloat cap.** `negative` prompt comma-separated
+  tag count must be ≤ `MAX_NEGATIVE_TAGS` (= 75; § 10). Tighter caps
+  were observed to reject valid Agent 1 / 3 output repeatedly
+  because realistic scenes legitimately need ~50–70 tags
+  simultaneously to cover NSFW + anatomy + cast-extras +
+  anti-creature + anti-env-confusion + anti-expression-drift. CLIP's
+  token window is ~75, so capping at the CLIP boundary is the
+  natural ceiling.
+- **Workflow ↔ character_role coherence.** `workflow == "single-lora"`
+  requires `character_role != null`; `workflow == "no-lora"` requires
+  `character_role == null`. Any other combination is rejected (§ 7.1
+  Call 1 / Call 3).
+
+#### 7.1.Y Illustrious / Danbooru reference doc (cached system-prompt fragment)
+
+`backend/app/agents/reference/illustrious_sdxl.md` is a curated
+prompt-engineering primer specific to the Illustrious XL base
+checkpoint and the MHA LoRAs we use. It encodes:
+
+- Tag vocabulary conventions (Danbooru tag canonicalisation, glued
+  count forms, head-cluster ordering, weight-syntax limits).
+- Known renderer pitfalls (the `muzzle` snout/restraint homonym;
+  quadruped tail anatomy; fox / cat / wolf species drift; the
+  `solo` weight-decay phenomenon).
+- Negative-prompt scope rules (what belongs in negative vs.
+  positive; allowed entity-token negatives; banned anti-anatomy
+  prefixes like `anthro bear`).
+
+The doc is injected into the system prompt of Agents 1, 3, 4, and 4b
+with Anthropic's `cache_control: { type: "ephemeral" }` so it counts
+once against the per-call billing across a five-illustration run.
+`services/claude.py::warmup_reference_cache()` issues a single
+zero-cost no-op call at the start of `run_pipeline` (§ 6
+orchestrator) so the first parallel batch of agent calls hits the
+warm cache instead of racing to create it. The doc is loaded from
+disk at startup (`load_agent_prompts()`); a missing or empty file
+refuses startup.
 
 ### 7.2 RunPod ComfyUI Serverless
 
@@ -5975,9 +6077,11 @@ Defined in `backend/app/constants.py`:
 | `COMFYUI_POLL_INTERVAL_S`         | 3     | Polling interval                                                  |
 | `MAX_CONCURRENT_BRANCHES`         | 5     | Async semaphore over branches (= MAX_ILLUSTRATIONS for MVP)       |
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
+| `BUILD_STORY_VALIDATOR_RETRY`     | 2     | Additional Agent 0b (`build_story`) attempts after the first fails server-side *semantic* validation (pool-fidelity, distribution rules, alone-shot rule, etc.). Each retry replays the failed turn with the validator's plain-English feedback appended to the user message so Agent 0b can correct course. Total attempts = `1 + BUILD_STORY_VALIDATOR_RETRY`. Independent of `CLAUDE_JSON_RETRY`, which handles parse-level failures. |
+| `MAX_NEGATIVE_TAGS`               | 75    | Hard cap on comma-separated tag count in Agent 1 / 3 / 7 `negative` prompts. Capped at the CLIP token-window boundary (~75); tighter caps (e.g. 60) were observed to reject valid Agent outputs repeatedly because realistic scenes legitimately need ~50–70 tags (NSFW + anatomy + cast-extras + anti-creature + anti-env-confusion + anti-expression-drift). Enforced by `_validate_prompts` in `services/claude.py` (§ 7.1 hard validators). |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
-| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 8 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, translate, manual_concept) |
+| `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 9 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, rethink_environment, translate, manual_concept, manual_revise_prompts, salvage_review) |
 | `SUPPORTED_LANGUAGES`             | `("sk", "cs", "en")` | Tuple of UI / story languages the backend accepts (§ 9.6). The chat agent emits one of these or `"other"`; the build_story, translate, and run APIs all validate against this tuple. |
 | `CONFIRMED_ACK`                   | `Mapping[str, str]` (see below) | Per-language canonical `reply` returned by Agent 0a on `phase="confirmed"`; the chat service looks up `CONFIRMED_ACK[detected_language]` and overwrites any other prose Claude returned. |
 
