@@ -15,6 +15,15 @@ class RunPodError(Exception):
     pass
 
 
+class RunPodTimeoutError(RunPodError):
+    """Render timed out — either the poll loop exhausted ``poll_timeout``
+    locally, or the remote returned status ``TIMED_OUT``. Distinct from
+    generic ``RunPodError`` so callers can decide to retry the render
+    (the workflow is fine, the GPU pool just stalled) vs. fail hard."""
+
+    pass
+
+
 class RunPodClient:
     def __init__(
         self,
@@ -59,14 +68,19 @@ class RunPodClient:
 
             if status == "COMPLETED":
                 return self._extract_image(data)
-            if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
+            if status == "TIMED_OUT":
+                error = data.get("error", status)
+                raise RunPodTimeoutError(
+                    f"RunPod job {job_id} ended with status TIMED_OUT: {error}"
+                )
+            if status in ("FAILED", "CANCELLED"):
                 error = data.get("error", status)
                 raise RunPodError(f"RunPod job {job_id} ended with status {status}: {error}")
 
             await asyncio.sleep(self.poll_interval)
             elapsed += self.poll_interval
 
-        raise RunPodError(f"RunPod job {job_id} timed out after {self.poll_timeout}s")
+        raise RunPodTimeoutError(f"RunPod job {job_id} timed out after {self.poll_timeout}s")
 
     def _extract_image(self, data: dict) -> bytes:
         images = data.get("output", {}).get("images", [])

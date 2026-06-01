@@ -6,7 +6,13 @@ import logging
 import os
 import random
 
-from app.constants import MAX_CONCEPT_ATTEMPTS, MAX_PROMPT_ATTEMPTS_PER_CONCEPT
+from app.constants import (
+    ERROR_CODE_RENDER_FAILED,
+    ERROR_CODE_RENDER_TIMEOUT,
+    MAX_CONCEPT_ATTEMPTS,
+    MAX_PROMPT_ATTEMPTS_PER_CONCEPT,
+    RUNPOD_TIMEOUT_RETRY,
+)
 from app.db.models import Illustration, IllustrationAttemptHistory, IllustrationState
 from app.db.repositories import ManualRepository, RunRepository
 from app.orchestrator.events import EventBus
@@ -20,7 +26,7 @@ from app.schemas.claude import (
 from app.services.claude import ClaudeClient
 from app.services.images import copy_image, save_history_image, save_image
 from app.services.manual import ManualService
-from app.services.runpod import RunPodClient
+from app.services.runpod import RunPodClient, RunPodTimeoutError
 from app.services.workflow import replace_placeholders
 
 logger = logging.getLogger(__name__)
@@ -386,23 +392,72 @@ async def run_branch(
             # Consume the lock; next attempt re-decides based on the
             # verdict we are about to receive.
             lock_seed_next = False
-            replacements = {
-                "POSITIVE_PROMPT": prompts.positive,
-                "NEGATIVE_PROMPT": prompts.negative,
-                "CHARACTER_LORA": char_lora,
-                "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
-                "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
-                "SEED": seed,
-            }
-            workflow, _ = replace_placeholders(workflow_template_to_use, replacements)
 
-            try:
-                image_bytes = await runpod.run_workflow(workflow)
-            except Exception as e:
-                logger.error("runpod.run_workflow failed: %s", e)
+            # Render with up to ``RUNPOD_TIMEOUT_RETRY`` retries on
+            # ``RunPodTimeoutError`` only. A timeout means the GPU pool
+            # stalled — the workflow is fine. Each retry uses a fresh
+            # random seed (the cached prompt-hash may have been what
+            # got the original job queued behind a slow worker). The
+            # prompt_attempt counter is NOT bumped across these retries:
+            # they are infrastructure recovery, not prompt-engineering
+            # signals. Other ``RunPodError`` failures (FAILED/CANCELLED
+            # remote status, malformed response) fail immediately with
+            # ``error_code=RENDER_FAILED`` — they almost always indicate
+            # a workflow/auth issue that a retry would not heal.
+            image_bytes: bytes | None = None
+            timeout_exc: Exception | None = None
+            for timeout_attempt in range(RUNPOD_TIMEOUT_RETRY + 1):
+                if timeout_attempt > 0:
+                    # Reroll seed for the timeout retry. Overrides any
+                    # seed-lock — the previous job never produced an
+                    # image, so there is no composition to lock onto.
+                    seed = random.randint(0, 2**32 - 1)
+                    logger.warning(
+                        "runpod timeout retry %d/%d for illustration %s "
+                        "(scene_index=%d, c%d/a%d) — new seed %d",
+                        timeout_attempt,
+                        RUNPOD_TIMEOUT_RETRY,
+                        illustration.id,
+                        illustration.scene_index,
+                        concept_attempt,
+                        prompt_attempt,
+                        seed,
+                    )
+                replacements = {
+                    "POSITIVE_PROMPT": prompts.positive,
+                    "NEGATIVE_PROMPT": prompts.negative,
+                    "CHARACTER_LORA": char_lora,
+                    "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
+                    "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
+                    "SEED": seed,
+                }
+                workflow, _ = replace_placeholders(workflow_template_to_use, replacements)
+                try:
+                    image_bytes = await runpod.run_workflow(workflow)
+                    timeout_exc = None
+                    break
+                except RunPodTimeoutError as e:
+                    timeout_exc = e
+                    continue
+                except Exception as e:
+                    logger.error("runpod.run_workflow failed: %s", e)
+                    await transition(
+                        IllustrationState.FAILED,
+                        error_message=f"Image rendering failed: {e}",
+                        error_code=ERROR_CODE_RENDER_FAILED,
+                    )
+                    return
+
+            if image_bytes is None:
+                logger.error(
+                    "runpod.run_workflow timed out after %d retries: %s",
+                    RUNPOD_TIMEOUT_RETRY,
+                    timeout_exc,
+                )
                 await transition(
                     IllustrationState.FAILED,
-                    error_message=f"Image rendering failed: {e}",
+                    error_message=f"Image rendering failed: {timeout_exc}",
+                    error_code=ERROR_CODE_RENDER_TIMEOUT,
                 )
                 return
 

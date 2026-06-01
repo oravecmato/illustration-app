@@ -29,6 +29,7 @@ from app.constants import (
     MANUAL_WELCOME,
     MANUAL_WELCOME_REGENERATE,
     MAX_MANUAL_ATTEMPTS,
+    RUNPOD_TIMEOUT_RETRY,
 )
 from app.db.models import (
     Illustration,
@@ -41,7 +42,7 @@ from app.orchestrator.events import EventBus
 from app.schemas.claude import StyleGuide, _normalize_entity_label
 from app.services.claude import ClaudeClient, ClaudeError
 from app.services.images import copy_image, save_manual_image
-from app.services.runpod import RunPodClient
+from app.services.runpod import RunPodClient, RunPodTimeoutError
 from app.services.workflow import replace_placeholders
 
 logger = logging.getLogger(__name__)
@@ -820,20 +821,55 @@ class ManualService:
             if character_role
             else ""
         )
-        replacements = {
-            "POSITIVE_PROMPT": positive,
-            "NEGATIVE_PROMPT": negative,
-            "CHARACTER_LORA": char_lora,
-            "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
-            "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
-            "SEED": random.randint(0, 2**32 - 1),
-        }
-        workflow, _ = replace_placeholders(workflow_template, replacements)
 
-        try:
-            image_bytes = await self.runpod.run_workflow(workflow)
-        except Exception as e:
-            logger.error("manual runpod.run_workflow failed: %s", e)
+        def _build_workflow(s: int) -> dict:
+            replacements = {
+                "POSITIVE_PROMPT": positive,
+                "NEGATIVE_PROMPT": negative,
+                "CHARACTER_LORA": char_lora,
+                "STYLE_POSITIVE_PROMPT": style_guide.overall_style_positive,
+                "STYLE_NEGATIVE_PROMPT": style_guide.overall_style_negative,
+                "SEED": s,
+            }
+            wf, _ = replace_placeholders(workflow_template, replacements)
+            return wf
+
+        # Retry-on-timeout (parity with the auto-pipeline branch). A
+        # RunPod timeout is GPU-pool infrastructure noise — the workflow
+        # is fine. Retry up to ``RUNPOD_TIMEOUT_RETRY`` times with a
+        # fresh seed before surfacing the failure to the user as a
+        # manual-flow failure. The manual_attempt counter has already
+        # been bumped above (in ``new_attempts``); we deliberately do
+        # NOT bump it again for timeout retries.
+        image_bytes: bytes | None = None
+        last_exc: Exception | None = None
+        for timeout_attempt in range(RUNPOD_TIMEOUT_RETRY + 1):
+            seed = random.randint(0, 2**32 - 1)
+            if timeout_attempt > 0:
+                logger.warning(
+                    "manual runpod timeout retry %d/%d for illustration %s "
+                    "(scene_index=%d) — new seed %d",
+                    timeout_attempt,
+                    RUNPOD_TIMEOUT_RETRY,
+                    illustration.id,
+                    illustration.scene_index,
+                    seed,
+                )
+            workflow = _build_workflow(seed)
+            try:
+                image_bytes = await self.runpod.run_workflow(workflow)
+                last_exc = None
+                break
+            except RunPodTimeoutError as e:
+                last_exc = e
+                continue
+            except Exception as e:
+                last_exc = e
+                break
+
+        if image_bytes is None:
+            assert last_exc is not None
+            logger.error("manual runpod.run_workflow failed: %s", last_exc)
             # On RunPod failure: reset sub_phase to concept_design (auto loop
             # parity — the user gets to redesign the concept). § 6A.4 step 3.10.
             ms = await self.manual_repo.get_manual_session(illustration.id)
@@ -848,9 +884,9 @@ class ManualService:
                 await self._exhaust(illustration)
             raise ManualServiceError(
                 "MANUAL_RENDER_FAILED",
-                f"Image rendering failed: {e}",
+                f"Image rendering failed: {last_exc}",
                 502,
-            ) from e
+            ) from last_exc
 
         manual_path = await save_manual_image(
             image_bytes,

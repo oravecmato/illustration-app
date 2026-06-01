@@ -11,7 +11,21 @@ CLAUDE_JSON_RETRY = 2
 # rules). Each retry passes the validator's plain-English feedback back
 # to the agent so it can correct course. Total attempts = 1 + retry.
 BUILD_STORY_VALIDATOR_RETRY = 2
+# Number of additional render attempts after the first hits a RunPod
+# timeout (``RunPodTimeoutError``). A fresh seed is used for each retry
+# so the GPU pool gets a different prompt-hash on the second try. The
+# concept/prompt attempt counters are NOT incremented across the retry —
+# a timeout is infrastructure noise, not a prompt-engineering signal.
+# Other ``RunPodError`` failures (FAILED/CANCELLED job status, malformed
+# response) still fail immediately without retry.
+RUNPOD_TIMEOUT_RETRY = 1
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+# Error-code strings persisted on ``Illustration.error_code`` so
+# diagnostics can distinguish infrastructure failures from
+# prompt-engineering exhaustions.
+ERROR_CODE_RENDER_TIMEOUT = "RENDER_TIMEOUT"
+ERROR_CODE_RENDER_FAILED = "RENDER_FAILED"
 
 # Supported UI and story languages (§ 9.6, § 10)
 SUPPORTED_LANGUAGES = ("sk", "cs", "en")

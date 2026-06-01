@@ -165,6 +165,12 @@ class Illustration(Base):
     environment_label: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     environment_aspect: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Structured error category, parallel to ``error_message``. Populated when
+    # ``state == FAILED`` so diagnostics can distinguish infrastructure
+    # failures (e.g. ``RENDER_TIMEOUT`` — GPU pool stalled, not a prompt
+    # problem) from prompt-engineering exhaustions. Nullable: legacy rows
+    # and successful illustrations leave it ``None``.
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     manual_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     manual_state_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Auto-pipeline prompting notes — empirical renderer lessons curated by
