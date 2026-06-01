@@ -43,6 +43,14 @@ ENV PATH=/opt/venv/bin:$PATH \
     DATABASE_URL=sqlite+aiosqlite:////data/app.db \
     OUTPUT_DIR=/data/output
 
+# Apply OS-level security patches at build time. python:3.11-slim is rebuilt
+# infrequently, so without this Trivy flags HIGH/CRITICAL CVEs that already
+# have a fix in Debian's security archive but haven't landed in the base.
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user with home at /app.
 RUN groupadd --system app \
  && useradd  --system --gid app --home-dir /app --shell /usr/sbin/nologin app

@@ -56,9 +56,13 @@ jobs:
           pip install pip-audit
       - name: Audit installed env (fails on any known CVE)
         # --skip-editable so pip-audit doesn't try to look up our own
-        # editable-installed package on PyPI (it's not published). Without
-        # this, --strict would treat the skip as a failure.
-        run: pip-audit --strict --skip-editable
+        # editable-installed package on PyPI (it's not published).
+        # --strict is intentionally NOT used: under strict mode the
+        # editable-skipped distribution is reported as a fatal error,
+        # which directly contradicts --skip-editable. Without --strict
+        # pip-audit still exits non-zero on any actual CVE found in a
+        # PyPI-resolvable dependency, which is the behaviour we want.
+        run: pip-audit --skip-editable
 
   # ── 3. npm dependency vulnerabilities ────────────────────────────────────
   npm-audit:
