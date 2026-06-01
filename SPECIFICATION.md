@@ -3464,12 +3464,21 @@ rules from "guidance" to "contract".
   positions 1–4 of `positive` MUST be
   `<character trigger>, <count tag>, solo, <hair/outfit anchor>`.
   Re-prompted with a targeted error pointing at the offending head.
-- **Entity-in-negative validator (Phase 1 fix B6).** Rejects
+- **Entity-in-negative validator (Phase 1 fixes B6 + B17).** Rejects
   Call 1 / Call 3 responses whose `negative` prompt contains a tag
-  with an anchor token derived from `contains_entity.label`. On
-  failure the error message enumerates the specific offending tags
-  so the retry agent can self-correct in one pass rather than
-  guessing.
+  with an anchor token derived from `contains_entity.label`, with
+  two narrow whitelists:
+  - *Duplicate / count suppressors* — entries carrying a digit, a
+    glued count form (`2cats`), or a count modifier (`two`,
+    `three`, `multiple`, `duplicate`, `extra`) are allowed.
+  - *Contradictory-attribute suppressors* — entries carrying a
+    colour token that is NOT in the entity's description are
+    allowed (e.g. `black cat` when the entity is a grey cat).
+    Suppressing the entity's *own* colour remains forbidden.
+
+  The error message enumerates the specific offending tags AND the
+  rule each one breaks, so the retry agent can self-correct in one
+  pass rather than guessing.
 
 #### 7.1.Y Illustrious / Danbooru reference doc (cached system-prompt fragment)
 
