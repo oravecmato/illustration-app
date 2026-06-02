@@ -126,8 +126,7 @@ on every per-image rewrite that follows:
 No specific package versions are pinned in this spec; use current stable
 releases at the time of implementation.
 
-All code, identifiers, and code comments are in **English**. UI text
-displayed to the end user is **multilingual** — Slovak (`sk`), Czech
+UI text displayed to the end user is **multilingual** — Slovak (`sk`), Czech
 (`cs`), and English (`en`) are first-class languages and all
 non-AI-generated UI strings exist as keyed messages in
 `frontend/src/i18n/locales/{sk,cs,en}.ts`. The chosen language is
@@ -709,6 +708,39 @@ silently updates in place once Agent 5 returns.
 
 These indexes serve the dominant access pattern: "give me everything
 needed to render run X in language L".
+
+### 5.6 Access keys (demo gating)
+
+The app is deployed as a private demo. Every endpoint that triggers
+paid third-party traffic (Anthropic, RunPod) MUST require a valid
+access key on the request; cheap GET / SSE endpoints stay open so
+existing links keep resolving without the key being baked into URLs.
+The full policy, threat model, dependency surface, CLI, refund rules,
+and frontend integration live in § 8.11; this subsection is the
+data-model anchor for that work.
+
+#### `access_keys`
+
+| Column          | Type          | Nullable | Notes |
+|-----------------|---------------|----------|-------|
+| `key`           | `String(32)`  | NO       | Primary key. URL-safe random (`secrets.token_urlsafe(24)` truncated/padded to 32). Never logged. |
+| `label`         | `String`      | NO       | Human-readable description set by the admin (e.g. `"Alice"`, `"admin-martin"`). Never returned to the frontend. |
+| `runs_allowed`  | `Integer`     | YES      | Maximum *finalized* runs this key may consume. `NULL` = unlimited (admin / dev). |
+| `runs_used`     | `Integer`     | NO       | Default `0`. Bumped atomically at the consume point (§ 8.11.3). Decremented on infrastructure refund (§ 8.11.4). |
+| `created_at`    | `DateTime`    | NO       | Server default `func.now()`. |
+| `last_used_at`  | `DateTime`    | YES      | Updated by `require_access_key` on every authenticated request. |
+| `revoked_at`    | `DateTime`    | YES      | Soft-revoke. Once set, the key is rejected as if it did not exist. |
+
+#### New columns on `runs`
+
+| Column          | Type          | Nullable | Notes |
+|-----------------|---------------|----------|-------|
+| `access_key`    | `String(32)`  | YES      | The key that consumed the quota slot for this run, with `ON DELETE SET NULL` against `access_keys.key`. NULL only on legacy rows created before the gating migration. |
+| `quota_refunded` | `Boolean`    | NO       | Default `False`. Flipped to `True` exactly once when § 8.11.4 credits the slot back. Guards the refund against double-decrement under concurrent reap / orchestrator races. |
+
+The Alembic migration adds the table and the two columns. Pre-gating
+runs are left with `access_key=NULL` and `quota_refunded=False`; they
+never participate in quota arithmetic.
 
 ---
 
@@ -5493,6 +5525,345 @@ do **not** trigger a run-level failure — the run completes as
 `COMPLETED` with a non-zero `failed_count`. Only unhandled exceptions
 take down the whole run.
 
+### 8.11 Access gating (demo) — backend
+
+#### 8.11.1 Threat model and design choices
+
+In scope:
+- Strangers running expensive pipelines on the developer's budget
+  (the dominant cost risk — one finalize can mean dozens of
+  Anthropic calls plus 5+ RunPod jobs).
+- Invited users running more finalized runs than their grant allows.
+- Invited users spending arbitrary Anthropic tokens by spamming the
+  pre-finalize chat (Agent 0a per message).
+- Invited users iterating the manual fallback (§ 6A) indefinitely
+  on a single illustration. The existing `MAX_MANUAL_ATTEMPTS = 5`
+  cap already bounds this from above per run, so no per-key
+  arithmetic is needed for the manual path beyond requiring the
+  key.
+
+Out of scope (deliberately, to keep the surface minimal):
+- Real user identity, OAuth, magic links, email verification.
+- Per-user history / saved runs (sessions and runs already scope
+  data to their own ids).
+- Per-IP rate limiting. The single-machine deploy is small enough
+  that per-key caps suffice. Can be layered later behind the same
+  dependency without schema changes.
+
+Design:
+- Opaque, random, URL-safe 32-character keys minted by the admin
+  via a CLI (§ 8.11.5). No web UI to mint or list keys.
+- Sent on every paid endpoint as the `X-Access-Key` header.
+- Persisted by the frontend in `localStorage`. The bootstrap path
+  is a single shareable URL with `?invite=<key>` (§ 8.11.6).
+- Per-key quota counted in *finalized runs* — the single point
+  where the expensive pipeline actually begins. Quota is consumed
+  via a conditional `UPDATE` so two concurrent finalize attempts
+  cannot over-spend.
+- Admin keys carry `runs_allowed IS NULL` and bypass the quota
+  check entirely, but still flow through the same dependency. There
+  is no second code path for admin / dev access — local development
+  hits the same database with an admin key just like production.
+- Refund: when a run terminates in `FAILED` purely because of an
+  infrastructure failure the user did not cause (§ 8.11.4), the
+  run's key is credited back exactly one slot.
+
+#### 8.11.2 Dependency surface
+
+A single FastAPI dependency in `backend/app/api/auth.py`:
+
+```python
+async def require_access_key(
+    x_access_key: str | None = Header(default=None, alias="X-Access-Key"),
+    session: AsyncSession = Depends(get_db),
+) -> AccessKey: ...
+```
+
+Behaviour:
+- Missing header → 401 with body `{"error": "missing_access_key", ...}`.
+- Unknown or revoked key → 401 with body `{"error": "invalid_access_key", ...}`.
+- Otherwise updates `last_used_at` and returns the row.
+
+Endpoint coverage:
+
+| Endpoint                                              | `require_access_key` | Quota effect |
+|-------------------------------------------------------|-----------------------|--------------|
+| `POST /api/sessions`                                  | yes                   | gate only (§ 8.11.3) |
+| `POST /api/sessions/{id}/messages`                    | yes                   | atomic consume on `phase="confirmed"` (§ 8.11.3) |
+| `POST /api/illustrations/{id}/manual/messages`        | yes                   | none         |
+| `POST /api/illustrations/{id}/manual/iterate`         | yes                   | none         |
+| `POST /api/illustrations/{id}/regenerate`             | yes                   | none         |
+| `POST /api/illustrations/{id}/accept`                 | yes                   | none         |
+| `POST /api/runs/{run_id}/translations`                | yes                   | none         |
+| `POST /api/runs/{run_id}/cancel`                      | yes                   | none         |
+| `GET /api/sessions/{id}`                              | no                    | none         |
+| `GET /api/runs/{run_id}`                              | no                    | none         |
+| `GET /api/runs/{run_id}/events` (SSE)                 | no                    | none         |
+| `GET /api/illustrations/{id}/manual`                  | no                    | none         |
+| `GET /health`                                         | no                    | none         |
+
+The dependency MUST be installed on every paid endpoint listed above.
+A coverage test (§ 8.11.7) enumerates the FastAPI routing table and
+fails loudly if a paid endpoint lacks the dependency, so adding a new
+paid endpoint without gating it cannot ship green.
+
+#### 8.11.3 Quota consumption point
+
+The legacy spec exposed a separate `POST /sessions/{id}/finalize`
+endpoint; the current implementation triggers finalize transparently
+inside `POST /sessions/{id}/messages` when Agent 0a returns
+`phase="confirmed"` (see § 8.2). The quota consume MUST happen in the
+same handler, after Agent 0a returns `phase="confirmed"` and before
+the orchestrator background task is scheduled.
+
+Two-step gate inside the messages handler:
+
+1. **Pre-consume guard** at session creation (`POST /api/sessions`):
+   if `runs_allowed IS NOT NULL AND runs_used >= runs_allowed`, refuse
+   the creation with 403 `{"error": "quota_exhausted", "runs_allowed",
+   "runs_used"}`. Prevents wasting Agent 0a tokens on a session that
+   can never finalize. Admin keys (`runs_allowed IS NULL`) skip this
+   check. Does not consume yet.
+2. **Atomic consume** at confirm time:
+   ```python
+   result = await session.execute(
+       update(AccessKey)
+       .where(AccessKey.key == key.key)
+       .where(or_(AccessKey.runs_allowed.is_(None),
+                  AccessKey.runs_used < AccessKey.runs_allowed))
+       .values(runs_used=AccessKey.runs_used + 1)
+   )
+   if result.rowcount == 0:
+       # Race: someone else just consumed the last slot. Transition
+       # the session to FAILED + error_code="QUOTA_EXHAUSTED",
+       # return 200 with the session response so the frontend can
+       # render the quota-exhausted view in-place. No run is created.
+       ...
+   else:
+       run_id = uuid4()
+       # populate runs.access_key = key.key when the row is created.
+       ...
+   ```
+
+After consume, the orchestrator owns the refund decision. If Agent 0b
+itself fails (`STORY_BUILD_FAILED`) before the run row is even
+inserted, the handler MUST refund synchronously in the same
+transaction — the user did nothing wrong, the demo budget should not
+punish them for our infra. Agent 0b's failure path therefore branches
+on whether the `runs` row exists yet: pre-run failure refunds inline
+via a `runs_used -= 1` `UPDATE`; post-run failure leaves the refund
+to § 8.11.4.
+
+#### 8.11.4 Quota refund on infrastructure failure
+
+A run's slot is credited back to its `access_key` exactly once, via
+an idempotent helper called from both the orchestrator finalizer and
+the orphan-reap path. The helper:
+
+```python
+# Guard the decrement on the run row's quota_refunded flag so
+# concurrent callers (e.g. orchestrator failure mid-restart raced
+# with the next deploy's reap) collapse to a single refund.
+guarded = await session.execute(
+    update(Run)
+    .where(Run.id == run.id)
+    .where(Run.quota_refunded.is_(False))
+    .where(Run.access_key.is_not(None))
+    .values(quota_refunded=True)
+)
+if guarded.rowcount == 0:
+    return
+await session.execute(
+    update(AccessKey)
+    .where(AccessKey.key == run.access_key)
+    .values(runs_used=func.max(AccessKey.runs_used - 1, 0))
+)
+```
+
+Refund triggers:
+
+1. The orchestrator transitions the run to `status=FAILED` AND at
+   least one illustration's terminal `error_code` is in
+   `{RENDER_TIMEOUT, OOM_REAPED, INTERNAL_ERROR}`. The orchestrator
+   finalizer inspects the illustration set after the gather()
+   completes and calls the refund helper before emitting `run_failed`.
+2. `_reap_orphan_runs()` (§ Deployment, `app/main.py`) marks the run
+   `FAILED` on startup because the previous uvicorn process died
+   mid-pipeline. The reap path stamps every reaped non-terminal
+   illustration with `error_code="OOM_REAPED"` so the refund decision
+   above fires symmetrically with the in-process path.
+
+Refund does NOT apply when:
+- The run completes successfully (even if some illustrations entered
+  manual fallback — manual user effort is paid-for value delivered).
+- The user cancels the run (`POST /runs/{id}/cancel`). The cancellation
+  occurred mid-flight after the user got partial value out of the
+  spend; punishing accidental cancels is acceptable for demo scope.
+- The session was rejected before the run row was created
+  (`STORY_BUILD_FAILED`, `QUOTA_EXHAUSTED` race): already refunded
+  inline in the messages handler (§ 8.11.3), no second refund.
+
+A new error-code constant `ERROR_CODE_OOM_REAPED = "OOM_REAPED"` is
+added to `app/constants.py` and to the `illustrations.error_code`
+enum-by-convention listed in § 8.6.
+
+#### 8.11.5 Admin CLI and Make targets
+
+`backend/app/cli/grant.py` — an argparse script invoked via
+`python -m app.cli.grant`. Arguments:
+
+| Flag             | Meaning                                                          |
+|------------------|------------------------------------------------------------------|
+| `--label TEXT`   | Required. Human-readable description of who the invite is for.    |
+| `--max N`        | Sets `runs_allowed = N`. Mutually exclusive with `--unlimited`.   |
+| `--unlimited`    | Sets `runs_allowed = NULL` (admin / dev key).                    |
+| `--frontend-url` | Optional. Defaults to `FRONTEND_PUBLIC_URL` env var if set,       |
+|                  | otherwise prints the bare key without an invite URL.              |
+
+On success, prints exactly:
+
+```
+key:    <32-char key>
+label:  <label>
+limit:  3                       (or "unlimited")
+invite: https://<frontend>/?invite=<key>   (if frontend URL known)
+```
+
+Sibling subcommands:
+
+- `python -m app.cli.grant revoke --key <key>` — sets `revoked_at = NOW()`.
+- `python -m app.cli.grant list` — prints a table of every key:
+  `label | first4…last4 | used / allowed | revoked? | last_used_at`.
+  Never prints the full key.
+
+Make targets in `backend/Makefile`:
+
+```
+make grant LABEL="Alice" MAX=3
+make grant-admin LABEL="martin"
+make revoke KEY=<key>
+make list-keys
+```
+
+Each target shells out to `flyctl ssh console -a $(FLY_APP) -C
+"python -m app.cli.grant ..."` when invoked against production, and
+runs the script directly against the local SQLite when `FLY_APP` is
+unset. The local dev path mints keys against `data/app.db` and is
+used by the developer's own admin key plus integration tests.
+
+Keys are never logged by the application — only the `grant` subcommand
+writes the bare key to stdout, and only at mint time. `list` always
+truncates.
+
+#### 8.11.6 Frontend integration
+
+A single `AccessGate.vue` component mounts at the top of `App.vue` and
+owns three view states:
+
+- `ready` — `localStorage.accessKey` is set; the slot renders normally.
+- `invite_required` — no key in storage, OR an API call returned 401.
+  Shows a static, non-interactive view (no input field — users either
+  have the invite link or they do not) with the i18n string
+  `access.invite_required.*`.
+- `quota_exhausted` — an API call returned 403 with
+  `error="quota_exhausted"`. Shows `access.quota_exhausted.*` with
+  `{used}` / `{allowed}` interpolated.
+
+Bootstrap: on first mount, if `window.location.search` contains
+`invite=<key>`, the key is stored to `localStorage`, the URL is
+rewritten via `history.replaceState` to drop the query string, and
+the component transitions to `ready`.
+
+The API client (`frontend/src/api.ts`) attaches `X-Access-Key:
+<localStorage.accessKey>` to every paid request automatically. On 401
+the interceptor clears `localStorage.accessKey` and emits a global
+`invite-needed` event the AccessGate listens on. On 403 the
+interceptor emits a `quota-exhausted` event with the response body
+attached.
+
+i18n strings (added to `sk.json`, `cs.json`, `en.json` under the
+`access` namespace):
+
+| Key                              | Purpose |
+|----------------------------------|---------|
+| `access.invite_required.title`   | "Pozvanie potrebné" / "Pozvánka potřebná" / "Invitation required" |
+| `access.invite_required.body`    | Short explanatory paragraph + contact hint. |
+| `access.quota_exhausted.title`   | "Vyčerpaný limit" / "Vyčerpaný limit" / "Demo limit reached" |
+| `access.quota_exhausted.body`    | "{used} / {allowed} generácií / generací / generations." |
+| `access.session_message_cap`     | "Tento chat má limit 20 správ." / "Tento chat má limit 20 zpráv." / "This chat is limited to 20 messages." |
+
+#### 8.11.7 Tests
+
+`backend/tests/unit/test_access.py`:
+- `require_access_key` rejects missing / unknown / revoked keys with
+  401 and the documented error bodies.
+- `consume_run_quota` decrements once when `runs_used < runs_allowed`.
+- `consume_run_quota` rejects with `rowcount == 0` when
+  `runs_used == runs_allowed`; the caller maps this to 403.
+- Admin keys (`runs_allowed IS NULL`) always succeed; the consume
+  still increments `runs_used` for audit but never gates.
+- Atomic concurrency: 10 parallel consume attempts against a quota
+  of 3 result in exactly 3 successes and 7 failures.
+- `refund_run_quota` is idempotent: second call on the same run is a
+  no-op and leaves `quota_refunded = True`.
+- `refund_run_quota` never drops `runs_used` below zero
+  (`max(runs_used - 1, 0)` clamp).
+
+`backend/tests/unit/test_endpoint_coverage.py`:
+- Iterates `app.router.routes`; for every `(method, path)` in
+  `PAID_ENDPOINTS` (declared in `app/constants.py`), asserts that
+  `require_access_key` is present somewhere in the dependant graph.
+
+`backend/tests/integration/test_access_flow.py`:
+- Anonymous `POST /api/sessions` → 401.
+- Valid key + `POST /api/sessions` → 200; `runs_used` unchanged.
+- Valid key with `runs_used == runs_allowed` + `POST /api/sessions`
+  → 403; no session is created.
+- Full chat → confirm flow decrements `runs_used` exactly once when
+  Agent 0a returns `phase="confirmed"`.
+- Forced `STORY_BUILD_FAILED` immediately after confirm refunds the
+  slot inline; the same key can finalize again.
+- Forced `RENDER_TIMEOUT` on every illustration of a finalized run
+  flips `runs.quota_refunded=True` and decrements `runs_used` by
+  exactly 1; re-running the refund helper is a no-op.
+- Cancelling an in-flight run does NOT refund.
+- 21st `POST /sessions/{id}/messages` user turn in the same session
+  returns 429 `{"error": "session_message_cap"}` and dispatches zero
+  Agent 0a calls.
+
+`backend/tests/unit/test_cli_grant.py`:
+- `grant --label X --max 3` writes a row with the supplied label /
+  limit and prints the bare key matching the column value.
+- `--unlimited` sets `runs_allowed = NULL`.
+- `--max` and `--unlimited` together exit non-zero.
+- `revoke` flips `revoked_at`.
+- `list` truncates keys to `first4…last4`.
+
+`frontend/src/components/__tests__/AccessGate.test.ts`:
+- Renders the children slot when `localStorage.accessKey` is set.
+- Renders the invite-required view when the API has just returned 401
+  (driven by a synthetic `invite-needed` event).
+- Captures `?invite=<key>` on mount, persists it, rewrites the URL
+  via `history.replaceState`, and transitions to `ready`.
+
+`frontend/src/api/__tests__/interceptor.test.ts`:
+- Every paid request carries `X-Access-Key` when `localStorage` is
+  populated.
+- 401 responses clear `localStorage.accessKey` and emit the
+  `invite-needed` event.
+- 403 responses with `error="quota_exhausted"` emit the
+  `quota-exhausted` event with the body payload attached.
+
+#### 8.11.8 Non-goals for this slice
+
+- No email verification, magic links, or OAuth.
+- No web UI for minting / listing / revoking keys (CLI only).
+- No per-IP rate limiting in the first slice.
+- No per-key rate-limit window (e.g. 3 runs / week). `runs_allowed`
+  is a lifetime budget; the admin manually revokes + re-grants to
+  reset.
+- No multi-tenant usage reports beyond `runs_used / runs_allowed`.
+
 ---
 
 ## 9. Frontend
@@ -6664,6 +7035,9 @@ Defined in `backend/app/constants.py`:
 | `ERROR_CODE_RENDER_FAILED`        | `"RENDER_FAILED"`  | String persisted on `illustrations.error_code` when RunPod returns a non-timeout error (§ 7.2.4, § 8.6). |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
+| `SESSION_USER_MESSAGES_MAX`       | 20    | Hard cap on *user-authored* messages per session (separate from `CHAT_MESSAGES_MAX_PER_SESSION` which counts both sides). Cost guardrail for the demo deployment: every user turn triggers exactly one Agent 0a call, so capping user messages caps paid token spend per session deterministically. Enforced in `services/session.py::post_message` before the Anthropic call is made; exceeding it returns HTTP 429 with body `{"error_code": "SESSION_USER_MESSAGE_LIMIT"}` and does NOT consume access-key quota. |
+| `ERROR_CODE_OOM_REAPED`           | `"OOM_REAPED"` | String persisted on `illustrations.error_code` (and surfaced on the snapshot) when `_reap_orphan_runs` (§ 8.11.4) sweeps a RUNNING run that was abandoned by an uvicorn restart. Drives the same access-key quota refund path as `RENDER_TIMEOUT` / `INTERNAL_ERROR`. |
+| `PAID_ENDPOINTS`                  | (tuple of route IDs) | Canonical list of HTTP routes that MUST mount the `require_access_key` FastAPI dependency (§ 8.11.2). Any call from this list reaches Anthropic or RunPod and therefore costs real money. Enumerated in `app/api/auth.py` and asserted at import time by `tests/unit/test_paid_endpoints_guarded.py` against `app.router.routes` so a new paid endpoint cannot be merged without a guard. Members: `POST /api/sessions`, `POST /api/sessions/{id}/messages`, `POST /api/runs/{id}/translations`, `POST /api/runs/{id}/cancel`, `POST /api/illustrations/{id}/manual`, `POST /api/illustrations/{id}/manual/accept`, `POST /api/illustrations/{id}/manual/iterate`, `POST /api/illustrations/{id}/manual/regenerate`. |
 | `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 9 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, rethink_environment, translate, manual_concept, manual_revise_prompts, salvage_review) |
 | `SUPPORTED_LANGUAGES`             | `("sk", "cs", "en")` | Tuple of UI / story languages the backend accepts (§ 9.6). The chat agent emits one of these or `"other"`; the build_story, translate, and run APIs all validate against this tuple. |
 | `CONFIRMED_ACK`                   | `Mapping[str, str]` (see below) | Per-language canonical `reply` returned by Agent 0a on `phase="confirmed"`; the chat service looks up `CONFIRMED_ACK[detected_language]` and overwrites any other prose Claude returned. |
@@ -8018,3 +8392,52 @@ The MVP is considered complete when:
     `translations_refreshed` SSE event when the first tab triggers
     a refresh and patches its own view in place if it is currently
     viewing the same language.
+18. **Access gating end-to-end (§ 8.11).** With the access-keys
+    table empty, a fresh visit to `/` shows `AccessGate.vue` and
+    every `PAID_ENDPOINTS` call rejected with HTTP 401
+    `{"error_code": "MISSING_ACCESS_KEY"}`. Granting a key with
+    `make grant runs=2` and pasting it into the gate (or following
+    an `?invite=<key>` URL) persists it to `localStorage`,
+    dismisses the gate, and the next `POST /api/sessions` succeeds.
+    The first finalized session decrements `runs_used` from 0 to
+    1; the second from 1 to 2; the third returns HTTP 402
+    `{"error_code": "QUOTA_EXHAUSTED"}` *before* any Anthropic
+    call is made and the gate re-renders with the
+    `access.quota_exhausted` i18n string. A revoked key
+    (`make revoke key=<k>`) returns HTTP 403
+    `{"error_code": "ACCESS_KEY_REVOKED"}` and clears
+    `localStorage`. Admin keys (created via `make grant-admin`,
+    persisted with `runs_allowed=NULL`) pass through without ever
+    decrementing or rejecting on quota. The `PAID_ENDPOINTS`
+    coverage test (§ 8.11.7) refuses to pass if any of the
+    enumerated routes is missing the `require_access_key`
+    dependency.
+19. **Quota refund on infrastructure failure (§ 8.11.4).** A run
+    that consumes a quota slot and then terminates with every
+    illustration in `{RENDER_TIMEOUT, OOM_REAPED}` (or the parent
+    run in `INTERNAL_ERROR` before the orchestrator finishes
+    dispatching) flips `runs.quota_refunded` from `False` to
+    `True` exactly once and decrements `access_keys.runs_used` by
+    1, clamped at 0 (`func.max(runs_used - 1, 0)`). A run that
+    terminates with at least one `COMPLETED` illustration, or with
+    a `FAILED` outcome attributable to prompt-engineering
+    exhaustion (no infra error code), leaves the slot consumed.
+    Concurrent calls to the refund path (orchestrator failure
+    handler racing `_reap_orphan_runs`) MUST flip the flag at most
+    once — verified by an integration test that fires both paths
+    in parallel and asserts `runs_used` decreased by exactly 1.
+    Admin keys (`runs_allowed IS NULL`) skip the decrement but
+    still flip `quota_refunded=True` so the idempotency invariant
+    holds uniformly.
+20. **Per-session user-message cap.** With `SESSION_USER_MESSAGES_MAX=20`,
+    sending 20 user messages to one session succeeds; the 21st
+    returns HTTP 429
+    `{"error_code": "SESSION_USER_MESSAGE_LIMIT"}` *before* any
+    Anthropic call is made, does NOT consume access-key quota,
+    and the chat composer shows the i18n-resolved
+    `chat.user_message_limit` banner with a "Start a new session"
+    affordance. Assistant messages do not count toward the cap
+    (verified by a session that receives 20 user turns + ≥ 20
+    assistant turns still rejecting only at user turn 21). The
+    cap is independent of `CHAT_MESSAGES_MAX_PER_SESSION = 60`:
+    whichever limit is hit first takes precedence.
