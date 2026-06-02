@@ -44,6 +44,10 @@ primary_region = "fra"
 
 [[vm]]
   size      = "shared-cpu-1x"
-  memory    = "256mb"  # bump to 512mb if Anthropic streams trigger OOM
+  # 5 concurrent orchestrator branches each hold PNG bytes + an aioboto3 R2
+  # client + Claude streaming buffers; 256mb OOMed mid-pipeline. 1gb gives
+  # comfortable headroom for the largest peak observed (~150MB RSS at OOM
+  # time + buffer for spikes).
+  memory    = "1gb"
   cpu_kind  = "shared"
   cpus      = 1
