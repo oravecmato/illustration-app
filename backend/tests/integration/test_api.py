@@ -266,15 +266,7 @@ def _install_anthropic_router(chat_responses: list[dict], build_story_response: 
                     {
                         "workflow": "single-lora",
                         "positive": "1girl, jirou kyouka, school uniform, determined, indoors",
-                        "negative": (
-                            "nsfw, suggestive, revealing clothing, lingerie, nudity, "
-                            "cleavage, underwear, sexualized, bad anatomy, extra fingers, "
-                            "missing fingers, fused fingers, malformed hands, extra limbs, "
-                            "distorted face, asymmetric eyes, low quality, blurry, watermark, "
-                            "signature, text, jpeg artifacts, multiple characters, crowd, "
-                            "two girls, two boys, 2girls, 2boys, group, ear jacks, "
-                            "earphone jack, headphone jack, jack plug, mechanical ears"
-                        ),
+                        "negative": "nsfw, bad anatomy, multiple characters",
                     }
                 ),
             )
