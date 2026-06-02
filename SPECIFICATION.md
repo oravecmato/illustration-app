@@ -404,6 +404,10 @@ change:
 - `04f7093dac00` — `illustrations.error_code TEXT NULL` (separates
   RunPod render failures from prompt-engineering exhaustion; see
   § 7.2.4 + § 8.6).
+- `d2f2b33d6c8d` — `illustrations.runpod_job_id TEXT NULL`
+  (persists the in-flight RunPod job id so the startup orphan
+  resumer can re-attach after a uvicorn restart instead of losing
+  FIFO position; see § 5 illustrations table + § 8.8.1).
 
 **Tests**
 
@@ -513,7 +517,8 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `environment_label`      | TEXT NULL    | Denormalised label of this slot's environment (the source of truth is `runs.environments_json[scene_index]`). Cached on the illustration row so the orchestrator can hand Agent 1 / 3 / 4 the environment constraint without joining. **Mutable only by Agent 4b** when it swaps the slot's environment. Nullable only for legacy pre-Alembic rows. |
 | `environment_aspect`     | TEXT NULL    | Denormalised aspect for this slot: `single`, `inside`, or `outside`. Same mutation rules as `environment_label`. Nullable only for legacy pre-Alembic rows. |
 | `prompting_notes`        | TEXT NULL    | Cumulative **English-only** prompt-engineering memo for this illustration. Two writers: (a) Agent 6 in the § 6A manual flow (sourced from `manual_illustration_sessions.prompting_notes` and copied across on success); (b) Agent 3 in the auto pipeline via its optional `prompting_notes_update` output (§ 7.1 Call 3). Read by Agent 1 on the *next* concept dispatch and by Agent 3 on every revision. **Wiped to NULL by Agent 4b** when the slot's environment is swapped (renderer lessons learned against the previous env may not transfer). Migration `fc05c0c3da51`. |
-| `error_code`             | TEXT NULL    | Per-illustration diagnostic tag separating *infrastructure* failures from *prompt-engineering* exhaustion on the terminal `FAILED` state. Populated alongside `error_message` whenever the branch falls to `FAILED` because of a render-side fault. Defined values: `RENDER_TIMEOUT` (RunPod 600 s poll exhausted or remote `TIMED_OUT` after `RUNPOD_TIMEOUT_RETRY` retries with fresh seeds; § 7.2.4); `RENDER_FAILED` (RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`; not retried). NULL when the branch failed for other reasons (e.g. concept/prompt budget exhaustion with no salvage + no manual recovery) — those are reported via `runs.error_code` instead (§ 8.6). Honoured by both auto and manual paths. Migration `04f7093dac00`. |
+| `error_code`             | TEXT NULL    | Per-illustration diagnostic tag separating *infrastructure* failures from *prompt-engineering* exhaustion on the terminal `FAILED` state. Populated alongside `error_message` whenever the branch falls to `FAILED` because of a render-side fault. Defined values: `RENDER_TIMEOUT` (RunPod worker stalled in `IN_PROGRESS` past the per-state budget, or remote returned `TIMED_OUT`, on every retry; § 7.2.4); `RENDER_QUEUE_TIMEOUT` (job stayed in `IN_QUEUE` past the queue budget — capacity exhaustion, not retried; § 7.2.4); `RENDER_FAILED` (RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`; not retried); `OOM_REAPED` (startup resumer classified the slot as unrecoverable, § 8.8.1). NULL when the branch failed for other reasons (e.g. concept/prompt budget exhaustion with no salvage + no manual recovery) — those are reported via `runs.error_code` instead (§ 8.6). Honoured by both auto and manual paths. Migration `04f7093dac00`. |
+| `runpod_job_id`          | TEXT NULL    | RunPod job id of the currently in-flight (or most recently dispatched) render for this slot. Persisted by the orchestrator and the manual dispatcher BEFORE the poll loop starts — as soon as `POST /run` returns — so a uvicorn restart mid-render can re-attach to the same job via the startup resumer (§ 8.8.1) instead of restarting from scratch (which would lose FIFO queue position and re-burn budget). Cleared on any terminal transition of the slot (`COMPLETED` / `FAILED` / `CANCELLED`) and on every fresh render dispatch (auto retry, concept restart, manual re-dispatch). NULL whenever no render is in flight. Migration `d2f2b33d6c8d`. |
 | `error_message`          | TEXT NULL    | Set on terminal failure                                                   |
 | `created_at`             | DATETIME     |                                                                           |
 | `updated_at`             | DATETIME     |                                                                           |
@@ -948,34 +953,63 @@ dispatch:
    the prompts, character LoRA, style fragments, and the seed. The
    `SEED` placeholder substitutes an integer JSON node (not a string)
    so ComfyUI's KSampler sees a numeric seed.
-3. **Dispatch + classify.** The orchestrator submits the workflow to
-   RunPod and waits up to `COMFYUI_POLL_TIMEOUT_S` (= 600). One of:
-   - **Success** — the image bytes are returned and the render block
-     exits the sub-loop normally.
-   - **`RunPodTimeoutError`** — raised by `services/runpod.py` on
-     either local poll-loop exhaustion or remote status `TIMED_OUT`
-     (§ 7.2.4). Counts as infrastructure noise, not a
-     prompt-engineering signal.
+3. **Dispatch + classify.** The orchestrator submits the workflow
+   to RunPod, persists the returned `job_id` to
+   `illustrations.runpod_job_id` (so a uvicorn restart can re-attach
+   via § 8.8.1 instead of losing FIFO position), and polls. Polling
+   uses **two independent per-state budgets** rather than a single
+   wall-clock cap:
+   - `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S` (= 1800, 30 min): max time the
+     job is allowed to sit in `IN_QUEUE` before the client gives up.
+     The budget is generous because the queue itself is the fair
+     GPU-pool load balancer — re-submitting on queue exhaustion
+     would just lose FIFO position behind every other tenant.
+   - `RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S` (= 600, 10 min): max time
+     a job is allowed to stay in `IN_PROGRESS` once a worker picks
+     it up. Matches the pre-split `COMFYUI_POLL_TIMEOUT_S` budget.
+   The two timers are **independent** — a long IN_QUEUE wait does
+   NOT pre-burn the IN_PROGRESS budget. One of:
+   - **Success** — image bytes returned, exit sub-loop normally.
+   - **`RunPodQueueTimeoutError`** — IN_QUEUE budget exhausted
+     (capacity event). Treated as infra noise but **never retried**:
+     re-submitting forfeits the FIFO slot we already paid for in
+     wait time. Surfaces directly as `FAILED` with
+     `error_code = RENDER_QUEUE_TIMEOUT`.
+   - **`RunPodTimeoutError`** — IN_PROGRESS budget exhausted or
+     remote status `TIMED_OUT`. The worker stalled; a fresh seed on
+     a different worker has a fair chance of succeeding. Retryable.
    - Any other `RunPodError` (`FAILED`, `CANCELLED`, malformed
-     response) — treated as a permanent fault.
-4. **Retry on timeout.** Up to `RUNPOD_TIMEOUT_RETRY` (= 2) additional
-   attempts are made on `RunPodTimeoutError`, each with a *fresh*
-   seed (the seed-lock is not honoured across timeout retries because
-   the prompt-hash collision is the suspected cause). The
-   `concept_attempt` / `prompt_attempt` counters are **NOT** bumped
-   across timeout retries — the branch is still trying to complete
-   the same logical attempt. Each retry writes its own row to
-   `illustration_attempt_history` only if it produces a verdict; pure
-   timeouts that never become verdicts are not history rows.
+     response) — treated as a permanent fault, not retried.
+   Throughout the poll loop, the client invokes a status-change
+   callback whenever the observed status flips (e.g. `IN_QUEUE` →
+   `IN_PROGRESS` → `COMPLETED`); the orchestrator forwards the
+   transition to subscribers via the `illustration_runpod_status`
+   SSE event (§ 8.4) so the IllustrationCard can swap the "rendering"
+   label to "queued on GPU" while the job is parked in IN_QUEUE.
+4. **Retry on IN_PROGRESS timeout.** Up to `RUNPOD_TIMEOUT_RETRY`
+   (= 2) additional attempts are made on `RunPodTimeoutError`, each
+   with a *fresh* seed (the seed-lock is not honoured across timeout
+   retries because the prompt-hash collision is the suspected
+   cause). `RunPodQueueTimeoutError` is NOT retried under any
+   circumstance — see above. The `concept_attempt` /
+   `prompt_attempt` counters are **NOT** bumped across timeout
+   retries — the branch is still trying to complete the same
+   logical attempt. Each retry writes its own row to
+   `illustration_attempt_history` only if it produces a verdict;
+   pure timeouts that never become verdicts are not history rows.
 5. **Terminal classification.** If all `1 + RUNPOD_TIMEOUT_RETRY`
-   attempts time out, the branch transitions directly to `FAILED`
-   with `error_code = RENDER_TIMEOUT` (§ 5 illustrations table,
-   § 8.6 error codes). If RunPod returned a non-timeout error, the
-   branch transitions to `FAILED` with
-   `error_code = RENDER_FAILED` and no retry. Both terminal cases
-   bypass the inner prompt-attempt loop and the salvage / manual
-   recovery flows (those exist to address *prompt-engineering*
-   exhaustion, not GPU-pool flakiness).
+   IN_PROGRESS attempts time out, the branch transitions directly
+   to `FAILED` with `error_code = RENDER_TIMEOUT` (§ 5 illustrations
+   table, § 8.6 error codes). A single IN_QUEUE timeout transitions
+   to `FAILED` with `error_code = RENDER_QUEUE_TIMEOUT` — distinct
+   so refunds and dashboards can attribute capacity events
+   separately from worker-stall events (both share the same refund
+   semantics, § 8.11.4). If RunPod returned a non-timeout error,
+   the branch transitions to `FAILED` with
+   `error_code = RENDER_FAILED` and no retry. All three terminal
+   cases bypass the inner prompt-attempt loop and the salvage /
+   manual recovery flows (those exist to address
+   *prompt-engineering* exhaustion, not GPU-pool flakiness).
 
 The same sub-loop runs inside the § 6A manual dispatcher; the only
 difference is that a timeout exhaustion in the manual flow consumes
@@ -3893,12 +3927,38 @@ go to ComfyUI in English regardless of the run's `source_language`
 1. `POST https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run` with
    `{"input": {"workflow": <substituted JSON>}}` and
    `Authorization: Bearer {RUNPOD_API_KEY}`. Returns `{"id": "<job_id>"}`.
-2. Poll `GET .../status/{job_id}` every `COMFYUI_POLL_INTERVAL_S` seconds
-   until status is one of `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`,
-   or `COMFYUI_POLL_TIMEOUT_S` elapsed.
+   The client invokes the caller-supplied `on_job_id(job_id)` callback
+   **before** the first poll, so the orchestrator can persist the id to
+   `illustrations.runpod_job_id` even if the process dies during the
+   first poll iteration — this is what enables the startup orphan
+   resumer (§ 8.8.1) to re-attach to in-flight jobs after a uvicorn
+   restart.
+2. Poll `GET .../status/{job_id}` every `COMFYUI_POLL_INTERVAL_S`
+   seconds until terminal status, with **independent per-state
+   timeouts**: `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S` (1800 s) caps the
+   IN_QUEUE wait; `RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S` (600 s) caps
+   the IN_PROGRESS wait. Each poll reclassifies the elapsed time
+   into the bucket matching the observed status, so a long queue
+   wait does not consume the in-progress budget (§ 6 render
+   sub-loop). On every status *transition* the client invokes the
+   caller-supplied `on_status_change(status)` callback exactly once
+   per distinct value (including the first observation) so the
+   orchestrator and the manual dispatcher can emit
+   `illustration_runpod_status` SSE events (§ 8.4) in lockstep with
+   the underlying RunPod state.
 3. On `COMPLETED`, extract images from `output.images` (worker-comfyui 5.x
    schema: list of `{filename, type, data}` where `type` is `"base64"` or
    `"s3_url"`). Save the first image to disk.
+
+The same client also exposes two re-attach helpers used exclusively
+by the startup resumer (§ 8.8.1):
+
+- `poll_existing_job(job_id)` — same poll loop as a fresh dispatch
+  but skips the `POST /run` step. Used to resume a job whose poll
+  loop was killed by uvicorn restart.
+- `get_status(job_id)` — single one-shot fetch of the raw status
+  payload; used by the resumer's classification probe so it can
+  branch on the current status without committing to a long poll.
 
 **Image storage:** the decoded PNG bytes are handed to the configured
 image-store backend (§ 8.7) with the logical key
@@ -3912,7 +3972,7 @@ the DB never carries a fully-qualified URL.
 
 #### 7.2.4 Error classification and timeout-retry semantics
 
-`services/runpod.py` raises two distinct exception types so callers
+`services/runpod.py` raises three distinct exception types so callers
 can treat them differently:
 
 - **`RunPodError`** — the base class. Raised on remote status
@@ -3920,16 +3980,24 @@ can treat them differently:
   non-timeout fault. Indicates a *permanent* problem: workflow
   validation error, authentication failure, missing model weights,
   etc. Retrying with the same payload will not heal these.
-- **`RunPodTimeoutError(RunPodError)`** — subclass raised on local
-  poll-loop exhaustion (`COMFYUI_POLL_TIMEOUT_S` = 600 s elapsed
-  with no terminal status from the GPU pool) AND on remote status
-  `TIMED_OUT`. Indicates *infrastructure noise* (queue backlog,
-  worker assigned to a stuck job, transient pool capacity dip) that
-  has a fair chance of resolving on a retry against a different
-  worker.
+- **`RunPodTimeoutError(RunPodError)`** — subclass raised when the
+  job exhausted its per-state IN_PROGRESS budget
+  (`RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S` = 600 s elapsed while the
+  worker was actively running) AND on remote status `TIMED_OUT`.
+  Indicates *worker stall* — a fair chance of resolving on a retry
+  against a different worker with a fresh seed.
+- **`RunPodQueueTimeoutError(RunPodError)`** — subclass raised when
+  the job sat in `IN_QUEUE` for the full
+  `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S` (= 1800 s) without ever being
+  picked up by a worker. Distinct from `RunPodTimeoutError` because
+  re-submitting on a queue exhaustion would *lose FIFO position*
+  behind every other tenant in the GPU pool, making a retry
+  strictly worse than just giving up and letting the user resubmit
+  later. Marked as infrastructure noise for refund purposes (same
+  category as `RENDER_TIMEOUT`) but not retried.
 
-The branch render sub-loop (§ 6) distinguishes the two by exception
-type:
+The branch render sub-loop (§ 6) distinguishes the three by
+exception type:
 
 - `RunPodTimeoutError` is retried up to `RUNPOD_TIMEOUT_RETRY` (= 2;
   § 10) additional times, each with a *fresh* seed
@@ -3940,16 +4008,22 @@ type:
   signal. If all `1 + RUNPOD_TIMEOUT_RETRY` attempts time out, the
   branch transitions to `FAILED` with
   `illustrations.error_code = "RENDER_TIMEOUT"` (§ 8.6).
+- `RunPodQueueTimeoutError` is **never retried**. The branch
+  transitions immediately to `FAILED` with
+  `illustrations.error_code = "RENDER_QUEUE_TIMEOUT"` (§ 8.6).
+  The user can re-trigger via the manual fallback (§ 6A) or by
+  regenerating from a completed run; both submit a brand-new job
+  to the back of the queue, which is the user's explicit choice.
 - Any other `RunPodError` (`FAILED`, `CANCELLED`, parse error) is
   surfaced immediately as `FAILED` with
   `illustrations.error_code = "RENDER_FAILED"` and no retry.
 
 The same classification governs the § 6A manual dispatcher
 (`services/manual.py::_dispatch_render`). A manual-flow timeout
-consumes one `manual_attempts` increment and posts
-`MANUAL_RENDER_FAILED` in the chat instead of transitioning the
-illustration to `FAILED` outright (unless the manual budget is also
-exhausted).
+(of either flavour) consumes one `manual_attempts` increment and
+posts `MANUAL_RENDER_FAILED` in the chat instead of transitioning
+the illustration to `FAILED` outright (unless the manual budget is
+also exhausted).
 
 ---
 
@@ -4919,6 +4993,7 @@ SSE event types (`event:` field) and JSON payloads:
 | `illustration_entity_updated`    | `{ "illustration_id", "scene_index", "contains_entity_label": "string\|null", "entity": { "label", "kind", "importance", "reserved_for_scene_index" } \| null }` — emitted by Agent 4 / Agent 4b when the scene's entity changes (set, swapped, or dropped). `entity` carries the full record from `narrative_entities[]` after the mutation (or null when dropped). |
 | `illustration_environment_updated` | `{ "illustration_id", "scene_index", "environment": { "label", "kind", "aspect" } }` — emitted by Agent 4b when it swaps the slot's environment. |
 | `illustration_role_updated` | `{ "illustration_id", "scene_index", "character_role": "male\|female\|mother\|null" }` — emitted only when Agent 4 swaps a scene's cast shape |
+| `illustration_runpod_status` | `{ "illustration_id", "scene_index", "runpod_status": "IN_QUEUE\|IN_PROGRESS\|COMPLETED\|FAILED\|CANCELLED\|TIMED_OUT" }` — emitted by both the auto-pipeline render block (§ 6) and the manual dispatcher (§ 6A.4) whenever the RunPod job status changes (one event per distinct transition, including the first observation). Used by the frontend to swap the IllustrationCard's `RENDERING` / `MANUAL_RENDERING` label to a "queued on GPU" variant while the job is in `IN_QUEUE`, so the UI distinguishes pool throttling from active rendering. The frontend clears its cached `runpod_status` to `null` on the next `illustration_completed` / `illustration_failed` event for the same illustration. |
 | `translations_refreshed`    | `{ "language", "items": [ { "kind": "story_title\|story_topic_description\|paragraph\|illustration_concept", "paragraph_index"?: N, "scene_index"?: N, "text": "string" } ] }` — emitted to every subscriber after § 8.9 completes, so multi-tab views in the same language stay in sync |
 | `illustration_completed`    | `{ "illustration_id", "scene_index", "image_url" }`                     |
 | `illustration_salvage_resolved` | `{ "illustration_id", "scene_index", "outcome": "accepted\|rejected_all", "candidate_index"?: N, "paragraph_text_override"?: "string", "reasoning": "string" }` — emitted exactly once when the salvage agent (§ 7.1 Call 8) finishes reviewing. On `outcome="accepted"` the canonical illustration is updated in place (image promoted, paragraph optionally patched, entity/role rolled back to the candidate's snapshot) and `illustration_completed` follows immediately. On `outcome="rejected_all"` the branch proceeds to the § 6A manual flow exactly as if no salvage call had been made; `illustration_manual_started` follows. The frontend's default behaviour is to surface salvage-accepted images identically to normal auto-pipeline successes; the salvage origin (candidate_index, reasoning, paragraph override flag) is exposed only inside the diagnostics popover (§ 9.5). |
@@ -5293,8 +5368,10 @@ fault; see § 5 illustrations table, § 6 render sub-loop, § 7.2.4):
 
 | `error_code`           | Meaning                                                                                          |
 |------------------------|--------------------------------------------------------------------------------------------------|
-| `RENDER_TIMEOUT`       | RunPod render exhausted both the local `COMFYUI_POLL_TIMEOUT_S` (= 600 s) poll budget AND all `RUNPOD_TIMEOUT_RETRY` (= 2) retries with fresh seeds, OR remote returned `TIMED_OUT` on every attempt. Infrastructure noise, NOT a prompt-engineering signal; per-concept/prompt counters are not bumped. Surfaced to the frontend via the snapshot/SSE so analytics can separate infrastructure failures from prompt-engineering exhaustion. |
+| `RENDER_TIMEOUT`       | RunPod worker exhausted the `RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S` (= 600 s) per-state budget on every attempt across `1 + RUNPOD_TIMEOUT_RETRY` (= 3) tries with fresh seeds, OR remote returned `TIMED_OUT` on every attempt. Worker stall — infrastructure noise, NOT a prompt-engineering signal; per-concept/prompt counters are not bumped. Surfaced to the frontend via the snapshot/SSE so analytics can separate infrastructure failures from prompt-engineering exhaustion. |
+| `RENDER_QUEUE_TIMEOUT` | Job sat in `IN_QUEUE` for the full `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S` (= 1800 s) without a worker picking it up — GPU-pool capacity exhaustion. **Never retried** by the auto pipeline (resubmitting would forfeit FIFO position behind every other tenant). Same refund semantics as `RENDER_TIMEOUT` (§ 8.11.4) but distinct on dashboards so capacity events are attributable separately from worker-stall events. The user may re-trigger via the manual fallback or by regenerating the run; both submit a brand-new job to the back of the queue. |
 | `RENDER_FAILED`        | RunPod returned `FAILED` / `CANCELLED` or otherwise raised a non-timeout `RunPodError`. Not retried because workflow / auth / weights problems will not heal on retry. |
+| `OOM_REAPED`           | Startup orphan resumer (§ 8.8.1) classified the slot as unrecoverable — the run was `RUNNING` at process start but the illustration's state was non-terminal and not in a resumable state (`RENDERING` / `MANUAL_RENDERING` with a populated `runpod_job_id`, or `MANUAL_CHATTING`). Same refund semantics as `RENDER_TIMEOUT`. |
 
 `illustrations.error_code` remains NULL on `FAILED` rows whose
 cause was concept/prompt budget exhaustion plus salvage rejection
@@ -5438,6 +5515,76 @@ do **not** trigger a run-level failure — the run completes as
 `COMPLETED` with a non-zero `failed_count`. Only unhandled exceptions
 take down the whole run.
 
+#### 8.8.1 Startup orphan resumer
+
+The orchestrator runs entirely in-process (asyncio tasks under the
+uvicorn worker), so a process restart — voluntary (`--reload`,
+deploy) or involuntary (OOM kill, Fly Machine restart) — drops every
+in-flight branch on the floor. Without recovery, the affected runs
+would stay `RUNNING` forever in the DB and the user would see an
+endlessly spinning IllustrationCard whose RunPod job actually
+*succeeded* on the GPU side. The startup resumer
+(`app/orchestrator/resume.py::resume_orphan_runs`) closes that gap
+and replaces the pre-§ 8.8 `_reap_orphan_runs` reaper.
+
+`app/main.py`'s lifespan hook invokes `resume_orphan_runs(...)` once
+after the image-store and RunPod clients are wired. The function
+classifies every `Illustration` under every `RUNNING` run into one
+of four buckets and dispatches accordingly:
+
+1. **Terminal** (`COMPLETED` / `FAILED` / `CANCELLED`) — left alone.
+2. **Resumable render** (`RENDERING` or `MANUAL_RENDERING`, with a
+   non-null `runpod_job_id`) — a background task is detached to
+   re-attach to the existing RunPod job via
+   `RunPodClient.poll_existing_job(job_id)`. The id is what § 7.2
+   step 1 persisted before the original poll loop started. The
+   resume task subscribes to the live `EventBus` so the frontend
+   sees `illustration_runpod_status` transitions identically to a
+   fresh dispatch.
+3. **User-resumable** (`MANUAL_CHATTING`) — the run is left
+   `RUNNING`; the next user message into `services/manual.py` will
+   finalize the slot naturally. No action taken at startup.
+4. **Orphan / unrecoverable** (any other non-terminal state — e.g.
+   `RENDERING` without a `runpod_job_id`, `GENERATING_PROMPTS`,
+   `EVALUATING`) — flipped to `FAILED` with
+   `error_code = OOM_REAPED` and `runpod_job_id = NULL`. The reap
+   path attributes capacity/process events distinctly from
+   prompt-engineering exhaustion.
+
+Re-attach behaviour by RunPod status on the first re-poll:
+
+- **`COMPLETED`** — bytes downloaded from RunPod and persisted via
+  the standard image-store path. The auto-pipeline branch follows
+  *Scope B*: the evaluator (Agent 2) is **skipped**, the image is
+  promoted to the canonical slot, and the slot transitions to
+  `COMPLETED`. Re-running the evaluator after a restart would
+  double-spend the Claude budget on an attempt the user has
+  effectively already paid for, and the seed-locked attempt is
+  already in `illustration_attempt_history`. Manual flow re-runs
+  the full landing sequence (image bubble + review-prompt bubble)
+  so the chat reflects the recovered render.
+- **`IN_QUEUE` / `IN_PROGRESS`** — the resume task continues the
+  same poll loop with the standard per-state budgets (§ 6). A
+  fresh `RunPodQueueTimeoutError` / `RunPodTimeoutError` on the
+  re-attached job is classified per § 7.2.4 (queue timeout is
+  terminal, in-progress timeout retries with fresh seed).
+- **`FAILED` / `CANCELLED` / `TIMED_OUT`** — slot lands terminal
+  with `error_code` set to the matching category.
+
+After classification, the resumer calls
+`_finalize_run_if_terminal(run_id)` for any run whose illustrations
+are now all terminal so the run-level summary, the access-key
+refund (§ 8.11.4), and the `run_completed` / `run_failed` SSE event
+all fire exactly as they would have under the original pipeline.
+
+The reap leg sets `error_code = OOM_REAPED` (not `RENDER_TIMEOUT`)
+so capacity events stay distinguishable, but both share the same
+refund-eligible code set
+`{RENDER_TIMEOUT, RENDER_QUEUE_TIMEOUT, OOM_REAPED}` enforced by
+both `orchestrator/pipeline.py::_INFRA_REFUND_CODES` and
+`orchestrator/resume.py::_INFRA_REFUND_CODES` (kept in sync; both
+sources are exercised by § 11 unit tests).
+
 ### 8.11 Access gating (demo) — backend
 
 #### 8.11.1 Threat model and design choices
@@ -5571,7 +5718,7 @@ to § 8.11.4.
 
 A run's slot is credited back to its `access_key` exactly once, via
 an idempotent helper called from both the orchestrator finalizer and
-the orphan-reap path. The helper:
+the startup orphan resumer (§ 8.8.1). The helper:
 
 ```python
 # Guard the decrement on the run row's quota_refunded flag so
@@ -5595,16 +5742,23 @@ await session.execute(
 
 Refund triggers:
 
-1. The orchestrator transitions the run to `status=FAILED` AND at
-   least one illustration's terminal `error_code` is in
-   `{RENDER_TIMEOUT, OOM_REAPED, INTERNAL_ERROR}`. The orchestrator
+1. The orchestrator transitions the run to `status=FAILED` AND
+   every illustration's terminal `error_code` is in
+   `{RENDER_TIMEOUT, RENDER_QUEUE_TIMEOUT, OOM_REAPED}` (i.e. the
+   whole run failed for infra reasons, no slot has a
+   prompt-engineering or successful outcome). The orchestrator
    finalizer inspects the illustration set after the gather()
-   completes and calls the refund helper before emitting `run_failed`.
-2. `_reap_orphan_runs()` (§ Deployment, `app/main.py`) marks the run
-   `FAILED` on startup because the previous uvicorn process died
-   mid-pipeline. The reap path stamps every reaped non-terminal
-   illustration with `error_code="OOM_REAPED"` so the refund decision
-   above fires symmetrically with the in-process path.
+   completes and calls the refund helper before emitting
+   `run_failed`. The refund-eligible code set lives in
+   `orchestrator/pipeline.py::_INFRA_REFUND_CODES`.
+2. The startup orphan resumer (§ 8.8.1, `resume_orphan_runs`) ends
+   up finalizing a run whose illustrations all bear one of those
+   codes — either because the resumer re-attached to a job that
+   then landed `RENDER_TIMEOUT` / `RENDER_QUEUE_TIMEOUT` / failed,
+   or because the slot was classified `OOM_REAPED` at startup
+   (Bucket 4 of § 8.8.1). The resumer carries its own copy of the
+   set in `orchestrator/resume.py::_INFRA_REFUND_CODES`, kept in
+   sync with pipeline.py.
 
 Refund does NOT apply when:
 - The run completes successfully (even if some illustrations entered
@@ -5616,9 +5770,10 @@ Refund does NOT apply when:
   (`STORY_BUILD_FAILED`, `QUOTA_EXHAUSTED` race): already refunded
   inline in the messages handler (§ 8.11.3), no second refund.
 
-A new error-code constant `ERROR_CODE_OOM_REAPED = "OOM_REAPED"` is
-added to `app/constants.py` and to the `illustrations.error_code`
-enum-by-convention listed in § 8.6.
+Error-code constants `ERROR_CODE_OOM_REAPED = "OOM_REAPED"` and
+`ERROR_CODE_RENDER_QUEUE_TIMEOUT = "RENDER_QUEUE_TIMEOUT"` are
+defined in `app/constants.py` and appear in the
+`illustrations.error_code` enum-by-convention listed in § 8.6.
 
 #### 8.11.5 Admin CLI and Make targets
 
@@ -6318,7 +6473,8 @@ State:
   `story_blocks` with translation states — all per § 8.3)
 - `illustrations: Illustration[]` (by `scene_index` order; carries
   `current_concept`, `current_concept_translation_state`,
-  `current_workflow`, `character_role: string|null`)
+  `current_workflow`, `character_role: string|null`,
+  `runpod_status: 'IN_QUEUE' | 'IN_PROGRESS' | ... | null`)
 - `translations: Record<Language, RunTranslationCache>` — the
   in-memory per-language cache of every piece of translatable text
   for this run, keyed by language. Each cache entry stores the text
@@ -6497,11 +6653,23 @@ SSE handlers:
   illustration concept_localized) using the same field-level
   assignment rules as the dedicated handlers above — no array or
   object replacement, so no remounts.
+- `illustration_runpod_status` → finds the illustration by
+  `illustration_id` and assigns `illustration.runpod_status =
+  event.runpod_status` on the existing reactive object. The
+  `IllustrationCard` reads this field to swap its `RENDERING` /
+  `MANUAL_RENDERING` label to the "queued on GPU" variant
+  (`illustration.state.RENDERING_QUEUED` /
+  `MANUAL_RENDERING_QUEUED` i18n keys) while the job is in
+  `IN_QUEUE`. Field-level assignment keeps the card mounted across
+  the transition.
 - `illustration_completed`, `illustration_failed` → flip the matching
-  illustration's `state` (and `image_url` on completion). Progress
-  counters are NOT incremented manually; they are derived from
-  `illustrations[].state` via the `completedCount` / `failedCount`
-  computed getters above, so the state flip is sufficient.
+  illustration's `state` (and `image_url` on completion). Both
+  handlers also clear `runpod_status` back to `null` so the
+  queued-on-GPU label cannot linger after the slot lands terminal.
+  Progress counters are NOT incremented manually; they are derived
+  from `illustrations[].state` via the `completedCount` /
+  `failedCount` computed getters above, so the state flip is
+  sufficient.
 - `run_completed`, `run_failed`, `run_cancelled`, `heartbeat` — as
   previously specified. `run_completed` only flips `run.status`; the
   final completed/failed totals come from the derived getters.
@@ -6936,19 +7104,22 @@ Defined in `backend/app/constants.py`:
 | `MAX_PROMPT_ATTEMPTS_PER_CONCEPT` | 3     | Total image-generation attempts per concept (initial + 2 revisions)|
 | `MAX_CONCEPT_ATTEMPTS`            | 3     | Total concepts tried per illustration (initial + 2 rethinks)      |
 | `MAX_MANUAL_ATTEMPTS`             | 5     | Total manual renders the user can request via the § 6A chat fallback before the illustration is force-FAILED. Counts each dispatched ComfyUI job, whether the render itself succeeded or failed. |
-| `COMFYUI_POLL_TIMEOUT_S`          | 600   | Max wait per ComfyUI job                                          |
+| `COMFYUI_POLL_TIMEOUT_S`          | 600   | Legacy single-budget wall-clock cap (kept in the file for backward compatibility); superseded at runtime by the status-aware per-state caps below. New callers should not use it. |
+| `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S`  | 1800  | Max time a RunPod job is allowed to sit in `IN_QUEUE` before the client raises `RunPodQueueTimeoutError`. Generous because the queue is the GPU-pool fair-share load balancer — re-submitting on queue exhaustion would lose FIFO position, so this timeout is *terminal* (no retry, → `error_code = RENDER_QUEUE_TIMEOUT`). |
+| `RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S` | 600 | Max time a RunPod job is allowed to stay in `IN_PROGRESS` (worker actively rendering) before the client raises `RunPodTimeoutError`. Matches the pre-split `COMFYUI_POLL_TIMEOUT_S` value. Worker-stall budget — retried with a fresh seed up to `RUNPOD_TIMEOUT_RETRY` times. The two timers are independent: a long IN_QUEUE wait does not pre-burn the IN_PROGRESS budget (§ 6 render sub-loop). |
 | `COMFYUI_POLL_INTERVAL_S`         | 3     | Polling interval                                                  |
 | `MAX_CONCURRENT_BRANCHES`         | 5     | Async semaphore over branches (= MAX_ILLUSTRATIONS for MVP)       |
 | `CLAUDE_JSON_RETRY`               | 2     | Re-prompts on Claude output JSON parse failure                    |
 | `BUILD_STORY_VALIDATOR_RETRY`     | 2     | Additional Agent 0b (`build_story`) attempts after the first fails server-side *semantic* validation (pool-fidelity, distribution rules, alone-shot rule, etc.). Each retry replays the failed turn with the validator's plain-English feedback appended to the user message so Agent 0b can correct course. Total attempts = `1 + BUILD_STORY_VALIDATOR_RETRY`. Independent of `CLAUDE_JSON_RETRY`, which handles parse-level failures. |
 | `RUNPOD_TIMEOUT_RETRY`            | 2     | Additional render attempts after a `RunPodTimeoutError`. Each retry uses a *fresh* `SEED` so the next attempt does not queue behind the same prompt-hash on the same slow worker. Counters (`concept_attempt`, `prompt_attempt`) are NOT bumped across timeout retries (§ 6 render sub-loop, § 7.2.4). Other `RunPodError` failures (FAILED / CANCELLED / malformed response) still fail immediately without retry. |
 | `MAX_NEGATIVE_TAGS`               | 75    | Hard cap on comma-separated tag count in Agent 1 / 3 / 7 `negative` prompts. Capped at the CLIP token-window boundary (~75); tighter caps (e.g. 60) were observed to reject valid Agent outputs repeatedly because realistic scenes legitimately need ~50–70 tags (NSFW + anatomy + cast-extras + anti-creature + anti-env-confusion + anti-expression-drift). Enforced by `_validate_prompts` in `services/claude.py` (§ 7.1 hard validators). |
-| `ERROR_CODE_RENDER_TIMEOUT`       | `"RENDER_TIMEOUT"` | String persisted on `illustrations.error_code` when the render sub-loop exhausts every timeout retry (§ 7.2.4, § 8.6). |
+| `ERROR_CODE_RENDER_TIMEOUT`       | `"RENDER_TIMEOUT"` | String persisted on `illustrations.error_code` when the render sub-loop exhausts every IN_PROGRESS timeout retry (§ 7.2.4, § 8.6). |
+| `ERROR_CODE_RENDER_QUEUE_TIMEOUT` | `"RENDER_QUEUE_TIMEOUT"` | String persisted on `illustrations.error_code` when a RunPod job sat in `IN_QUEUE` for the full `RUNPOD_POLL_TIMEOUT_IN_QUEUE_S` budget without being picked up — capacity exhaustion, never retried. Same refund semantics as `RENDER_TIMEOUT` but kept distinct on dashboards (§ 7.2.4, § 8.6, § 8.11.4). |
 | `ERROR_CODE_RENDER_FAILED`        | `"RENDER_FAILED"`  | String persisted on `illustrations.error_code` when RunPod returns a non-timeout error (§ 7.2.4, § 8.6). |
 | `CHAT_MESSAGE_MAX_CHARS`          | 4000  | Hard limit on a single chat message                               |
 | `CHAT_MESSAGES_MAX_PER_SESSION`   | 60    | Hard cap on total messages per session (refuse further input)     |
 | `SESSION_USER_MESSAGES_MAX`       | 20    | Hard cap on *user-authored* messages per session (separate from `CHAT_MESSAGES_MAX_PER_SESSION` which counts both sides). Cost guardrail for the demo deployment: every user turn triggers exactly one Agent 0a call, so capping user messages caps paid token spend per session deterministically. Enforced in `services/session.py::post_message` before the Anthropic call is made; exceeding it returns HTTP 429 with body `{"error_code": "SESSION_USER_MESSAGE_LIMIT"}` and does NOT consume access-key quota. |
-| `ERROR_CODE_OOM_REAPED`           | `"OOM_REAPED"` | String persisted on `illustrations.error_code` (and surfaced on the snapshot) when `_reap_orphan_runs` (§ 8.11.4) sweeps a RUNNING run that was abandoned by an uvicorn restart. Drives the same access-key quota refund path as `RENDER_TIMEOUT` / `INTERNAL_ERROR`. |
+| `ERROR_CODE_OOM_REAPED`           | `"OOM_REAPED"` | String persisted on `illustrations.error_code` (and surfaced on the snapshot) when the startup orphan resumer (§ 8.8.1, `resume_orphan_runs`) classifies a non-terminal slot as unrecoverable (no resumable RunPod job id and not in `MANUAL_CHATTING`). Drives the same access-key quota refund path as `RENDER_TIMEOUT` / `RENDER_QUEUE_TIMEOUT`. |
 | `PAID_ENDPOINTS`                  | (tuple of route IDs) | Canonical list of HTTP routes that MUST mount the `require_access_key` FastAPI dependency (§ 8.11.2). Any call from this list reaches Anthropic or RunPod and therefore costs real money. Enumerated in `app/api/auth.py` and asserted at import time by `tests/unit/test_paid_endpoints_guarded.py` against `app.router.routes` so a new paid endpoint cannot be merged without a guard. Members: `POST /api/sessions`, `POST /api/sessions/{id}/messages`, `POST /api/runs/{id}/translations`, `POST /api/runs/{id}/cancel`, `POST /api/illustrations/{id}/manual`, `POST /api/illustrations/{id}/manual/accept`, `POST /api/illustrations/{id}/manual/iterate`, `POST /api/illustrations/{id}/manual/regenerate`. |
 | `ANTHROPIC_MODEL`                 | `"claude-sonnet-4-6"` | Single model used for all 9 calls (chat, build_story, generate_prompts, evaluate_image, revise_prompts, rethink_concept, rethink_environment, translate, manual_concept, manual_revise_prompts, salvage_review) |
 | `SUPPORTED_LANGUAGES`             | `("sk", "cs", "en")` | Tuple of UI / story languages the backend accepts (§ 9.6). The chat agent emits one of these or `"other"`; the build_story, translate, and run APIs all validate against this tuple. |
@@ -8313,21 +8484,23 @@ The MVP is considered complete when:
     dependency.
 19. **Quota refund on infrastructure failure (§ 8.11.4).** A run
     that consumes a quota slot and then terminates with every
-    illustration in `{RENDER_TIMEOUT, OOM_REAPED}` (or the parent
-    run in `INTERNAL_ERROR` before the orchestrator finishes
-    dispatching) flips `runs.quota_refunded` from `False` to
-    `True` exactly once and decrements `access_keys.runs_used` by
-    1, clamped at 0 (`func.max(runs_used - 1, 0)`). A run that
-    terminates with at least one `COMPLETED` illustration, or with
-    a `FAILED` outcome attributable to prompt-engineering
+    illustration in
+    `{RENDER_TIMEOUT, RENDER_QUEUE_TIMEOUT, OOM_REAPED}` (or the
+    parent run in `INTERNAL_ERROR` before the orchestrator
+    finishes dispatching) flips `runs.quota_refunded` from `False`
+    to `True` exactly once and decrements `access_keys.runs_used`
+    by 1, clamped at 0 (`func.max(runs_used - 1, 0)`). A run that
+    terminates with at least one `COMPLETED` illustration, or
+    with a `FAILED` outcome attributable to prompt-engineering
     exhaustion (no infra error code), leaves the slot consumed.
     Concurrent calls to the refund path (orchestrator failure
-    handler racing `_reap_orphan_runs`) MUST flip the flag at most
-    once — verified by an integration test that fires both paths
-    in parallel and asserts `runs_used` decreased by exactly 1.
-    Admin keys (`runs_allowed IS NULL`) skip the decrement but
-    still flip `quota_refunded=True` so the idempotency invariant
-    holds uniformly.
+    handler racing the startup orphan resumer's
+    `_finalize_run_if_terminal`, § 8.8.1) MUST flip the flag at
+    most once — verified by an integration test that fires both
+    paths in parallel and asserts `runs_used` decreased by
+    exactly 1. Admin keys (`runs_allowed IS NULL`) skip the
+    decrement but still flip `quota_refunded=True` so the
+    idempotency invariant holds uniformly.
 20. **Per-session user-message cap.** With `SESSION_USER_MESSAGES_MAX=20`,
     sending 20 user messages to one session succeeds; the 21st
     returns HTTP 429

@@ -188,6 +188,13 @@ class Illustration(Base):
     # problem) from prompt-engineering exhaustions. Nullable: legacy rows
     # and successful illustrations leave it ``None``.
     error_code: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    # RunPod job ID of the currently in-flight render (RENDERING /
+    # MANUAL_RENDERING). Persisted at submit time and cleared on any
+    # terminal outcome (COMPLETED / FAILED). Drives the orphan-resumer
+    # in ``app/main.py``: on startup we re-poll any persisted job_id so
+    # restart-killed pollers don't waste an already-paid GPU result.
+    # Nullable: most of the time no render is in flight.
+    runpod_job_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     manual_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     manual_state_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Auto-pipeline prompting notes — empirical renderer lessons curated by

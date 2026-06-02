@@ -52,6 +52,8 @@ export default {
       MANUAL_CHATTING: 'Společná tvorba',
       MANUAL_GENERATING_PROMPTS: 'Připravuji prompty (manuál)',
       MANUAL_RENDERING: 'Kreslím (manuál)',
+      RENDERING_QUEUED: 'Ve frontě na GPU',
+      MANUAL_RENDERING_QUEUED: 'Ve frontě na GPU (manuál)',
       COMPLETED: 'Hotovo',
       FAILED: 'Selhalo',
       CANCELLED: 'Zrušeno',

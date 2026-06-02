@@ -82,7 +82,7 @@ serve-bg:
 	@echo "Running migrations..."
 	@$(ALEMBIC) upgrade head
 	@echo "Starting uvicorn in background..."
-	@nohup $(UVICORN) $(UVICORN_APP) --reload > $(UVICORN_LOG) 2>&1 & echo $$! > $(UVICORN_PID)
+	@nohup $(UVICORN) $(UVICORN_APP) --reload --timeout-graceful-shutdown 5 > $(UVICORN_LOG) 2>&1 & echo $$! > $(UVICORN_PID)
 	@sleep 2
 	@if kill -0 $$(cat $(UVICORN_PID)) 2>/dev/null; then \
 		echo "uvicorn started (PID $$(cat $(UVICORN_PID))). Logs: $(UVICORN_LOG)"; \

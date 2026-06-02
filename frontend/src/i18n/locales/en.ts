@@ -52,6 +52,8 @@ export default {
       MANUAL_CHATTING: 'Collaborative editing',
       MANUAL_GENERATING_PROMPTS: 'Preparing prompts (manual)',
       MANUAL_RENDERING: 'Rendering (manual)',
+      RENDERING_QUEUED: 'Queued on GPU',
+      MANUAL_RENDERING_QUEUED: 'Queued on GPU (manual)',
       COMPLETED: 'Completed',
       FAILED: 'Failed',
       CANCELLED: 'Cancelled',

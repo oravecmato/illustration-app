@@ -61,6 +61,46 @@ describe("IllustrationCard", () => {
     expect(wrapper.text()).toContain("Ilustrácia 3");
   });
 
+  it("swaps RENDERING label to queue label when runpod_status is IN_QUEUE", () => {
+    const wrapper = mountCard({
+      props: {
+        illustration: makeIllustration({
+          state: "RENDERING",
+          prompt_attempt: 1,
+          runpod_status: "IN_QUEUE",
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("V rade na GPU");
+    expect(wrapper.text()).not.toContain("Vytváranie obrázka");
+  });
+
+  it("keeps RENDERING label when runpod_status is IN_PROGRESS", () => {
+    const wrapper = mountCard({
+      props: {
+        illustration: makeIllustration({
+          state: "RENDERING",
+          prompt_attempt: 1,
+          runpod_status: "IN_PROGRESS",
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("Vytváranie obrázka");
+    expect(wrapper.text()).not.toContain("V rade na GPU");
+  });
+
+  it("swaps MANUAL_RENDERING label to manual queue label when runpod_status is IN_QUEUE", () => {
+    const wrapper = mountCard({
+      props: {
+        illustration: makeIllustration({
+          state: "MANUAL_RENDERING",
+          runpod_status: "IN_QUEUE",
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("V rade na GPU (manuál)");
+  });
+
   it.each(Object.entries(STATE_LABELS))("shows correct Slovak label for state %s", (state, label) => {
     const wrapper = mountCard({
       props: {

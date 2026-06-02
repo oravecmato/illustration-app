@@ -17,7 +17,7 @@
         </span>
       </div>
 
-      <RunErrorBanner v-if="store.run" :run="store.run" />
+      <RunErrorBanner v-if="store.run" :run="store.run" :illustrations="store.illustrations" />
 
       <IndeterminateProgress v-if="isLoading" />
       <ProgressCounter

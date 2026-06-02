@@ -208,6 +208,10 @@ export interface Illustration {
   contains_entity_label: string | null;
   manual_attempts?: number;
   manual_session?: ManualSessionSummary | null;
+  /** Live RunPod job status for the currently-rendering attempt (IN_QUEUE
+   *  vs IN_PROGRESS). Live-only — set by `illustration_runpod_status`
+   *  SSE handler, cleared on terminal illustration events. */
+  runpod_status?: RunPodStatus | null;
   /** § 6 / § 7.1: populated by the `illustration_salvage_resolved`
    *  SSE handler when the salvage agent (Agent 8) accepted a prior
    *  attempt. Null otherwise. Live-only — not persisted across reloads
@@ -347,6 +351,14 @@ export interface IllustrationManualEndedEvent {
   outcome: "completed" | "exhausted" | "cancelled";
 }
 
+export type RunPodStatus = "IN_QUEUE" | "IN_PROGRESS" | "COMPLETED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
+
+export interface IllustrationRunpodStatusEvent {
+  illustration_id: string;
+  scene_index: number;
+  runpod_status: RunPodStatus;
+}
+
 export interface IllustrationSalvageResolvedEvent {
   illustration_id: string;
   scene_index: number;
@@ -364,6 +376,7 @@ export type SseEvent =
   | { type: "illustration_state"; data: IllustrationStateEvent }
   | { type: "illustration_completed"; data: IllustrationCompletedEvent }
   | { type: "illustration_failed"; data: IllustrationFailedEvent }
+  | { type: "illustration_runpod_status"; data: IllustrationRunpodStatusEvent }
   | { type: "illustration_entity_updated"; data: IllustrationEntityUpdatedEvent }
   | { type: "illustration_environment_updated"; data: IllustrationEnvironmentUpdatedEvent }
   | { type: "illustration_role_updated"; data: IllustrationRoleUpdatedEvent }

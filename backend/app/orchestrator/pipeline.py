@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.auth import refund_run_quota
 from app.constants import (
     ERROR_CODE_OOM_REAPED,
+    ERROR_CODE_RENDER_QUEUE_TIMEOUT,
     ERROR_CODE_RENDER_TIMEOUT,
     MAX_CONCURRENT_BRANCHES,
 )
@@ -30,8 +31,11 @@ from app.services.storage import ImageStore
 # Infra-noise error codes on Illustration.error_code that justify a
 # quota refund (§ 8.11.4). Prompt-engineering exhaustions (RENDER_FAILED
 # from RunPod returning bad output, or a successful render that the
-# evaluator rejects) leave the slot consumed.
-_INFRA_REFUND_CODES = frozenset({ERROR_CODE_RENDER_TIMEOUT, ERROR_CODE_OOM_REAPED})
+# evaluator rejects) leave the slot consumed. Kept in sync with
+# ``orchestrator/resume.py::_INFRA_REFUND_CODES``.
+_INFRA_REFUND_CODES = frozenset(
+    {ERROR_CODE_RENDER_TIMEOUT, ERROR_CODE_RENDER_QUEUE_TIMEOUT, ERROR_CODE_OOM_REAPED}
+)
 
 logger = logging.getLogger(__name__)
 

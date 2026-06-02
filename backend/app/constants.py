@@ -19,12 +19,27 @@ BUILD_STORY_VALIDATOR_RETRY = 2
 # Other ``RunPodError`` failures (FAILED/CANCELLED job status, malformed
 # response) still fail immediately without retry.
 RUNPOD_TIMEOUT_RETRY = 2
+# Status-aware poll timeouts (§ infra resilience). The poll loop tracks
+# how long the job has stayed in each RunPod status and applies the
+# matching cap. IN_QUEUE timeouts are NOT retried (a fresh job would
+# lose FIFO position behind every other tenant), so the cap is set
+# generously to ride out throttle waves. IN_PROGRESS timeouts ARE
+# retried with a fresh seed (the worker stalled, the workflow is fine),
+# matching the original ``COMFYUI_POLL_TIMEOUT_S`` budget.
+RUNPOD_POLL_TIMEOUT_IN_QUEUE_S = 1800  # 30 min
+RUNPOD_POLL_TIMEOUT_IN_PROGRESS_S = 600  # 10 min (matches existing)
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # Error-code strings persisted on ``Illustration.error_code`` so
 # diagnostics can distinguish infrastructure failures from
 # prompt-engineering exhaustions.
 ERROR_CODE_RENDER_TIMEOUT = "RENDER_TIMEOUT"
+# Stamped when the GPU pool was fully throttled for the entire
+# ``RUNPOD_POLL_TIMEOUT_IN_QUEUE_S`` budget — the job never moved out
+# of IN_QUEUE. Distinguished from ``RENDER_TIMEOUT`` (which means the
+# worker started but stalled) so refunds + dashboards can attribute
+# capacity events separately. Same refund semantics as RENDER_TIMEOUT.
+ERROR_CODE_RENDER_QUEUE_TIMEOUT = "RENDER_QUEUE_TIMEOUT"
 ERROR_CODE_RENDER_FAILED = "RENDER_FAILED"
 # Stamped on illustrations whose parent run is reaped by
 # ``_reap_orphan_runs`` on startup (uvicorn died mid-flight, e.g. OOM

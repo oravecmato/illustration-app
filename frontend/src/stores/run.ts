@@ -154,6 +154,7 @@ export const useRunStore = defineStore("run", () => {
         if (ill) {
           ill.state = "COMPLETED";
           ill.image_url = event.data.image_url;
+          ill.runpod_status = null;
         }
         // A completed (re)generation flips the card back to the image.
         // Clear any chat toggle so the default viewMode rules apply.
@@ -166,6 +167,16 @@ export const useRunStore = defineStore("run", () => {
         const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
         if (ill) {
           ill.state = "FAILED";
+          ill.runpod_status = null;
+        }
+        break;
+      }
+      case "illustration_runpod_status": {
+        // Live RunPod status (IN_QUEUE vs IN_PROGRESS) for the
+        // currently-rendering attempt. Drives the queue-aware label.
+        const ill = illustrations.value.find((i) => i.id === event.data.illustration_id);
+        if (ill) {
+          ill.runpod_status = event.data.runpod_status;
         }
         break;
       }

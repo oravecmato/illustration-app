@@ -42,7 +42,7 @@ from app.orchestrator.events import EventBus
 from app.schemas.claude import StyleGuide, _normalize_entity_label
 from app.services.claude import ClaudeClient, ClaudeError
 from app.services.images import copy_image, save_manual_image
-from app.services.runpod import RunPodClient, RunPodTimeoutError
+from app.services.runpod import RunPodClient, RunPodQueueTimeoutError, RunPodTimeoutError
 from app.services.storage import ImageStore
 from app.services.workflow import replace_placeholders
 
@@ -781,10 +781,16 @@ class ManualService:
         the result, flip sub_phase to `feedback_gathering` on success,
         emit SSE."""
         new_attempts = illustration.manual_attempts + 1
+        # Clear any stale ``error_code`` stamped by an earlier terminal path
+        # (e.g. OOM_REAPED from the orphan-run reaper, or RENDER_TIMEOUT from
+        # a prior manual attempt). Once the user is actively driving a fresh
+        # render, the row's diagnostic tag must reflect *this* attempt, not
+        # the previous infra blip.
         await self.run_repo.update_illustration(
             illustration,
             state=IllustrationState.MANUAL_RENDERING,
             manual_attempts=new_attempts,
+            error_code=None,
         )
         await self._publish_state(illustration, IllustrationState.MANUAL_RENDERING)
 
@@ -836,14 +842,38 @@ class ManualService:
             return wf
 
         # Retry-on-timeout (parity with the auto-pipeline branch). A
-        # RunPod timeout is GPU-pool infrastructure noise — the workflow
-        # is fine. Retry up to ``RUNPOD_TIMEOUT_RETRY`` times with a
-        # fresh seed before surfacing the failure to the user as a
-        # manual-flow failure. The manual_attempt counter has already
-        # been bumped above (in ``new_attempts``); we deliberately do
-        # NOT bump it again for timeout retries.
+        # RunPod IN_PROGRESS timeout is GPU-pool infrastructure noise —
+        # the workflow is fine. Retry up to ``RUNPOD_TIMEOUT_RETRY`` times
+        # with a fresh seed before surfacing the failure.
+        #
+        # ``RunPodQueueTimeoutError`` is NEVER retried: re-submitting
+        # would lose FIFO position and put us behind every other tenant
+        # in the same throttled pool. Refund manual_attempts (infra
+        # noise should not burn the user's manual budget) and surface
+        # the apology bubble.
+
+        # job_id callback: persist immediately after /run so the orphan
+        # resumer can re-poll across a process restart instead of
+        # wasting an already-paid render.
+        async def _persist_job_id(jid: str) -> None:
+            await self.run_repo.update_illustration(illustration, runpod_job_id=jid)
+
+        # Surface RunPod status to SSE so the UI can label "v rade".
+        async def _publish_runpod_status(status: str) -> None:
+            if self.event_bus is None:
+                return
+            await self.event_bus.publish(
+                "illustration_runpod_status",
+                {
+                    "illustration_id": illustration.id,
+                    "scene_index": illustration.scene_index,
+                    "runpod_status": status,
+                },
+            )
+
         image_bytes: bytes | None = None
         last_exc: Exception | None = None
+        queue_timeout_exc: RunPodQueueTimeoutError | None = None
         for timeout_attempt in range(RUNPOD_TIMEOUT_RETRY + 1):
             seed = random.randint(0, 2**32 - 1)
             if timeout_attempt > 0:
@@ -858,8 +888,15 @@ class ManualService:
                 )
             workflow = _build_workflow(seed)
             try:
-                image_bytes = await self.runpod.run_workflow(workflow)
+                image_bytes = await self.runpod.run_workflow(
+                    workflow,
+                    on_job_id=_persist_job_id,
+                    on_status_change=_publish_runpod_status,
+                )
                 last_exc = None
+                break
+            except RunPodQueueTimeoutError as e:
+                queue_timeout_exc = e
                 break
             except RunPodTimeoutError as e:
                 last_exc = e
@@ -868,9 +905,39 @@ class ManualService:
                 last_exc = e
                 break
 
+        if queue_timeout_exc is not None:
+            logger.warning(
+                "manual runpod queue timeout for illustration %s (scene_index=%d): %s",
+                illustration.id,
+                illustration.scene_index,
+                queue_timeout_exc,
+            )
+            # Refund the manual_attempts increment — pool throttling
+            # should not punish the user's budget.
+            await self.run_repo.update_illustration(
+                illustration,
+                manual_attempts=illustration.manual_attempts - 1,
+                runpod_job_id=None,
+            )
+            ms = await self.manual_repo.get_manual_session(illustration.id)
+            if ms is not None:
+                await self.manual_repo.update_manual_session(
+                    ms,
+                    sub_phase=SUB_PHASE_CONCEPT_DESIGN,
+                    last_concept_candidate=None,
+                )
+            await self._handle_manual_failure(illustration, MANUAL_RENDER_FAILED)
+            raise ManualServiceError(
+                "MANUAL_RENDER_QUEUE_TIMEOUT",
+                f"Image rendering queue timed out: {queue_timeout_exc}",
+                502,
+            ) from queue_timeout_exc
+
         if image_bytes is None:
             assert last_exc is not None
             logger.error("manual runpod.run_workflow failed: %s", last_exc)
+            # Clear job_id — the in-flight job is terminally lost.
+            await self.run_repo.update_illustration(illustration, runpod_job_id=None)
             # On RunPod failure: reset sub_phase to concept_design (auto loop
             # parity — the user gets to redesign the concept). § 6A.4 step 3.10.
             ms = await self.manual_repo.get_manual_session(illustration.id)
@@ -888,6 +955,10 @@ class ManualService:
                 f"Image rendering failed: {last_exc}",
                 502,
             ) from last_exc
+
+        # Successful render — clear the in-flight job id so the orphan
+        # resumer doesn't reattach on next startup.
+        await self.run_repo.update_illustration(illustration, runpod_job_id=None)
 
         manual_path = await save_manual_image(
             image_bytes,

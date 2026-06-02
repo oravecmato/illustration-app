@@ -157,6 +157,53 @@ describe("runStore", () => {
     expect(afterRef?.current_concept).toBe("Rethought");
   });
 
+  it("illustration_runpod_status writes runpod_status onto the illustration", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", state: "RENDERING" })],
+      },
+    });
+
+    store.handleSseEvent({
+      type: "illustration_runpod_status",
+      data: { illustration_id: "ill-1", scene_index: 0, runpod_status: "IN_QUEUE" },
+    });
+    expect(store.illustrations.find((i) => i.id === "ill-1")?.runpod_status).toBe("IN_QUEUE");
+
+    store.handleSseEvent({
+      type: "illustration_runpod_status",
+      data: { illustration_id: "ill-1", scene_index: 0, runpod_status: "IN_PROGRESS" },
+    });
+    expect(store.illustrations.find((i) => i.id === "ill-1")?.runpod_status).toBe("IN_PROGRESS");
+  });
+
+  it("illustration_completed clears runpod_status", () => {
+    const store = useRunStore();
+    store.handleSseEvent({
+      type: "snapshot",
+      data: {
+        run: makeRun(),
+        illustrations: [makeIllustration({ id: "ill-1", state: "RENDERING" })],
+      },
+    });
+    store.handleSseEvent({
+      type: "illustration_runpod_status",
+      data: { illustration_id: "ill-1", scene_index: 0, runpod_status: "IN_PROGRESS" },
+    });
+    store.handleSseEvent({
+      type: "illustration_completed",
+      data: {
+        illustration_id: "ill-1",
+        scene_index: 0,
+        image_url: "/static/runs/run-1/scene_0.png",
+      },
+    });
+    expect(store.illustrations.find((i) => i.id === "ill-1")?.runpod_status).toBeNull();
+  });
+
   it("illustration_completed event sets image_url", () => {
     const store = useRunStore();
     store.handleSseEvent({

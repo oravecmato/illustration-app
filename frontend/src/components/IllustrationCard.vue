@@ -165,7 +165,16 @@ async function handleRegenerateClick(): Promise<void> {
 }
 
 const stateLabel = computed(() => {
-  const base = t(`illustration.state.${props.illustration.state}`);
+  // Swap to "queued on GPU" while RunPod has the job in IN_QUEUE — the
+  // pipeline is waiting for a GPU worker, not actively rendering.
+  const queued = props.illustration.runpod_status === "IN_QUEUE";
+  const stateKey =
+    queued && props.illustration.state === "RENDERING"
+      ? "RENDERING_QUEUED"
+      : queued && props.illustration.state === "MANUAL_RENDERING"
+        ? "MANUAL_RENDERING_QUEUED"
+        : props.illustration.state;
+  const base = t(`illustration.state.${stateKey}`);
   if (props.illustration.state === "RENDERING") {
     return `${base} (${t("illustration.attempt", { current: props.illustration.prompt_attempt, max: 3 })})`;
   }

@@ -8,6 +8,7 @@ import random
 
 from app.constants import (
     ERROR_CODE_RENDER_FAILED,
+    ERROR_CODE_RENDER_QUEUE_TIMEOUT,
     ERROR_CODE_RENDER_TIMEOUT,
     MAX_CONCEPT_ATTEMPTS,
     MAX_PROMPT_ATTEMPTS_PER_CONCEPT,
@@ -26,7 +27,7 @@ from app.schemas.claude import (
 from app.services.claude import ClaudeClient
 from app.services.images import copy_image, save_history_image, save_image
 from app.services.manual import ManualService
-from app.services.runpod import RunPodClient, RunPodTimeoutError
+from app.services.runpod import RunPodClient, RunPodQueueTimeoutError, RunPodTimeoutError
 from app.services.storage import ImageStore
 from app.services.workflow import replace_placeholders
 
@@ -106,6 +107,33 @@ async def run_branch(
     if cancel_flag.is_set():
         await transition(IllustrationState.CANCELLED)
         return
+
+    # RunPod callbacks. Hoisted above the per-attempt loops so they
+    # close over the function-scope ``illustration`` reference exactly
+    # once (ruff B023 false-positive avoidance). ``illustration`` is
+    # rebound by some ``update_illustration`` calls throughout the
+    # branch, but always to the same DB row, so late-binding reads of
+    # ``.id`` / ``.scene_index`` are correct.
+    #
+    # ``_persist_job_id`` writes the RunPod job id on the row at the
+    # moment of /run, BEFORE the long poll begins. Powers the orphan
+    # resumer (``orchestrator/resume.py``) so a uvicorn restart
+    # mid-poll can re-fetch the existing job instead of wasting an
+    # already-paid render.
+    async def _persist_job_id(jid: str) -> None:
+        await repo.update_illustration(illustration, runpod_job_id=jid)
+
+    # Surface RunPod status transitions to SSE so the UI can label
+    # "v rade" vs "vytváranie obrázka".
+    async def _publish_runpod_status(status: str) -> None:
+        await event_bus.publish(
+            "illustration_runpod_status",
+            {
+                "illustration_id": illustration.id,
+                "scene_index": illustration.scene_index,
+                "runpod_status": status,
+            },
+        )
 
     # Environment-rethink bookkeeping (§ 11 Agent 4b):
     # - env_rethink_used: True once Agent 4b has fired for this slot.
@@ -395,18 +423,25 @@ async def run_branch(
             lock_seed_next = False
 
             # Render with up to ``RUNPOD_TIMEOUT_RETRY`` retries on
-            # ``RunPodTimeoutError`` only. A timeout means the GPU pool
-            # stalled — the workflow is fine. Each retry uses a fresh
-            # random seed (the cached prompt-hash may have been what
-            # got the original job queued behind a slow worker). The
-            # prompt_attempt counter is NOT bumped across these retries:
-            # they are infrastructure recovery, not prompt-engineering
-            # signals. Other ``RunPodError`` failures (FAILED/CANCELLED
-            # remote status, malformed response) fail immediately with
-            # ``error_code=RENDER_FAILED`` — they almost always indicate
-            # a workflow/auth issue that a retry would not heal.
+            # ``RunPodTimeoutError`` ONLY (IN_PROGRESS stall — worker
+            # started but didn't finish). The workflow is fine; each
+            # retry uses a fresh random seed (cached prompt-hash may
+            # have routed the original job to a stalled worker). The
+            # prompt_attempt counter is NOT bumped across these retries.
+            #
+            # ``RunPodQueueTimeoutError`` (IN_QUEUE budget exhausted —
+            # pool fully throttled) is NEVER retried: re-submitting
+            # would lose our FIFO position and put us behind every
+            # other tenant in the same throttled pool. Fail immediately
+            # with ``RENDER_QUEUE_TIMEOUT`` (refundable as infra noise).
+            #
+            # Other ``RunPodError`` failures (FAILED/CANCELLED remote
+            # status, malformed response) fail immediately with
+            # ``RENDER_FAILED`` — workflow/auth issue, retry won't heal.
+
             image_bytes: bytes | None = None
             timeout_exc: Exception | None = None
+            queue_timeout_exc: Exception | None = None
             for timeout_attempt in range(RUNPOD_TIMEOUT_RETRY + 1):
                 if timeout_attempt > 0:
                     # Reroll seed for the timeout retry. Overrides any
@@ -434,20 +469,44 @@ async def run_branch(
                 }
                 workflow, _ = replace_placeholders(workflow_template_to_use, replacements)
                 try:
-                    image_bytes = await runpod.run_workflow(workflow)
+                    image_bytes = await runpod.run_workflow(
+                        workflow,
+                        on_job_id=_persist_job_id,
+                        on_status_change=_publish_runpod_status,
+                    )
                     timeout_exc = None
                     break
                 except RunPodTimeoutError as e:
                     timeout_exc = e
                     continue
+                except RunPodQueueTimeoutError as e:
+                    # Never retry queue timeout — would lose FIFO position.
+                    queue_timeout_exc = e
+                    break
                 except Exception as e:
                     logger.error("runpod.run_workflow failed: %s", e)
                     await transition(
                         IllustrationState.FAILED,
                         error_message=f"Image rendering failed: {e}",
                         error_code=ERROR_CODE_RENDER_FAILED,
+                        runpod_job_id=None,
                     )
                     return
+
+            if queue_timeout_exc is not None:
+                logger.warning(
+                    "runpod queue timeout for illustration %s (scene_index=%d): %s",
+                    illustration.id,
+                    illustration.scene_index,
+                    queue_timeout_exc,
+                )
+                await transition(
+                    IllustrationState.FAILED,
+                    error_message=f"Image rendering queue timed out: {queue_timeout_exc}",
+                    error_code=ERROR_CODE_RENDER_QUEUE_TIMEOUT,
+                    runpod_job_id=None,
+                )
+                return
 
             if image_bytes is None:
                 logger.error(
@@ -459,8 +518,13 @@ async def run_branch(
                     IllustrationState.FAILED,
                     error_message=f"Image rendering failed: {timeout_exc}",
                     error_code=ERROR_CODE_RENDER_TIMEOUT,
+                    runpod_job_id=None,
                 )
                 return
+
+            # Clear job_id now that the render landed — no in-flight job
+            # to resume across a restart.
+            await repo.update_illustration(illustration, runpod_job_id=None)
 
             if cancel_flag.is_set():
                 await transition(IllustrationState.CANCELLED)

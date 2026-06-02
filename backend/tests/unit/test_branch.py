@@ -328,7 +328,7 @@ async def test_character_lora_from_character_config():
 
     captured_workflow = []
 
-    async def capture_workflow(workflow):
+    async def capture_workflow(workflow, **_kwargs):
         captured_workflow.append(workflow)
         return IMAGE_BYTES
 
@@ -592,7 +592,7 @@ async def _run_branch_capturing_seeds(ill, claude, runpod_side_effect):
                     return s
         return None
 
-    async def capture(workflow):
+    async def capture(workflow, **_kwargs):
         # The branch loads the real workflow file (matching prompts.workflow)
         # from disk, so the structure is the ComfyUI graph — scan for KSampler's
         # numeric seed wherever it sits.
