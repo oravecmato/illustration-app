@@ -1,283 +1,283 @@
 # Anime ilustrátor — používateľská príručka
 
-Lokálna aplikácia, ktorá zo zadaného textu vyrobí sériu vizuálne
-konzistentných **anime ilustrácií**. Analýzu textu a kontrolu výsledku
-robí Claude (Anthropic API), samotné kreslenie prebieha v ComfyUI
-workflowe (Illustrious XL + MHA-style LoRAs) na RunPod Serverless
-endpointe.
+Anime ilustrátor je webová aplikácia, v ktorej sa spolu s asistentom
+(Claude) v krátkom rozhovore dohodneš na podobe príbehu, a aplikácia
+ti k nemu vyrobí sériu **piatich vizuálne konzistentných anime
+ilustrácií**. Samotné kreslenie prebieha na GPU u tretej strany
+(RunPod ComfyUI Serverless, model *Illustrious XL* s LoRA postavami z
+My Hero Academia), texty a kontrolu kvality má na starosti Claude.
 
-Aplikácia beží lokálne na tvojom počítači — backend (Python) aj frontend
-(prehliadač). Nič nie je verejne dostupné, kým si to sám nepustíš online.
-
----
-
-## Čo aplikácia robí
-
-1. Vložíš text príbehu.
-2. Claude prečíta celý text a vyberie **max. 5 miest**, ktoré sa hodia
-   ilustrovať. Zároveň navrhne spoločný výtvarný štýl, aby všetky obrázky
-   pôsobili ako z jednej knihy.
-3. Pre každú z piatich ilustrácií prebehne samostatná „dielňa":
-   - Claude pripraví prompty pre danú scénu.
-   - ComfyUI vykreslí obrázok.
-   - Claude obrázok skontroluje. Ak nie je v poriadku, navrhne úpravu
-     promptov, alebo úplne nový koncept pre rovnaké miesto v príbehu.
-   - V najhoršom prípade sa pre jednu ilustráciu odohrá až **9 pokusov**
-     (3 koncepty × 3 obrázky na koncept), kým sa to vzdá.
-4. Všetkých 5 ilustrácií beží **paralelne**. Výsledok sa zobrazuje
-   priebežne.
-
-Generovanie trvá **niekoľko minút** — jeden ComfyUI beh trvá rádovo
-minútu a hĺbka iterácií závisí od toho, ako dobre to vyjde na prvý pokus.
-
-### Aké scény aplikácia v MVP vie ilustrovať
-
-Pre prvú verziu má aplikácia úmyselné obmedzenie: každá ilustrácia musí
-zobrazovať **práve jednu postavu** a tá musí byť jedným z troch typov:
-
-- **chlapec alebo muž** (v anime štýle ako Izuku Midoriya),
-- **dievča alebo žena** (v anime štýle ako Kyoka Jiro),
-- **matka / materská postava** (v anime štýle ako Inko Midoriya).
-
-Claude pri analýze textu vyberá iba také scény, kde takáto postava robí
-niečo konkrétne — má jasný výraz tváre, gesto, polohu alebo činnosť.
-Scény s viacerými postavami, davom, alebo bez jasného aktéra MVP
-nepodporuje.
-
-Ak v zadanom texte žiadna takáto scéna nie je, aplikácia ti to oznámi
-slovenskou hláškou (viď FAQ nižšie) a beh neprebehne.
+Aplikácia je nasadená ako **súkromné demo** dostupné iba cez pozývací
+odkaz alebo prístupový kľúč. Beží v cloude (frontend na Cloudflare
+Pages, backend na Fly.io); od teba sa neočakáva žiadna inštalácia.
 
 ---
 
-## Predpoklady
+## Prístup
 
-Predtým, než aplikáciu spustíš, potrebuješ:
+### Cez pozývací odkaz
 
-- **Python 3.11+** (`python --version`).
-- **Node.js 20+** s `npm` (alebo `pnpm`).
-- **Účet na RunPod** s nasadeným ComfyUI Serverless endpointom. Postup
-  nájdeš v dokumentácii RunPodu — pre štart stačí použiť hotový
-  [ComfyUI worker template](https://github.com/runpod-workers/worker-comfyui).
-  Z nasadeného endpointu si poznač:
-  - API kľúč (User Settings → API Keys).
-  - Endpoint ID (na detaile endpointu).
-- **API kľúč pre Anthropic** z [console.anthropic.com](https://console.anthropic.com).
-- **Workflow JSON v ComfyUI API formáte** — buď ten, ktorý prišiel s
-  projektom (`backend/app/workflows/default.json`), alebo vlastný. Vlastný
-  musí obsahovať šesticu reťazcov, ktoré aplikácia v texte workflowu nahradí
-  vygenerovanými promptmi:
-  - `CHARACTER_POSITIVE_PROMPT`
-  - `CHARACTER_NEGATIVE_PROMPT`
-  - `ENVIRONMENT_PROMPT`
-  - `CHARACTER_LORA`
-  - `STYLE_POSITIVE_PROMPT`
-  - `STYLE_NEGATIVE_PROMPT`
+Najjednoduchšia cesta: prevádzkovateľ ti pošle odkaz v tvare
+`https://anime-illustrator.pages.dev/?invite=<kľúč>`. Otvor ho a
+aplikácia si tvoj kľúč zapamätá v prehliadači — ďalej už pracuješ
+bez zadávania kľúča.
 
-  Tieto reťazce dáš v ComfyUI ako *hodnoty* do príslušných nodes (nie ako
-  ich názvy). Workflow potom v ComfyUI ulož cez „Save (API Format)".
+### Cez ručne vložený kľúč
 
----
+Ak si kľúč dostal iba ako text, choď na
+`https://anime-illustrator.pages.dev/`, na uvítacej stránke vlož
+kľúč do políčka „Prístupový kľúč" a potvrď. Kľúč sa uloží do
+`localStorage` prehliadača a pri ďalšej návšteve už nebudeš musieť
+nič zadávať.
 
-## Inštalácia
+### Limity na kľúč
 
-```bash
-# Naklonuj projekt
-git clone <repo>
-cd anime-illustrator
+Každý kľúč má pridelený počet **dokončených príbehov**, ktoré môže
+v rámci dema vyrobiť (zvyčajne 2–5). Keď ho vyčerpáš, aplikácia ti
+to oznámi a požiada o kontakt na prevádzkovateľa. Ak príbeh zlyhá z
+dôvodu výpadku GPU alebo iného infraštruktúrneho problému (nie
+preto, že by sa Claude vzdal), kvóta sa ti za daný príbeh
+**automaticky vráti**.
 
-# Backend
-cd backend
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e .
-cp .env.example .env               # vyplň hodnoty (viď nižšie)
-
-# Frontend (v novom termináli)
-cd ../frontend
-npm install
-cp .env.example .env               # zvyčajne stačí ponechať default
-```
+Jeden chat má strop **20 správ od teba**. Ak ho dosiahneš,
+aplikácia ťa pošle začať nový príbeh — staré zostanú dostupné na
+prezeranie cez priame URL.
 
 ---
 
-## Konfigurácia
+## Tvorba príbehu — krok za krokom
 
-V súbore `backend/.env` doplň:
+### Krok 1 — výber jazyka
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-RUNPOD_API_KEY=...
-RUNPOD_ENDPOINT_ID=...
-DATABASE_URL=sqlite+aiosqlite:///./data/app.db
-OUTPUT_DIR=./output
-WORKFLOW_PATH=./app/workflows/default.json
-ALLOWED_ORIGIN=http://localhost:5173
-```
+Vpravo hore je prepínač jazykov (vlajky **SK / CZ / GB**). Jazyk
+ovplyvňuje dve veci:
+- jazyk rozhrania (popisy, tlačidlá, hlášky),
+- jazyk samotného príbehu — Claude bude rozprávať a písať v tomto
+  jazyku.
 
-Žiadnu z týchto hodnôt nikdy nezdieľaj ani nekomituj do gitu. Súbor `.env`
-je v `.gitignore`.
+Jazyk môžeš meniť aj **počas behu** alebo na hotovom príbehu — text
+sa preloží, obrázky ostanú rovnaké. Preklad sa cachuje, takže
+prepnutie tam a späť je už okamžité.
 
-Vo `frontend/.env` zvyčajne stačí default:
+### Krok 2 — rozhovor s asistentom
 
-```
-VITE_API_BASE=http://localhost:8000
-```
+Na úvodnej obrazovke je chatové okno. Asistent (Claude v role
+„spolutvorcu") sa ťa pýta na nápad, postavy, prostredie, náladu.
+Pravidlá, ktoré aplikácia v MVP vyžaduje a o ktorých sa asistent
+postará automaticky:
+
+- **Najviac jeden chlapec / muž** (v anime štýle podľa Izuku
+  Midoriya, MHA).
+- **Najviac jedno dievča / žena** (v štýle Kyoka Jiro, MHA).
+- **Matka** ako voliteľná tretia postava, no iba ak je v príbehu
+  aspoň jedna z predošlých dvoch.
+- Voliteľne **jedna ne-ľudská postava** (zviera, robot, plyšák…) a
+  **dôležité predmety**, ktoré v príbehu rezonujú.
+- **5 ilustrácií** rozdelených medzi maximálne 5 prostredí, pričom
+  hlavná postava sa musí objaviť aspoň 2-krát.
+
+Keď je asistent s briefom spokojný, zhrnie ti ho a požiada o
+**potvrdenie**. Stačí napísať „áno" (alebo navrhnúť úpravu — vtedy
+sa rozhovor predĺži). Po potvrdení sa pod kapotou spustí druhý
+Claude agent, ktorý napíše samotný príbeh a rozplánuje 5
+ilustračných scén. Trvá to rádovo 20–40 sekúnd.
+
+### Krok 3 — sledovanie generovania
+
+Po potvrdení briefu sa stránka prepne na detail príbehu
+(`/<jazyk>/runs/<id>`). Hore vidíš:
+
+- **Názov príbehu** (najprv krátky topic, potom finálny titul).
+- **Stav** (Beží / Hotovo / Zlyhalo / Zrušené) a **počítadlo**
+  „Hotové K z 5".
+- **Tlačidlo „Zrušiť beh"** počas behu.
+- Voliteľný **banner** s vysvetlením, ak beh ako celok zlyhal.
+
+Pod tým sa zobrazuje samotný príbeh — odseky textu sa striedajú s
+ilustráciami presne tak, ako budú vyzerať vo finálnej knihe. Kým
+sa text alebo obrázok pripravuje, na jeho mieste je skeleton
+(svetlosivá plocha v správnom tvare), takže layout neposkakuje.
+
+Stránku **pokojne obnov alebo zavri** a vráť sa neskôr cez tú istú
+URL — beh pokračuje na pozadí. Ak pri obnovení zistíš, že sa beh
+od posledného otvorenia dokončil, uvidíš výsledok rovno; ak sa
+prerušil reštart servera, aplikácia sa automaticky pokúsi
+pripojiť späť k bežiacim GPU úlohám (viac v sekcii *Odolnosť*).
+
+### Stavy ilustrácie
+
+Každá z piatich kariet ilustrácií prejde vlastnou postupnosťou
+stavov. Najčastejšie uvidíš:
+
+| Štítok                         | Čo sa deje                                                            |
+|--------------------------------|-----------------------------------------------------------------------|
+| Čaká                           | Karta zatiaľ nezačala (čaká na voľný „slot")                          |
+| Vytváranie promptov            | Claude formuluje, čo má GPU vykresliť                                 |
+| **V rade na GPU**              | Úloha bola odoslaná na RunPod a čaká na voľného workera               |
+| Vytváranie obrázka (pokus K/3) | Worker práve renderuje                                                |
+| Hodnotenie                     | Claude vyhodnocuje hotový obrázok proti zadaniu                       |
+| Úprava promptov                | Obrázok nesedel, Claude prepisuje prompty a skúša znova               |
+| Prepracovanie konceptu         | Po troch neúspešných pokusoch Claude úplne prerobí scénu              |
+| Prepracovanie prostredia       | Vo výnimočnom prípade aj prostredie — keď ani Claude nevie scénu „nakŕmiť" renderru |
+| Prehodnotenie skorších pokusov | Po vyčerpaní auto-rozpočtu sa Claude vráti k histórii a vyberie najlepší skorší pokus |
+| Spoločná tvorba (manuál)       | Auto-pipeline to vzdal, otvára sa chat s „spolu-ilustrátorom"         |
+| Hotovo                         | Úspech, obrázok je zobrazený                                          |
+| Nepodarilo sa                  | Aj manuálny rozpočet sa minul                                         |
+| Zrušené                        | Beh bol zrušený                                                       |
+
+**„V rade na GPU"** je dôležitý rozlišovač: znamená, že úloha čaká
+na voľný hardware (typicky pri demo deployoch s 0–1 teplým
+workerom). Sám sa stane stavu **Vytváranie obrázka** akonáhle
+worker prácu prevezme. Ak by úloha v rade strávila viac než 30
+minút, považuje sa to za výpadok kapacity a karta sa vzdá s
+hláškou — kvóta sa za takéto zlyhanie vráti.
+
+### Krok 4 — výsledok a interakcia
+
+Keď je karta v stave **Hotovo**, ukáže obrázok priamo v príbehu.
+Kliknutím sa otvorí v plnej veľkosti. Pri každej karte je
+**trojbodkové menu** vpravo hore s týmito akciami (pokiaľ máš
+ešte manuálny rozpočet):
+
+- **„Vyrobiť znova"** — otvorí chat s manuálnym asistentom; pôvodný
+  obrázok ostáva ako záloha, kým neakceptuješ nový.
+- **„Zobraziť konverzáciu"** — viditeľné, ak karta už nejakou
+  manuálnou interakciou prešla; ukáže ti dovtedy uložený dialóg a
+  všetky pokusy.
+
+V karte, na ktorej preklik na konceptový popover (malá ikona)
+ukáže, **čo Claude o scéne vie** — koncept, charakter, prostredie a
+príp. ne-ľudská entita v scéne. Slúži najmä na orientáciu, prečo
+obrázok vyzerá tak, ako vyzerá.
+
+### Krok 5 — zrušenie behu
+
+Tlačidlo **„Zrušiť beh"** hore zastaví všetky čakajúce karty.
+Pozor: obrázky, ktoré sú **práve teraz** na GPU, sa dokončia — len
+ich aplikácia po dokončení už nepoužije (RunPod nemá API na
+prerušenie bežiacej úlohy). Hotové karty zostávajú ako sú.
 
 ---
 
-## Spustenie
+## Manuálna spolutvorba („spolu-ilustrátor")
 
-V dvoch oddelených termináloch:
+Ak sa auto-pipeline (3 koncepty × 3 obrázky × prípadná záchrana
+z histórie) nepodarí, karta sa **nepoloží do zlyhania** — namiesto
+toho sa na jej mieste otvorí krátky chat s **„spolu-ilustrátorom"**
+(Claude v inej role). Cieľ je dosiahnuť použiteľný obrázok v dialógu
+s tebou.
 
-```bash
-# Terminál 1 — backend
-cd backend
-source .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
-```
+Ako to vyzerá:
 
-```bash
-# Terminál 2 — frontend
-cd frontend
-npm run dev
-```
+1. Asistent ťa privíta a stručne sa spýta, čo si v scéne želáš
+   vidieť. Ja ako asistent **nevidím obrázky**, takže každú spätnú
+   väzbu mu opíš slovami („zosvetli pozadie", „pridaj úsmev",
+   „odstráň okuliare").
+2. Keď máš spolu s ním konkrétny koncept, klikni **„Potvrdiť"**.
+   Asistent ti vyrobí prompty a pošle ich na render.
+3. Po každom rendere uvidíš obrázok priamo v paneli a malé tlačidlá
+   **„Akceptovať"** alebo **„Iterovať"**. Akceptovanie ukončí
+   manuálnu spolutvorbu a obrázok sa stane súčasťou príbehu.
+   Iterovanie pridá ďalšiu spätnú väzbu a posunie sa na ďalší
+   pokus.
+4. Manuálny rozpočet je **5 pokusov** na jednu kartu. Ak ho minieš,
+   karta sa preklopí do „Nepodarilo sa". Aj v takom prípade ostane
+   menu **„Zobraziť konverzáciu"** dostupné, takže sa môžeš vrátiť
+   k niektorému z 5 minulých pokusov a akceptovať ho dodatočne.
 
-Otvor prehliadač na adrese, ktorú vypíše Vite (typicky
-`http://localhost:5173`).
-
-Pri prvom spustení backendu sa automaticky vytvorí SQLite databáza v
-priečinku `backend/data/`. Vygenerované obrázky sa ukladajú do
-`backend/output/runs/<id_behu>/`.
+Manuálnu spolutvorbu vieš spustiť aj sám na **hotovom obrázku** cez
+trojbodkové menu → „Vyrobiť znova". Vtedy sa pôvodný obrázok
+zachová ako záloha a manuálny rozpočet sa neresetuje (zdieľa sa s
+prípadným predošlým automatickým fallbackom tej istej karty).
 
 ---
 
-## Použitie
+## Odolnosť voči výpadkom
 
-### Krok 1 — vloženie textu
+Pre demo nasadenie sa kompaktnosť a cena zmestili pred robustnosť,
+no aplikácia má niekoľko mechanizmov, ktoré bežné krátkodobé
+výpadky znášajú v poriadku:
 
-Na úvodnej obrazovke je veľké textové pole „Text príbehu". Vlož doň celý
-text, z ktorého chceš ilustrácie vyrobiť. Limit je 50 000 znakov, čo
-pokryje aj dlhšie príbehy.
-
-Klikni na **„Vygenerovať ilustrácie"**.
-
-Ak text neobsahuje žiadnu vhodnú scénu (viď „Aké scény aplikácia v MVP
-vie ilustrovať" vyššie), aplikácia ti to oznámi červeným bannerom v
-detaile behu.
-
-### Krok 2 — sledovanie priebehu
-
-Stránka sa prepne na detail behu. Hore vidíš celkový stav (Beží / Hotovo /
-Zlyhalo / Zrušené) a počítadlo dokončených ilustrácií („Hotové: K z N").
-
-Nižšie je mriežka kariet — jedna na ilustráciu. Každá karta nezávisle
-ukazuje, čo sa práve s tou jednou ilustráciou deje:
-
-| Stav                       | Čo to znamená                                   |
-|----------------------------|-------------------------------------------------|
-| Čaká                       | Ilustrácia zatiaľ nezačala                      |
-| Pripravujem prompty        | Claude formuluje, čo má ComfyUI vykresliť       |
-| Kreslím (pokus K/3)        | ComfyUI generuje obrázok                        |
-| Vyhodnocujem výsledok      | Claude kontroluje hotový obrázok                |
-| Upravujem prompty          | Obrázok nesedel, Claude upravuje prompty        |
-| Premýšľam koncept          | Claude skúša úplne nový koncept tej istej scény |
-| Hotovo                     | Úspech, obrázok je zobrazený                    |
-| Nepodarilo sa              | Po všetkých pokusoch sa nepodarilo              |
-| Zrušené                    | Zastavené užívateľom                            |
-
-Karta, ktorá pracuje, má pulzujúci indikátor. Karta, ktorá je hotová,
-zobrazuje obrázok priamo. Karta, ktorá zlyhala, zobrazuje stručný dôvod.
-
-**Stránku môžeš pokojne obnoviť alebo zavrieť a vrátiť sa neskôr.** Beh
-pokračuje na pozadí a po návrate sa všetko obnoví podľa toho, ako ďaleko
-postúpil.
-
-### Krok 3 — zrušenie
-
-Počas behu je v hornej časti tlačidlo **„Zrušiť beh"**. Po potvrdení sa
-ďalšie kroky neuskutočnia a všetky aktívne ilustrácie sa prepnú do stavu
-„Zrušené". Pozor: ComfyUI obrázky, ktoré sa už začali kresliť, sa
-dokončia (RunPod ich neviem zastaviť uprostred), len sa s ich výsledkom
-už nepracuje.
-
-### Krok 4 — výsledok
-
-Po dokončení behu sú obrázky uložené aj na disku, v priečinku
-`backend/output/runs/<id_behu>/`. V UI ich vidíš v mriežke; kliknutím na
-obrázok sa otvorí v plnej veľkosti.
+- **Reštart servera počas behu** (deploy, krátky výpadok pamäte) —
+  pri štarte sa všetky bežiace behy klasifikujú a tie, ktoré mali
+  rozbehnutú GPU úlohu, sa **znovu pripoja k tomu istému RunPod
+  job-id**. Stratíš nanajvýš poradové miesto v rade, nie celý
+  rozpočet.
+- **Strata SSE pripojenia** (prepnutie WiFi, uspatie počítača) —
+  prehliadač sa automaticky reconnectne; pri tom dostaneš aktuálny
+  snapshot a SSE pokračuje, akoby sa nič nestalo.
+- **Vyplnená GPU fronta** — keď je úloha viac než 30 min v rade,
+  karta sa vzdá s hláškou „v rade na GPU sa minul čas"; kvóta sa
+  vráti.
+- **Stuck worker** — keď GPU začne úlohu spracovávať, ale 10 minút
+  nedoručí výsledok, aplikácia úlohu skúsi ešte 2-krát s iným
+  semienkom (na inom workerovi). Až potom kartu vzdá.
 
 ---
 
 ## Často kladené otázky
 
 **Koľko ma to bude stáť?**
-Dve nezávislé položky: tokeny v Anthropic API (zopár volaní na ilustráciu,
-plus jedna analýza textu na začiatku) a sekundy GPU času na RunPod (pri
-serverless endpointe platíš len za reálne vykonané jobs). Pre orientáciu si
-pred prvým spustením skontroluj cenníky oboch služieb a nastav si limity na
-ich účtoch.
+Demo má vstavanú kvótu na kľúč — nakoľko aplikácia platí
+prevádzkovateľ. Ty sa o ceny nestaráš, len o počet zostávajúcich
+príbehov.
 
-**Aplikácia mi vyhodila hlášku „Zadaný text nie je vhodný ako zdroj ilustrácií". Čo s tým?**
-Aplikácia v MVP ilustruje iba scény, kde je práve jedna postava (chlapec/muž,
-dievča/žena alebo matka) a robí niečo konkrétne — má jasný výraz, gesto,
-alebo činnosť. Ak Claude v tvojom texte takúto scénu nenájde, beh sa
-ukončí touto hláškou. Riešenia: skús text, kde sa popisuje aspoň jedna
-takáto sólová scéna (napr. „Janka sedela pri okne a plakala", „Otec
-zdvihol kameň a zaváhal"), prípadne dlhší text, v ktorom je väčšia šanca,
-že sa nejaká vhodná scéna vyskytne.
+**Generovanie ide pomaly / niektoré karty stoja v „V rade na GPU".**
+Pri malých demo deployoch obvykle nie sú trvalo bežiaci GPU workeri
+— každá nová karta najprv prebudí worker (~30–60 s) a potom začne
+renderovať. Päť kariet beží paralelne, takže môžeš v jednom čase
+vidieť aj 5× „V rade". Vydrž, posunie sa to.
 
-**Prečo niektoré ilustrácie zlyhajú?**
-Claude pri vyhodnocovaní obrázka môže opakovane konštatovať, že to nie je
-dosť dobré, a po vyčerpaní 9 pokusov sa scéna vzdá. Najčastejšie príčiny:
-nezvyklá scéna, ktorú si workflow nevie poradiť vykresliť; postava, ktorú
-LoRA nezachytáva; alebo zlý workflow. Skús ten beh spustiť znova — Claude
-môže navrhnúť odlišné koncepty.
+**Niektoré karty zlyhajú aj po manuále — čo s tým?**
+Najčastejšia príčina je, že požadovaná scéna ide nad rámec toho,
+čo MHA-LoRA model zvládne (príliš veľa postáv, exotické pozy,
+silné štýlové rozpory). Manuálne menu **„Zobraziť konverzáciu"** ti
+dovolí akceptovať ktorýkoľvek z 5 historických manuálnych pokusov;
+často niektorý z nich vyzerá rozumne, len ho asistent vyhodnotil
+ako nedokonalý.
 
-**Môžem použiť iný workflow?**
-Áno. Stačí svoj API-format workflow JSON uložiť ako
-`backend/app/workflows/default.json` (alebo zmeniť cestu v `.env`). Musí
-obsahovať šesť spomenutých placeholderov ako hodnoty.
+**Môžem si svoj príbeh stiahnuť?**
+Nateraz nie — obrázky aj text žijú výlučne na URL behu
+(`/<jazyk>/runs/<id>`). Tú si však môžeš uložiť, otvoriť kedykoľvek
+neskôr a v ľubovoľnom z troch jazykov.
 
-**Môžem generovať viac ako 5 ilustrácií?**
-V MVP nie. Limit 5 je zámerný strop na nákladovú bezpečnosť pri testovaní.
+**Funguje to na mobile?**
+Aplikácia je responzívna a v prehliadači na telefóne funguje, ale
+pri 5-stĺpcovej mriežke kariet je pohodlnejší tablet alebo
+počítač.
 
-**Aplikácia nereaguje / „beží" už pridlho.**
-Skontroluj log backendu v termináli. Najčastejšie príčiny:
-- Nesprávny `RUNPOD_ENDPOINT_ID` alebo `RUNPOD_API_KEY` — chyby uvidíš v logu.
-- Endpoint v RunPode nemá teplých workerov a každý prvý job čaká na cold
-  start (typicky 30–60 s pri ComfyUI). Skús v RunPod konzole nastaviť
-  aspoň jedného active workera.
-- Anthropic vrátil rate-limit chybu. Skús neskôr alebo spracovávaj menej
-  textov naraz.
+**Sú moje vstupy niekde uložené?**
+Áno — chat aj výsledný príbeh sa ukladajú v databáze backendu, aby
+si sa k behu mohol vrátiť. Pre dema sú dáta privátne na úrovni
+URL (kto má URL, vidí beh; URL nikde verejne nesúvisíme).
 
-**Ako aplikáciu úplne vyresetujem?**
-Zastav backend, vymaž `backend/data/app.db` a `backend/output/`, spusti
-backend znova. DB sa vytvorí prázdna.
-
-**Sú moje vstupné texty niekde uložené?**
-Lokálne v SQLite databáze (`backend/data/app.db`) na tvojom počítači. Texty
-sa posielajú do Anthropic API (na analýzu) podľa ich štandardných
-podmienok. Nikam inam neodchádzajú.
+**Stratil som svoj prístupový kľúč.**
+Kontaktuj prevádzkovateľa — kľúče sú jednorazovo generované,
+neexistuje samoobslužné obnovenie. Ak máš ešte aktívnu reláciu v
+prehliadači, na ktorej bol kľúč použitý, kľúč nájdeš v
+`localStorage` pod kľúčom `accessKey`.
 
 ---
 
 ## Limity (zhrnutie)
 
-| Limit                                    | Hodnota |
-|------------------------------------------|---------|
-| Max. dĺžka vstupného textu               | 50 000 znakov |
-| Max. počet ilustrácií na beh             | 5 |
-| Max. počet konceptov na ilustráciu       | 3 |
-| Max. počet pokusov na koncept            | 3 |
-| Max. počet ComfyUI behov na ilustráciu   | 9 (3 × 3) |
-| Max. čakanie na jeden ComfyUI beh        | 10 minút |
+| Limit                                          | Hodnota                              |
+|------------------------------------------------|--------------------------------------|
+| Počet ilustrácií na príbeh                     | presne 5                             |
+| Pokusov na koncept                             | 3                                    |
+| Konceptov na ilustráciu                        | 3                                    |
+| Manuálnych pokusov na ilustráciu               | 5                                    |
+| Užívateľských správ na chat                    | 20                                   |
+| Celkom správ (vrátane asistentových) na chat   | 60                                   |
+| Čakanie v GPU rade                             | 30 minút (potom zlyhanie)            |
+| Čakanie na hotový obrázok po prevzatí workerom | 10 minút × 3 pokusy s novým semienkom|
+| Podporované jazyky UI a príbehu                | SK, CZ, EN                           |
 
 ---
 
-## Pri probléme
+## Hlásenie problémov
 
-Ak niečo nefunguje a manuál nepomohol, najprv si pozri log v termináli
-backendu — väčšina chýb (zlý kľúč, nedostupný endpoint, chyba parsovania
-odpovede Claudu) sa tam objaví zrozumiteľne. Pre detailnejšie ladenie sa
-pozri do priečinka `backend/output/runs/<id_behu>/`, kde sú obrázky
-jednotlivých pokusov.
+Ak narazíš na chybu, ktorá v tejto príručke nie je opísaná,
+napíš prevádzkovateľovi (osobe, ktorá ti poslala prístupový kľúč)
+spolu s URL behu, na ktorom sa problém prejavil — z URL vie v
+backende dohľadať detailný log konkrétneho behu.
