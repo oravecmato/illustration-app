@@ -44,6 +44,15 @@ jobs:
           echo "Resolved SHA: $SHA"
 
       - name: Check each required workflow on this SHA
+        # Deploy is triggered by `workflow_run: completed` on any of the
+        # three required CI workflows, so it fires up to three times per
+        # push. On the earlier triggers some required workflows are still
+        # running — their `conclusion` is the empty string, not null, so
+        # we can't rely on jq's `//` fallback. Instead we filter for
+        # `--status completed` and treat "no completed run yet" as
+        # "wait for the next trigger" (skip cleanly, exit 0). A required
+        # workflow that completed with a non-success conclusion is the
+        # only thing that actually fails the gate.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ steps.resolve.outputs.sha }}
@@ -55,14 +64,24 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --workflow "$wf" \
               --commit "$SHA" \
+              --status completed \
               --limit 1 \
-              --json conclusion --jq '.[0].conclusion // "missing"')
+              --json conclusion --jq '.[0].conclusion // "pending"')
             echo "  → $CONCLUSION"
-            if [ "$CONCLUSION" != "success" ]; then
-              echo "::error::'$wf' is '$CONCLUSION' for $SHA — refusing to deploy."
-              exit 1
-            fi
+            case "$CONCLUSION" in
+              success)
+                ;;
+              pending)
+                echo "::notice::'$wf' has no completed run yet for $SHA — waiting for next workflow_run trigger."
+                exit 0
+                ;;
+              *)
+                echo "::error::'$wf' completed with '$CONCLUSION' for $SHA — refusing to deploy."
+                exit 1
+                ;;
+            esac
           done
+          echo "All required workflows green for $SHA."
 
   # ── Backend → Fly.io ─────────────────────────────────────────────────────
   deploy-backend:
