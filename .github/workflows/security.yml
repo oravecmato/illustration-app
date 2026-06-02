@@ -126,7 +126,7 @@ jobs:
       # with all severities" and ran trivy with no flags). Calling the
       # CLI ourselves makes the policy explicit and reviewable.
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.2.3
+        uses: aquasecurity/setup-trivy@v0.2.6
 
       # First scan: table format → stdout, so the CVE list is visible in
       # the workflow log without round-tripping through SARIF artifacts.
