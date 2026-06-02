@@ -176,6 +176,31 @@ def test_r2_prefix_normalisation():
     assert "//" not in url.replace("https://", "")
 
 
+def test_r2_default_jurisdiction_endpoint():
+    store = R2ImageStore(
+        account_id="acct",
+        access_key_id="ak",
+        secret_access_key="sk",
+        bucket="bucket",
+        public_base="https://pub.r2.dev",
+        prefix="dev",
+    )
+    assert store._endpoint == "https://acct.r2.cloudflarestorage.com"
+
+
+def test_r2_eu_jurisdiction_endpoint():
+    store = R2ImageStore(
+        account_id="acct",
+        access_key_id="ak",
+        secret_access_key="sk",
+        bucket="bucket",
+        public_base="https://pub.r2.dev",
+        prefix="dev",
+        jurisdiction="eu",
+    )
+    assert store._endpoint == "https://acct.eu.r2.cloudflarestorage.com"
+
+
 def test_r2_rejects_absolute_keys():
     store = R2ImageStore(
         account_id="acct",

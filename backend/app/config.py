@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     r2_bucket: str = ""
     r2_public_base: str = ""
     r2_prefix: str = "dev"
+    # R2 jurisdictional endpoint. Buckets created in the EU jurisdiction MUST
+    # be accessed via `*.eu.r2.cloudflarestorage.com`; the default endpoint
+    # returns 403/AccessDenied for them even with a correctly scoped token.
+    r2_jurisdiction: Literal["default", "eu"] = "default"
 
 
 _settings: Settings | None = None

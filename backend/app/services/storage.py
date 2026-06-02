@@ -165,6 +165,7 @@ class R2ImageStore:
         bucket: str,
         public_base: str,
         prefix: str,
+        jurisdiction: str = "default",
     ) -> None:
         self._account_id = account_id
         self._access_key_id = access_key_id
@@ -173,7 +174,15 @@ class R2ImageStore:
         # Normalise both ends so url_for never produces "//" or trailing "/".
         self._public_base = public_base.rstrip("/")
         self._prefix = prefix.strip("/")
-        self._endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+        # EU-jurisdiction buckets must be hit via the `*.eu.` subdomain; the
+        # default endpoint returns AccessDenied for them even with a correctly
+        # scoped token.
+        host = (
+            f"{account_id}.eu.r2.cloudflarestorage.com"
+            if jurisdiction == "eu"
+            else f"{account_id}.r2.cloudflarestorage.com"
+        )
+        self._endpoint = f"https://{host}"
         # One Session per process is fine — clients are short-lived
         # context managers; the Session just holds credential metadata.
         self._session = aioboto3.Session()
@@ -299,5 +308,6 @@ def get_image_store(settings: Settings) -> ImageStore:
             bucket=settings.r2_bucket,
             public_base=settings.r2_public_base,
             prefix=settings.r2_prefix,
+            jurisdiction=settings.r2_jurisdiction,
         )
     raise ConfigurationError(f"Unknown IMAGE_STORE_BACKEND={backend!r}; expected 'local' or 'r2'.")
