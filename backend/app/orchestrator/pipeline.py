@@ -12,7 +12,12 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.constants import MAX_CONCURRENT_BRANCHES
+from app.api.auth import refund_run_quota
+from app.constants import (
+    ERROR_CODE_OOM_REAPED,
+    ERROR_CODE_RENDER_TIMEOUT,
+    MAX_CONCURRENT_BRANCHES,
+)
 from app.db.models import IllustrationState, Run, RunStatus
 from app.db.repositories import RunRepository
 from app.orchestrator.branch import run_branch
@@ -21,6 +26,12 @@ from app.schemas.claude import StyleGuide
 from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
 from app.services.storage import ImageStore
+
+# Infra-noise error codes on Illustration.error_code that justify a
+# quota refund (§ 8.11.4). Prompt-engineering exhaustions (RENDER_FAILED
+# from RunPod returning bad output, or a successful render that the
+# evaluator rejects) leave the slot consumed.
+_INFRA_REFUND_CODES = frozenset({ERROR_CODE_RENDER_TIMEOUT, ERROR_CODE_OOM_REAPED})
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +178,21 @@ async def run_pipeline(
             )
             await event_bus.publish("run_completed", {"completed": completed, "failed": failed})
 
+        # Quota refund: if NO illustration completed AND every failed
+        # illustration carries an infra-noise error_code, the run never
+        # produced value for the user — refund the slot (§ 8.11.4).
+        # Cancelled runs are explicitly NOT refunded (user-initiated
+        # abort still consumed model spend up to the cancel point).
+        if completed == 0 and failed > 0 and cancelled == 0:
+            failed_codes = {
+                ill.error_code for ill in illustrations if ill.state == IllustrationState.FAILED
+            }
+            if failed_codes and failed_codes.issubset(_INFRA_REFUND_CODES):
+                try:
+                    await refund_run_quota(repo.session, run.id)
+                except Exception:  # pragma: no cover — best effort
+                    logger.exception("Quota refund failed for run %s", run.id)
+
     except Exception as e:
         logger.error("Pipeline failed with unhandled exception: %s", e)
         await repo.update_run(
@@ -178,6 +204,12 @@ async def run_pipeline(
         await event_bus.publish(
             "run_failed", {"error_code": "INTERNAL_ERROR", "error_message": str(e)}
         )
+        # INTERNAL_ERROR == infra failure (orchestrator crashed before
+        # delivering any value). Refund. Idempotent via quota_refunded.
+        try:
+            await refund_run_quota(repo.session, run.id)
+        except Exception:  # pragma: no cover — best effort
+            logger.exception("Quota refund after INTERNAL_ERROR failed for run %s", run.id)
 
 
 def _update_snapshot(event_bus: EventBus, run: Run, illustrations) -> None:

@@ -13,7 +13,9 @@ from sqlalchemy import select, update
 from app.api import illustrations as illustrations_api
 from app.api import runs as runs_api
 from app.api import sessions as sessions_api
+from app.api.auth import refund_run_quota
 from app.config import Settings, get_settings
+from app.constants import ERROR_CODE_OOM_REAPED
 from app.db.migrations import upgrade_to_head_async
 from app.db.models import Illustration, IllustrationState, Run, RunStatus
 from app.db.session import get_session_factory, init_db
@@ -85,7 +87,10 @@ async def _reap_orphan_runs() -> None:
                 Illustration.run_id.in_(orphan_run_ids),
                 Illustration.state.in_(_NON_TERMINAL_ILLUSTRATION_STATES),
             )
-            .values(state=IllustrationState.FAILED)
+            # Stamp error_code=OOM_REAPED so the snapshot / API consumer can
+            # distinguish infra-killed runs from prompt-engineering exhaustion.
+            # Same refund semantics as RENDER_TIMEOUT (§ 8.11.4).
+            .values(state=IllustrationState.FAILED, error_code=ERROR_CODE_OOM_REAPED)
         )
         await s.commit()
         logger.warning(
@@ -93,6 +98,19 @@ async def _reap_orphan_runs() -> None:
             len(orphan_run_ids),
             ill_result.rowcount,
         )
+
+        # Refund the quota slot of every reaped run. Idempotent: a second
+        # startup reap on an already-refunded row is a no-op via the
+        # quota_refunded guard.
+        refunded = 0
+        for rid in orphan_run_ids:
+            try:
+                if await refund_run_quota(s, rid):
+                    refunded += 1
+            except Exception:  # pragma: no cover — best effort, never block startup
+                logger.exception("Failed to refund quota for orphan run %s", rid)
+        if refunded:
+            logger.info("Startup reap: refunded %d access-key slot(s)", refunded)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

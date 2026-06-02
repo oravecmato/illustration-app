@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import runs as runs_api
+from app.api.auth import require_access_key
 from app.constants import MAX_MANUAL_ATTEMPTS
-from app.db.models import IllustrationState, RunStatus
+from app.db.models import AccessKey, IllustrationState, RunStatus
 from app.db.repositories import ManualRepository, RunRepository
 from app.db.session import get_session_factory
 from app.schemas.api import (
@@ -69,6 +70,7 @@ async def _build_manual_response(
 async def get_manual_chat(
     illustration_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> ManualSessionResponse:
     """Return the full § 6A manual chat for one illustration.
 
@@ -112,6 +114,7 @@ async def post_manual_message(
     illustration_id: str,
     body: ManualMessageRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> ManualSessionResponse:
     """Append a user message and let Agent 6 (and possibly the renderer) respond."""
     if runs_api._claude_client is None or runs_api._runpod_client is None:
@@ -151,6 +154,7 @@ async def accept_manual_attempt(
     illustration_id: str,
     body: AcceptAttemptRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> ManualSessionResponse:
     """Promote a specific manual attempt's image to canonical (§ 6A.10).
 
@@ -193,6 +197,7 @@ async def accept_manual_attempt(
 async def iterate_manual_image(
     illustration_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> ManualSessionResponse:
     """Append the localized iterate-prompt bubble (§ 6A.10).
 
@@ -239,6 +244,7 @@ async def iterate_manual_image(
 async def regenerate_illustration(
     illustration_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> ManualSessionResponse:
     """Begin a manual regeneration on a COMPLETED illustration (§ 6A.9)."""
     if runs_api._claude_client is None or runs_api._runpod_client is None:

@@ -15,7 +15,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import require_access_key
 from app.db.models import (
+    AccessKey,
     Illustration,
     IllustrationConceptTranslation,
     IllustrationState,
@@ -509,6 +511,7 @@ async def translate_run(
     run_id: str,
     body: TranslateRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> TranslateResponse:
     """Request translations for specific run items.
 
@@ -978,6 +981,7 @@ async def run_events(
 async def cancel_run(
     run_id: str,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> dict:
     repo = RunRepository(session)
     run = await repo.get_run(run_id)

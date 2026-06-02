@@ -12,6 +12,24 @@ export default {
     message_placeholder: 'Napiš zprávu…',
     confirmation_placeholder: 'Napiš „ano" pro potvrzení nebo navrhni změnu…',
     char_limit: 'znaků',
+    user_message_limit:
+      'Dosáhl jsi maximálního počtu zpráv pro tento příběh. Pro pokračování začni nový příběh.',
+  },
+  access: {
+    title: 'Vyžadovaný přístup',
+    intro:
+      'Toto je soukromé demo. Vlož přístupový klíč, který ti dal provozovatel, nebo použij pozvánkový odkaz.',
+    key_label: 'Přístupový klíč',
+    key_placeholder: 'Vlož svůj přístupový klíč…',
+    submit: 'Pokračovat',
+    new_session: 'Začít nový příběh',
+    errors: {
+      MISSING_ACCESS_KEY: 'Prosím, vlož přístupový klíč, který jsi dostal.',
+      ACCESS_KEY_REVOKED:
+        'Tento přístupový klíč byl zrušen. Kontaktuj provozovatele pro nový.',
+      QUOTA_EXHAUSTED:
+        'Vyčerpal jsi všechny příběhy tohoto klíče. Pokud chceš více, ozvi se provozovateli.',
+    },
   },
   story: {
     illustration_n: 'Ilustrace {n}',

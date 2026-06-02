@@ -128,6 +128,23 @@ class Run(Base):
     # optional reserved_for_scene_index (scene lock). See
     # app.schemas.claude.NarrativeEntity. Nullable for legacy rows.
     narrative_entities_json: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Access-gating provenance (§ 8.11). The opaque access-key string that
+    # consumed the quota slot for this run. Nullable for legacy rows from
+    # before the gating migration; populated for every new run by the
+    # finalize handler. ON DELETE SET NULL so deleting a key from the
+    # admin CLI does not cascade-delete historical runs.
+    access_key: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("access_keys.key", ondelete="SET NULL"), nullable=True, default=None
+    )
+    # Idempotency guard for the quota-refund path. Flipped from False to
+    # True exactly once when the run terminates with every illustration in
+    # an infra-noise bucket (RENDER_TIMEOUT / OOM_REAPED) or with
+    # run.error_code=INTERNAL_ERROR. The atomic conditional UPDATE in
+    # ``app/api/auth.py::refund_run_quota`` uses this column to make the
+    # refund safe under the orchestrator/reap race.
+    quota_refunded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
 
     illustrations: Mapped[list["Illustration"]] = relationship(
         "Illustration", back_populates="run", order_by="Illustration.scene_index"
@@ -377,4 +394,45 @@ class IllustrationConceptTranslation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class AccessKey(Base):
+    """Demo-gating access key (§ 5.6, § 8.11).
+
+    Opaque URL-safe string issued by the operator via ``make grant``.
+    Each key holds a soft quota of runs (``runs_allowed``) that
+    ``require_access_key`` enforces on every paid endpoint
+    (``PAID_ENDPOINTS`` in ``app/constants.py``). Admin keys carry
+    ``runs_allowed = NULL`` and bypass the quota check while still going
+    through the same auth path so the deployment never has a parallel
+    no-auth code path that could be reached by accident.
+    """
+
+    __tablename__ = "access_keys"
+
+    # Generated via ``secrets.token_urlsafe(24)`` → up to 32 chars of
+    # URL-safe base64. 64 col width gives headroom for future widening.
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Human-readable label for the admin CLI's `list-keys` output. Free
+    # text, e.g. "Demo invite for Alex" or "Personal admin (Martin)".
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL == admin / unlimited. A non-null integer is the hard ceiling
+    # on the number of finalised runs the key may pay for.
+    runs_allowed: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # Monotonically increasing tally of consumed slots. Atomic
+    # conditional UPDATE in ``app/api/auth.py::consume_run_quota``
+    # increments this; ``refund_run_quota`` decrements it (clamped at 0).
+    runs_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Touched by ``require_access_key`` on every authenticated request
+    # so the admin CLI can report stale / unused keys at a glance.
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # Set when the operator revokes the key via ``make revoke``. The
+    # row is NOT deleted because deletion would cascade-nullify the
+    # ``runs.access_key`` provenance of historical runs.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
     )

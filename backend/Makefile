@@ -18,7 +18,7 @@ UVICORN_PID := /tmp/claude/uvicorn.pid
 UVICORN_LOG := /tmp/claude/uvicorn.log
 UVICORN_APP := app.main:app
 
-.PHONY: help test test-unit test-integration lint fmt fmt-check check migrate revision serve-bg restart-bg stop-bg
+.PHONY: help test test-unit test-integration lint fmt fmt-check check migrate revision serve-bg restart-bg stop-bg grant grant-admin revoke list-keys
 
 help:
 	@echo "Backend targets:"
@@ -34,6 +34,10 @@ help:
 	@echo "  make serve-bg          - start uvicorn in background (migrates first; logs $(UVICORN_LOG))"
 	@echo "  make restart-bg        - stop running uvicorn (if any) and start fresh in background"
 	@echo "  make stop-bg           - stop background uvicorn"
+	@echo "  make grant runs=N [label=...]   - issue a quota-limited access key"
+	@echo "  make grant-admin [label=...]    - issue an unlimited admin access key"
+	@echo "  make revoke key=...             - revoke an existing access key"
+	@echo "  make list-keys                  - list every access key"
 
 test:
 	$(PYTEST) -q
@@ -111,3 +115,28 @@ stop-bg:
 	@echo "uvicorn stopped."
 
 restart-bg: stop-bg serve-bg
+
+# ── Access-key admin (§ 8.11.5) ──────────────────────────────────────────
+# These shell out to ``app.cli.grant`` so the venv + DATABASE_URL stay
+# pinned to whatever ``.env`` declares. The CLI prints the issued key
+# and the invite URL on success.
+
+grant:
+	@if [ -z "$(runs)" ]; then \
+		echo "usage: make grant runs=N [label=\"...\"]"; \
+		exit 1; \
+	fi
+	$(PY) -m app.cli.grant grant --runs $(runs) $(if $(label),--label "$(label)",)
+
+grant-admin:
+	$(PY) -m app.cli.grant grant-admin $(if $(label),--label "$(label)",)
+
+revoke:
+	@if [ -z "$(key)" ]; then \
+		echo "usage: make revoke key=..."; \
+		exit 1; \
+	fi
+	$(PY) -m app.cli.grant revoke --key "$(key)"
+
+list-keys:
+	$(PY) -m app.cli.grant list

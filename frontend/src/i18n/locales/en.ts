@@ -12,6 +12,24 @@ export default {
     message_placeholder: 'Type a message…',
     confirmation_placeholder: 'Write "yes" to confirm or suggest a change…',
     char_limit: 'characters',
+    user_message_limit:
+      "You've reached the maximum number of messages for this story. Start a new story to continue.",
+  },
+  access: {
+    title: 'Access required',
+    intro:
+      'This is a private demo. Paste the access key you received from the operator, or follow the invite link they shared with you.',
+    key_label: 'Access key',
+    key_placeholder: 'Paste your access key…',
+    submit: 'Continue',
+    new_session: 'Start a new story',
+    errors: {
+      MISSING_ACCESS_KEY: 'Please paste the access key you received.',
+      ACCESS_KEY_REVOKED:
+        'This access key has been revoked. Contact the operator for a new one.',
+      QUOTA_EXHAUSTED:
+        "You've used up all stories on this access key. Contact the operator if you'd like more.",
+    },
   },
   story: {
     illustration_n: 'Illustration {n}',

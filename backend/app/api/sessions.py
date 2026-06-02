@@ -25,7 +25,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import runs as runs_api
-from app.db.models import SessionState
+from app.api.auth import (
+    QuotaExhausted,
+    consume_run_quota,
+    decrement_runs_used,
+    require_access_key,
+    stamp_run_access_key,
+)
+from app.constants import ERROR_CODE_QUOTA_EXHAUSTED
+from app.db.models import AccessKey, SessionState
 from app.db.repositories import RunRepository, SessionRepository
 from app.db.session import get_session_factory
 from app.orchestrator.events import EventBus
@@ -92,6 +100,7 @@ def _service(session: AsyncSession) -> SessionService:
 @router.post("", status_code=201, response_model=SessionResponse)
 async def create_session(
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    _key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> SessionResponse:
     svc = _service(session)
     s = await svc.create_session()
@@ -117,6 +126,7 @@ def _schedule_finalize(
     run_id: str,
     event_bus: EventBus,
     cancel_flag: asyncio.Event,
+    access_key: str,
 ) -> None:
     """Schedule Agent 0b + pipeline as a detached asyncio.Task.
 
@@ -136,6 +146,10 @@ def _schedule_finalize(
                 svc = SessionService(SessionRepository(bg_session), runs_api._claude_client)
                 run_repo = RunRepository(bg_session)
                 result = await svc.finalize(session_id, run_repo, run_id=run_id)
+                # Pin the access key onto the freshly created Run row so
+                # the orchestrator/reaper refund path can locate it via
+                # runs.access_key without joining through the session.
+                await stamp_run_access_key(bg_session, result.run_id, access_key)
 
             # Seed the snapshot for SSE subscribers. From this point on, a
             # subscriber attaching to the bus immediately receives the full
@@ -206,6 +220,17 @@ def _schedule_finalize(
             )
             runs_api._run_buses.pop(run_id, None)
             runs_api._cancel_flags.pop(run_id, None)
+            # Refund the quota slot directly via the access key: Agent
+            # 0b failed before a Run row existed, so the Run-anchored
+            # refund path has nothing to flip against. Decrement
+            # ``runs_used`` in place. Safe because only this SessionError
+            # branch reaches here per consumed slot — no idempotency
+            # race to worry about.
+            async with factory() as refund_session:
+                try:
+                    await decrement_runs_used(refund_session, access_key)
+                except Exception:  # pragma: no cover — best effort
+                    logger.exception("Refund after STORY_BUILD_FAILED failed for %s", run_id)
         except Exception as exc:  # pragma: no cover — defensive
             logger.exception("Unexpected error during background finalize")
             await event_bus.publish(
@@ -214,6 +239,11 @@ def _schedule_finalize(
             )
             runs_api._run_buses.pop(run_id, None)
             runs_api._cancel_flags.pop(run_id, None)
+            async with factory() as refund_session:
+                try:
+                    await decrement_runs_used(refund_session, access_key)
+                except Exception:  # pragma: no cover — best effort
+                    logger.exception("Refund after INTERNAL_ERROR failed for %s", run_id)
 
     # Detach from the request lifecycle so the response returns
     # immediately. Keep a strong reference so the task isn't GC'd while
@@ -229,6 +259,7 @@ async def post_message(
     session_id: str,
     body: PostMessageRequest,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    key: AccessKey = Depends(require_access_key),  # noqa: B008
 ) -> PostMessageResponse:
     svc = _service(session)
     try:
@@ -240,9 +271,16 @@ async def post_message(
             "MESSAGE_TOO_LONG": 400,
             "SESSION_LOCKED": 409,
             "SESSION_TOO_LONG": 409,
+            "SESSION_USER_MESSAGE_LIMIT": 429,
             "CHAT_FAILED": 502,
         }.get(e.code, 500)
-        raise HTTPException(status_code=status, detail=e.message) from e
+        # Service-level errors carry their own error_code; propagate it
+        # in the response body so the frontend can branch on it (e.g. to
+        # show the SESSION_USER_MESSAGE_LIMIT banner).
+        raise HTTPException(
+            status_code=status,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
 
     s, messages = await svc.get_session_with_messages(session_id)
     run_id: str | None = None
@@ -260,6 +298,24 @@ async def post_message(
             run_id=run_id,
         )
 
+        # Consume one quota slot from the access key before any
+        # background work spins up. We do this AFTER the run_id is
+        # pinned to the session so a concurrent loser sees a clean
+        # state if we lose the conditional UPDATE race.
+        try:
+            await consume_run_quota(session, key.key, run_id)
+        except QuotaExhausted as e:
+            # Roll the session back to CHATTING with no run_id so the
+            # user can either grant more quota and retry, or start over.
+            await svc.repo.update_session(s, state=SessionState.CHATTING, run_id=None)
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error_code": ERROR_CODE_QUOTA_EXHAUSTED,
+                    "message": "Run quota exhausted for this access key.",
+                },
+            ) from e
+
         # Register bus + cancel flag BEFORE returning so that an
         # immediately-subscribing SSE client finds them. The background
         # task will populate the snapshot once Agent 0b succeeds.
@@ -268,7 +324,7 @@ async def post_message(
         runs_api._run_buses[run_id] = event_bus
         runs_api._cancel_flags[run_id] = cancel_flag
 
-        _schedule_finalize(session_id, run_id, event_bus, cancel_flag)
+        _schedule_finalize(session_id, run_id, event_bus, cancel_flag, key.key)
 
     return PostMessageResponse(
         session=_build_session_response(s, messages),

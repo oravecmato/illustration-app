@@ -20,6 +20,7 @@ from app.config import Settings
 from app.constants import CONFIRMED_ACK, MANUAL_ITERATE_PROMPT
 from app.db.migrations import upgrade_to_head_async
 from app.db.models import (
+    AccessKey,
     Illustration,
     IllustrationState,
     ManualIllustrationSession,
@@ -221,9 +222,22 @@ async def app_client(tmp_path):
         character_config=character_config,
     )
 
+    # Seed an admin access key so every paid endpoint passes the gate
+    # uniformly. The integration tests exercise functional behaviour
+    # downstream of authentication — the gating itself is covered in
+    # dedicated unit/integration tests.
+    factory = get_session_factory()
+    async with factory() as db:
+        db.add(AccessKey(key="test-admin-key", label="test", runs_allowed=None, runs_used=0))
+        await db.commit()
+
     app = create_app(settings=settings)
     transport = httpx.ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Access-Key": "test-admin-key"},
+    ) as client:
         yield client, settings
 
 

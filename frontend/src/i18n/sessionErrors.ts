@@ -6,6 +6,7 @@ export function sessionErrorKey(errorCode: string | null | undefined): string {
     STORY_BUILD_FAILED: 'errors.session.story_build_failed',
     TRANSLATE_FAILED: 'errors.session.translate_failed',
     INTERNAL_ERROR: 'errors.session.internal_error',
+    SESSION_USER_MESSAGE_LIMIT: 'chat.user_message_limit',
   }
 
   return mapping[errorCode] || 'errors.session.internal_error'

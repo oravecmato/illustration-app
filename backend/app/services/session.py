@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from app.constants import (
     BUILD_STORY_VALIDATOR_RETRY,
     CONFIRMED_ACK,
+    ERROR_CODE_SESSION_USER_MESSAGE_LIMIT,
     SESSION_MAX_MESSAGES,
     SESSION_MESSAGE_MAX_CHARS,
+    SESSION_USER_MESSAGES_MAX,
     SUPPORTED_LANGUAGES,
 )
 from app.db.models import MessageRole, Session, SessionState
@@ -102,6 +104,18 @@ class SessionService:
             raise SessionError(
                 "SESSION_TOO_LONG",
                 f"Session has reached the maximum of {SESSION_MAX_MESSAGES} messages",
+            )
+        # Tighter cost guardrail: cap user-authored messages independently
+        # of the total. Every user turn triggers exactly one Agent 0a call
+        # so this is a deterministic ceiling on Anthropic spend per session.
+        # Counted BEFORE we append the new user message; the limit is
+        # inclusive — i.e. the user is allowed exactly SESSION_USER_MESSAGES_MAX
+        # turns, and the (N+1)th is refused.
+        user_msg_count = sum(1 for m in msgs if m.role == MessageRole.USER)
+        if user_msg_count >= SESSION_USER_MESSAGES_MAX:
+            raise SessionError(
+                ERROR_CODE_SESSION_USER_MESSAGE_LIMIT,
+                f"Session has reached the maximum of {SESSION_USER_MESSAGES_MAX} user messages",
             )
 
         # Persist user message first so it is part of the transcript on retry.

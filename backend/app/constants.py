@@ -26,6 +26,19 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 # prompt-engineering exhaustions.
 ERROR_CODE_RENDER_TIMEOUT = "RENDER_TIMEOUT"
 ERROR_CODE_RENDER_FAILED = "RENDER_FAILED"
+# Stamped on illustrations whose parent run is reaped by
+# ``_reap_orphan_runs`` on startup (uvicorn died mid-flight, e.g. OOM
+# kill). Same refund semantics as RENDER_TIMEOUT — infrastructure
+# noise, not prompt-engineering exhaustion. (§ 8.11.4)
+ERROR_CODE_OOM_REAPED = "OOM_REAPED"
+
+# Access-gating error codes (§ 8.11). All are returned as the
+# ``error_code`` field of a 4xx response body so the frontend
+# ``AccessGate.vue`` component can branch on them deterministically.
+ERROR_CODE_MISSING_ACCESS_KEY = "MISSING_ACCESS_KEY"
+ERROR_CODE_ACCESS_KEY_REVOKED = "ACCESS_KEY_REVOKED"
+ERROR_CODE_QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+ERROR_CODE_SESSION_USER_MESSAGE_LIMIT = "SESSION_USER_MESSAGE_LIMIT"
 
 # Supported UI and story languages (§ 9.6, § 10)
 SUPPORTED_LANGUAGES = ("sk", "cs", "en")
@@ -164,6 +177,33 @@ MANUAL_BUDGET_EXHAUSTED: dict[str, str] = {
 # Session-level limits (§ 7.2)
 SESSION_MESSAGE_MAX_CHARS = 4000
 SESSION_MAX_MESSAGES = 60
+# Cap on user-authored messages per session. Tighter than
+# ``SESSION_MAX_MESSAGES`` because every user turn triggers exactly one
+# Agent 0a call, so capping the user side caps paid token spend
+# deterministically per session. Enforced in ``services/session.py``
+# before any Anthropic request is dispatched. (§ 10, § 13 AC 20)
+SESSION_USER_MESSAGES_MAX = 20
+
+# Canonical list of HTTP routes that hit Anthropic or RunPod and
+# therefore cost money. Every entry MUST mount ``require_access_key``
+# from ``app/api/auth.py``. A unit test (``test_paid_endpoints_guarded``)
+# asserts at import time that the live FastAPI router has the dependency
+# wired on each of these routes, so a new paid endpoint cannot be merged
+# without a guard. Entries are ``(method, path)`` tuples matching
+# ``starlette.routing.Route`` exactly.
+PAID_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("POST", "/api/sessions"),
+    ("POST", "/api/sessions/{session_id}/messages"),
+    ("POST", "/api/runs/{run_id}/translations"),
+    ("POST", "/api/runs/{run_id}/cancel"),
+    # GET because the read endpoint bootstraps the manual flow on first
+    # call (open_manual_flow → Agent 6 welcome bubble = Anthropic spend).
+    ("GET", "/api/illustrations/{illustration_id}/manual"),
+    ("POST", "/api/illustrations/{illustration_id}/manual/messages"),
+    ("POST", "/api/illustrations/{illustration_id}/accept"),
+    ("POST", "/api/illustrations/{illustration_id}/manual/iterate"),
+    ("POST", "/api/illustrations/{illustration_id}/regenerate"),
+)
 
 # Character role → MHA character display name mapping (§ 7.3.2)
 CHARACTER_ROLE_MAP: dict[str, str] = {
