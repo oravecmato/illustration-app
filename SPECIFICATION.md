@@ -260,14 +260,30 @@ ANTHROPIC_API_KEY=...
 RUNPOD_API_KEY=...
 RUNPOD_ENDPOINT_ID=...
 DATABASE_URL=sqlite+aiosqlite:///./data/app.db
-OUTPUT_DIR=./output
 WORKFLOWS_DIR=./app/workflows
 AGENTS_DIR=./app/agents
 ALLOWED_ORIGIN=http://localhost:5173
+
+# Image storage backend selection — see § 8.7.
+IMAGE_STORE_BACKEND=local        # local | r2
+OUTPUT_DIR=./output              # used only when IMAGE_STORE_BACKEND=local
+
+# Required only when IMAGE_STORE_BACKEND=r2.
+R2_ACCOUNT_ID=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET=anime-illustrator-images
+R2_PUBLIC_BASE=https://pub-<hash>.r2.dev
+R2_PREFIX=dev                    # e.g. "prod" in production, "dev/<who>" locally
 ```
 
-All keys are required (the app must refuse to start on missing values, with
-a clear error message). Provide `.env.example` with placeholder values.
+The non-R2 keys are required (the app must refuse to start on missing
+values, with a clear error message). The R2_* keys are required only
+when `IMAGE_STORE_BACKEND=r2`; in that case startup validation refuses
+to boot if any of them are missing or empty (mirrors the agent-prompt
+loader's fail-fast posture). Provide `.env.example` with placeholder
+values for every key, including the R2 block, with a comment marking
+them optional under the local backend.
 
 ### Frontend
 
@@ -275,10 +291,21 @@ A `.env` for the frontend with `VITE_API_BASE=http://localhost:8000` is
 sufficient. No secrets ever live in the frontend. The set of UI languages
 is hard-coded in the frontend (`sk`, `cs`, `en`) — not env-configurable.
 
-The Vite dev server proxies `/static` to the backend (see `vite.config.ts`)
-so that root-relative `image_url` paths returned by the API (e.g.
-`/static/runs/<run_id>/scene_N.png`) load correctly from the page origin
-during development.
+The frontend renders `image_url` values returned by the API verbatim and
+never rewrites them. Two cases:
+
+- **Local image-store backend** (`IMAGE_STORE_BACKEND=local`): the API
+  returns root-relative URLs like `/static/runs/<run_id>/scene_N.png`.
+  The Vite dev server proxies `/static` to the backend (see
+  `vite.config.ts`); in production the Cloudflare Pages
+  `_redirects` file proxies `/static/*` to the Fly backend. This is the
+  legacy path and only stays in use as long as a deployment is
+  configured with the local backend.
+- **R2 image-store backend** (`IMAGE_STORE_BACKEND=r2`): the API returns
+  absolute URLs anchored at `R2_PUBLIC_BASE`, so the browser fetches
+  the image directly from Cloudflare R2 without round-tripping the
+  backend. Production deploys MUST use this backend; the `/static/*`
+  Pages redirect can then be removed.
 
 ---
 
@@ -482,7 +509,7 @@ new flow, since Agent 0b is producing both the story and its scenes (see
 | `current_prompts_json`   | TEXT NULL    | Last-used prompts (for debugging/visibility)                              |
 | `current_workflow`       | TEXT NULL    | The ComfyUI workflow name chosen for the most recent generate/revise call: `single-lora` or `no-lora` (§ 7.2.1). Persisted so reconnects and snapshots can show which workflow is in flight. NULL until Agent 1 has been called at least once. **Mutable** — Agent 3 may choose a different workflow on revision (rare; usually stays the same across revisions for a given concept). |
 | `last_verdict_json`      | TEXT NULL    | Last Claude verdict (for debugging/visibility)                            |
-| `image_path`             | TEXT NULL    | Relative path under `OUTPUT_DIR`, e.g. `runs/<run_id>/scene_0.png`        |
+| `image_path`             | TEXT NULL    | Backend-agnostic logical key for the canonical rendered image, e.g. `runs/<run_id>/scene_0.png`. Resolved to a public URL by the configured image-store backend (§ 8.7); the column never stores a fully-qualified URL or any backend-specific prefix. |
 | `contains_entity_label`  | TEXT NULL    | Label of the `NarrativeEntity` (non-human character or object) visually present in this scene, or NULL when the scene contains no entity. The actual entity record (`{label, kind, importance, reserved_for_scene_index}`) lives on `runs.narrative_entities_json` and is matched by normalised label. **Mutable** — Agent 4 and Agent 4b may set it (`entity_action="keep"` / `"claim_floating"`), clear it (`entity_action="drop"`), or leave it null (`entity_action="none"`). Once a label is *first* placed in a slot whose reservation was floating, the entity's `reserved_for_scene_index` is permanently set to that slot. Replaces the legacy `companion_description` + `companion_interaction` columns. |
 | `environment_label`      | TEXT NULL    | Denormalised label of this slot's environment (the source of truth is `runs.environments_json[scene_index]`). Cached on the illustration row so the orchestrator can hand Agent 1 / 3 / 4 the environment constraint without joining. **Mutable only by Agent 4b** when it swaps the slot's environment. Nullable only for legacy pre-Alembic rows. |
 | `environment_aspect`     | TEXT NULL    | Denormalised aspect for this slot: `single`, `inside`, or `outside`. Same mutation rules as `environment_label`. Nullable only for legacy pre-Alembic rows. |
@@ -500,9 +527,10 @@ prompt_attempt)`. The snapshot is what the post-exhaustion **salvage
 agent** (§ 7.1 Call 8) reasons over — it does NOT see the image, only
 the attempt's metadata, prompts, verdict, and the paragraph /
 environment / entity that were in force at render time. The image
-bytes themselves live alongside the canonical `image_path` under
-`OUTPUT_DIR` so a salvageable attempt can be promoted in place
-without re-rendering.
+bytes themselves live alongside the canonical `image_path` in the
+configured image-store backend (§ 8.7), under per-attempt history
+keys, so a salvageable attempt can be promoted in place without
+re-rendering.
 
 | Column                   | Type         | Notes                                                                     |
 |--------------------------|--------------|---------------------------------------------------------------------------|
@@ -510,7 +538,7 @@ without re-rendering.
 | `illustration_id`        | TEXT FK      | → `illustrations.id`, indexed                                             |
 | `concept_attempt`        | INTEGER      | 1..(MAX_CONCEPT_ATTEMPTS+1) — matches the outer-loop counter at render time |
 | `prompt_attempt`         | INTEGER      | 1..MAX_PROMPT_ATTEMPTS_PER_CONCEPT — matches the inner-loop counter        |
-| `image_path`             | TEXT         | Relative path of THIS attempt's image under `OUTPUT_DIR`. Distinct from `illustrations.image_path` because the canonical one is only set on success; history rows preserve every attempt's image so salvage can promote it. Naming convention: `runs/<run_id>/history/<illustration_id>_<concept_attempt>_<prompt_attempt>.png`. |
+| `image_path`             | TEXT         | Backend-agnostic logical key for THIS attempt's image (§ 8.7). Distinct from `illustrations.image_path` because the canonical one is only set on success; history rows preserve every attempt's image so salvage can promote it. Naming convention: `runs/<run_id>/history/<illustration_id>_<concept_attempt>_<prompt_attempt>.png`. |
 | `concept_used`           | TEXT         | Verbatim `illustrations.current_concept` at render time (English)         |
 | `concept_localized`      | TEXT NULL    | Localised mirror of `concept_used` resolved against `illustration_concept_translations` at write time (best-effort; null when no translation existed) |
 | `paragraph_text`         | TEXT         | Verbatim `runs.story_blocks_json[paragraph_index].text` at render time. Captured so the salvage agent can judge whether the historical paragraph still flows with the current prev/next. |
@@ -1241,8 +1269,9 @@ of Agent 6's reply identifies the current step:
       `MANUAL_RENDERING`. Emit `illustration_state`.
    6. Dispatch one ComfyUI job (§ 7.2). Use the exact same workflow,
       LoRA, and characters as the auto loop.
-   7. On RunPod success: store the image to
-      `OUTPUT_DIR/runs/<run_id>/manual_<scene_index>_<manual_attempts>.png`.
+   7. On RunPod success: hand the bytes to the configured image-store
+      backend (§ 8.7) with logical key
+      `runs/<run_id>/manual_<scene_index>_<manual_attempts>.png`.
       Do **NOT** overwrite `illustrations.image_path` yet — the
       manual loop only writes to `image_path` on user confirmation
       (step 7 below). Persist the new image's path on the
@@ -1540,7 +1569,7 @@ One row per illustration that has ever entered the manual flow.
 | `id`                    | TEXT (UUID4) | Primary key.                                                                          |
 | `illustration_id`       | TEXT FK      | → `illustrations.id`, UNIQUE (1:1 with the illustration).                             |
 | `sub_phase`             | TEXT         | One of `concept_design` / `feedback_gathering`. `concept_design` on creation; flipped to `feedback_gathering` immediately after a successful manual render (§ 6A.4 step 3.8); flipped back to `concept_design` on `phase=restart_concept` (§ 6A.4 step 6) or on RunPod failure during a `concept_confirmed` dispatch. Used by § 8.10.1 to know which Agent 6 phase enum subset is valid for the next turn and by snapshots to restore the right UI affordances on reconnect. |
-| `last_manual_image_path`| TEXT NULL    | Relative path under `OUTPUT_DIR` of the most recent manual render that has not yet been promoted to the canonical `image_path`. NULL before the first render. Cleared on `phase=restart_concept`. |
+| `last_manual_image_path`| TEXT NULL    | Backend-agnostic logical key (§ 8.7) of the most recent manual render that has not yet been promoted to the canonical `image_path`. NULL before the first render. Cleared on `phase=restart_concept`. |
 | `last_concept_candidate`| TEXT NULL    | The most recent `concept_candidate` returned by Agent 6 with `phase=awaiting_concept_confirmation`. Used by the server to assert verbatim handoff at `concept_confirmed` (§ 6A.2 rule #7). Reset to NULL after each `concept_confirmed` transition so a stale candidate cannot be re-confirmed. |
 | `last_agreed_concept`   | TEXT NULL    | The verbatim English concept the user most recently confirmed (i.e. the same string the next image was rendered from). Persisted on `concept_confirmed`; consumed as Agent 7's `last_agreed_concept` input during a subsequent `feedback_confirmed` dispatch. Cleared on `phase=restart_concept`. |
 | `prompting_notes`       | TEXT NULL    | Cumulative **English-only** prompt-engineering memo curated by Agent 6 across this manual session (§ 6A.2 rule #12). NULL until Agent 6 emits its first non-null `prompting_notes_update` (§ 7.1 Call 6). On every subsequent non-null update from Agent 6 the column is **fully overwritten** with the new value (no server-side merging). Consumed by Agent 1 on `concept_confirmed` dispatches and by Agent 7 on `feedback_confirmed` dispatches, as an optional `prompting_notes` input. **Persists across `phase=restart_concept`** (not cleared with `last_agreed_concept` / `last_manual_image_path`). Not surfaced in the UI. |
@@ -3864,8 +3893,15 @@ go to ComfyUI in English regardless of the run's `source_language`
    schema: list of `{filename, type, data}` where `type` is `"base64"` or
    `"s3_url"`). Save the first image to disk.
 
-**Image storage:** `OUTPUT_DIR/runs/<run_id>/scene_<scene_index>.png`. The
-relative path (relative to `OUTPUT_DIR`) is stored in `illustrations.image_path`.
+**Image storage:** the decoded PNG bytes are handed to the configured
+image-store backend (§ 8.7) with the logical key
+`runs/<run_id>/scene_<scene_index>.png`. The store persists the bytes
+and returns the (backend-specific) logical key, which is what gets
+written to `illustrations.image_path`. The same key is also what
+`illustration_attempt_history.image_path` records for the
+in-progress attempt. The public URL exposed on the API
+(`image_url`, § 8.7) is derived from this key by the store on read;
+the DB never carries a fully-qualified URL.
 
 #### 7.2.4 Error classification and timeout-retry semantics
 
@@ -5351,10 +5387,99 @@ removed. Their replacement at the session layer is `STORY_BUILD_FAILED`
 to author a story — which fails before any run is ever created). The
 frontend handles them on the chat screen, not the run screen.
 
-### 8.7 Static file serving
+### 8.7 Image storage
 
-`GET /static/runs/<run_id>/<filename>` serves files from `OUTPUT_DIR`. Use
-FastAPI's `StaticFiles` mount.
+Image storage is abstracted behind a single `ImageStore` Protocol so
+the orchestrator, the manual flow, and the API serializers stay
+backend-agnostic. Two implementations are first-class:
+
+| Backend  | `IMAGE_STORE_BACKEND` value | Use case                                  |
+|----------|-----------------------------|-------------------------------------------|
+| Local FS | `local`                     | Default for local dev; legacy single-box deploy |
+| Cloudflare R2 | `r2`                   | Required for cloud deployments (Fly backend + Cloudflare Pages frontend) |
+
+The same abstraction also covers the manual-flow attempt images
+(§ 6A.4) and the per-attempt history images
+(`illustration_attempt_history.image_path`, § 5).
+
+**Protocol (`app/services/storage.py`)**
+
+```python
+class ImageStore(Protocol):
+    async def save(self, key: str, png: bytes) -> str: ...
+    async def delete_prefix(self, key_prefix: str) -> None: ...
+    def url_for(self, key: str) -> str: ...
+```
+
+- `save(key, png)` persists the bytes under the logical key and
+  returns the same key (callers store it on `image_path`). Existing
+  objects at the same key are overwritten — this matches the
+  current "retry overwrites the canonical image" semantics.
+- `delete_prefix(key_prefix)` is best-effort cleanup used when a run
+  is deleted or a manual session is reset. Failures are logged and
+  swallowed; they MUST NOT propagate as 5xx to the user.
+- `url_for(key)` produces the public URL the API returns to the
+  frontend as `image_url`.
+
+Logical keys are always backend-agnostic and use forward slashes:
+
+| Source                                             | Key shape                                                         |
+|----------------------------------------------------|-------------------------------------------------------------------|
+| Auto-pipeline canonical render (§ 7.2.3)           | `runs/<run_id>/scene_<scene_index>.png`                           |
+| Per-attempt history (§ 5 `illustration_attempt_history`) | `runs/<run_id>/history/<illustration_id>_<concept_attempt>_<prompt_attempt>.png` |
+| Manual attempt (§ 6A.4)                            | `runs/<run_id>/manual_<scene_index>_<manual_attempts>.png`        |
+
+These keys MUST NOT include any backend prefix (e.g. R2's `R2_PREFIX`
+or LocalImageStore's `OUTPUT_DIR`) — that translation happens
+exclusively inside the store. The DB rows therefore stay portable
+across backends: swapping backend and re-uploading the same bytes
+under the same keys re-attaches old runs to new URLs.
+
+**Factory and configuration**
+
+`get_image_store(settings) -> ImageStore` is called once at FastAPI
+lifespan startup and cached on `app.state`. It dispatches on
+`settings.image_store_backend`:
+
+- `local` → `LocalImageStore(output_dir=settings.output_dir)`. Writes
+  via `aiofiles.open(...)`; `url_for(key)` returns `"/static/" + key`.
+  The existing `GET /static/...` `StaticFiles` mount stays in place
+  with `OUTPUT_DIR` as its root.
+- `r2` → `R2ImageStore(account_id, access_key_id, secret_access_key,
+  bucket, public_base, prefix)`. Uses `aioboto3` against
+  `https://<account_id>.r2.cloudflarestorage.com` with the bucket-
+  scoped credentials. `save()` PUTs the object with
+  `Content-Type: image/png` and `Cache-Control: public, max-age=31536000,
+  immutable`. `url_for(key)` returns `f"{public_base}/{prefix}/{key}"`.
+  The `StaticFiles` mount is still registered for backwards
+  compatibility but serves no live URLs once all runs go through R2.
+
+Backend selection is process-wide and immutable for the lifetime of a
+deploy. Switching backends is a one-way migration: existing rows
+referencing the old backend's bytes will resolve to broken URLs unless
+the bytes are copied to the new backend under the same keys. The MVP
+does not provide automated migration; a one-off `scripts/copy_images.py`
+helper may be added when needed.
+
+**Endpoint behavior**
+
+- `GET /static/runs/<run_id>/<filename>` continues to serve files
+  from `OUTPUT_DIR` when `IMAGE_STORE_BACKEND=local`. Under
+  `IMAGE_STORE_BACKEND=r2` this route is never produced by
+  `url_for(...)` and (if hit directly) returns 404 — image traffic
+  goes straight to Cloudflare R2 via `R2_PUBLIC_BASE`.
+- All API responses that previously embedded `image_url` continue to
+  embed it, with the value produced by `image_store.url_for(...)`.
+  Schema is unchanged.
+
+**Dependency**
+
+`aioboto3>=13.0` is added as a runtime dependency, gated behind the R2
+backend (`LocalImageStore` does not import it). Top-level `import`
+in `services/storage.py` keeps the dep mandatory; this is intentional
+to avoid an "optional import drift" footgun where Fly deploys fail
+because the dep wasn't pinned. The cold cost of `import aioboto3` at
+startup is acceptable.
 
 ### 8.8 Orchestrator failure handling
 
@@ -7070,6 +7195,35 @@ to chase 100 % line coverage.
   `RethinkConceptResponse.model_json_schema()` lists
   `narrative_continuity_check` FIRST; same for
   `RethinkEnvironmentResponse`.
+- **Image store backends** (`tests/unit/test_storage.py`, new file —
+  § 8.7):
+  - `LocalImageStore.save(key, png)` writes the file under
+    `output_dir / key` (creating parents), returns the key
+    unchanged, and overwrites pre-existing bytes at the same key.
+    `url_for(key)` returns `"/static/" + key` with no leading
+    duplication when `key` already starts with `runs/`.
+    `delete_prefix("runs/<run_id>/")` removes every file under
+    that subtree and is a no-op when the subtree does not exist
+    (no exception).
+  - `R2ImageStore.save(key, png)` calls the S3 `PutObject`
+    endpoint with `Bucket=R2_BUCKET`, `Key=f"{prefix}/{key}"`,
+    `ContentType="image/png"`, and the documented
+    `Cache-Control` header (`public, max-age=31536000,
+    immutable`). Intercepted with `botocore.stub.Stubber` (or
+    equivalent). Returns the key (NOT the prefixed key) so the
+    DB stays backend-agnostic. `url_for(key)` returns
+    `f"{public_base}/{prefix}/{key}"`. `delete_prefix("runs/<run_id>/")`
+    issues `ListObjectsV2 + DeleteObjects` against the prefixed
+    subtree and swallows any per-object delete failure as a
+    log-only event.
+  - `get_image_store(settings)` returns `LocalImageStore` when
+    `image_store_backend == "local"` and `R2ImageStore` when
+    `"r2"`. Startup validation with `image_store_backend == "r2"`
+    and any of `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+    `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_PUBLIC_BASE` unset
+    raises a `ConfigurationError` BEFORE FastAPI starts serving
+    (mirrors the agent-prompt loader's posture). Unknown values
+    of `image_store_backend` also raise.
 
 ### 11.2 Backend integration (`tests/integration/`)
 
