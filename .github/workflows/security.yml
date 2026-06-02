@@ -118,35 +118,45 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t anime-illustrator-backend:ci backend/
+
+      # Install trivy on PATH so subsequent steps can invoke the CLI
+      # directly. We bypass aquasecurity/trivy-action here because its
+      # `severity` input was observed not to be applied to exit-code
+      # calculation in v0.36.0 (the wrapper logged "Building SARIF report
+      # with all severities" and ran trivy with no flags). Calling the
+      # CLI ourselves makes the policy explicit and reviewable.
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+
       # First scan: table format → stdout, so the CVE list is visible in
       # the workflow log without round-tripping through SARIF artifacts.
-      # exit-code=0 here so this step never fails on its own — the second
+      # --exit-code 0 so this step never fails on its own — the second
       # (gating) scan owns the policy decision.
       - name: Trivy scan (diagnostic, table → log)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: anime-illustrator-backend:ci
-          severity: HIGH,CRITICAL
-          exit-code: "0"
-          ignore-unfixed: true
-          vuln-type: os,library
-          format: table
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --format table \
+            --exit-code 0 \
+            anime-illustrator-backend:ci
 
       # Second scan: SARIF for the GitHub Security tab + the actual gate.
       # Only CRITICAL severities fail the build. HIGH still gets surfaced
-      # via the SARIF upload + the diagnostic step above, but on a
-      # maintained python:3.11-slim base with apt upgrade already
-      # applied, HIGH-tier churn isn't actionable enough to gate deploys.
+      # via the diagnostic step above, but on a maintained python:3.11-slim
+      # base with apt upgrade already applied, HIGH-tier churn isn't
+      # actionable enough to gate deploys.
       - name: Trivy scan (CRITICAL fails, SARIF → Security tab)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: anime-illustrator-backend:ci
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
-          vuln-type: os,library
-          format: sarif
-          output: trivy-results.sarif
+        run: |
+          trivy image \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --format sarif \
+            --output trivy-results.sarif \
+            --exit-code 1 \
+            anime-illustrator-backend:ci
       - name: Upload SARIF to GitHub Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
