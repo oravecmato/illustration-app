@@ -32,6 +32,7 @@ from app.schemas.claude import (
     StyleGuide,
 )
 from app.services.manual import ManualService, ManualServiceError
+from app.services.storage import LocalImageStore
 
 STYLE_GUIDE = StyleGuide(
     overall_style_positive="watercolor",
@@ -119,7 +120,7 @@ def _make_service(db_session, *, claude=None, runpod=None, cancel_flag=None, tmp
                 }
             }
         },
-        output_dir=output_dir,
+        image_store=LocalImageStore(output_dir),
         character_config=CHARACTER_CONFIG,
     )
 

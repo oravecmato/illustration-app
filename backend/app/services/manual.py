@@ -43,6 +43,7 @@ from app.schemas.claude import StyleGuide, _normalize_entity_label
 from app.services.claude import ClaudeClient, ClaudeError
 from app.services.images import copy_image, save_manual_image
 from app.services.runpod import RunPodClient, RunPodTimeoutError
+from app.services.storage import ImageStore
 from app.services.workflow import replace_placeholders
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ class ManualService:
         event_bus: EventBus | None,
         cancel_flag: asyncio.Event | None,
         workflow_template: dict,
-        output_dir: str,
+        image_store: ImageStore,
         character_config: dict | None = None,
     ):
         self.run_repo = run_repo
@@ -118,7 +119,7 @@ class ManualService:
         self.event_bus = event_bus
         self.cancel_flag = cancel_flag
         self.workflow_template = workflow_template
-        self.output_dir = output_dir
+        self.image_store = image_store
         self.character_config = character_config or {}
 
     # ── Public API ──────────────────────────────────────────────────────────
@@ -890,7 +891,7 @@ class ManualService:
 
         manual_path = await save_manual_image(
             image_bytes,
-            self.output_dir,
+            self.image_store,
             illustration.run_id,
             illustration.scene_index,
             new_attempts,
@@ -907,7 +908,7 @@ class ManualService:
                 sub_phase=SUB_PHASE_FEEDBACK_GATHERING,
             )
 
-        image_url = f"/static/{manual_path}"
+        image_url = self.image_store.url_for(manual_path)
 
         # Persist per-attempt provenance (§ 6A.10) on the image row so the
         # frontend's `ManualImageCard` can show the exact concept + prompts
@@ -1052,16 +1053,15 @@ class ManualService:
             f"runs/{illustration.run_id}/manual_{illustration.scene_index}"
             f"_{manual_attempt_index}.png"
         )
-        source_abs = os.path.join(self.output_dir, source_relative)
-        if not os.path.exists(source_abs):
+        if not await self.image_store.exists(source_relative):
             raise ManualServiceError(
                 "ATTEMPT_FILE_MISSING",
-                f"Attempt image not found on disk: {source_relative}",
+                f"Attempt image not found in store: {source_relative}",
                 410,
             )
 
         canonical_relative = f"runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
-        await copy_image(source_relative, self.output_dir, canonical_relative)
+        await copy_image(source_relative, self.image_store, canonical_relative)
 
         update_kwargs: dict = dict(
             state=IllustrationState.COMPLETED,
@@ -1074,7 +1074,7 @@ class ManualService:
             update_kwargs["current_concept"] = image_row.concept_used
         await self.run_repo.update_illustration(illustration, **update_kwargs)
 
-        image_url = f"/static/{canonical_relative}"
+        image_url = self.image_store.url_for(canonical_relative)
         if self.event_bus is not None:
             await self.event_bus.publish(
                 "illustration_state",

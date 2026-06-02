@@ -16,6 +16,9 @@ from app.schemas.claude import (
     RevisionSummary,
     StyleGuide,
 )
+from app.services.storage import LocalImageStore
+
+_TEST_IMAGE_STORE = LocalImageStore("/tmp")
 
 STYLE_GUIDE = StyleGuide(
     overall_style_positive="watercolor",
@@ -211,7 +214,7 @@ async def run_branch(illustration, style_guide, claude, runpod, cancel_flag=None
             illustration=illustration,
             style_guide=style_guide,
             workflow_template=workflow_template,
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             claude=claude,
             runpod=runpod,
             repo=repo,
@@ -361,7 +364,7 @@ async def test_character_lora_from_character_config():
         illustration=ill,
         style_guide=STYLE_GUIDE,
         workflow_template=workflow_template,
-        output_dir="/tmp",
+        image_store=_TEST_IMAGE_STORE,
         claude=claude,
         runpod=runpod,
         repo=repo,
@@ -454,7 +457,7 @@ async def _run_branch_with_env_context(
             illustration=illustration,
             style_guide=STYLE_GUIDE,
             workflow_template=workflow_template,
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             claude=claude,
             runpod=runpod,
             repo=repo,
@@ -640,7 +643,7 @@ async def _run_branch_capturing_seeds(ill, claude, runpod_side_effect):
             illustration=ill,
             style_guide=STYLE_GUIDE,
             workflow_template=workflow_template,
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             claude=claude,
             runpod=runpod,
             repo=repo,

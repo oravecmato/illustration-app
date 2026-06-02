@@ -19,6 +19,7 @@ dependencies = [
     "pydantic-settings>=2.3.0",
     "python-dotenv>=1.0.0",
     "aiofiles>=24.1.0",
+    "aioboto3>=13.0.0",
 ]
 
 [project.optional-dependencies]

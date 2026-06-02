@@ -20,6 +20,7 @@ from app.orchestrator.events import EventBus
 from app.schemas.claude import StyleGuide
 from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
+from app.services.storage import ImageStore
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ async def run_pipeline(
     runpod: RunPodClient,
     event_bus: EventBus,
     workflow_template: dict,
-    output_dir: str,
+    image_store: ImageStore,
     cancel_flag: asyncio.Event,
     character_config: dict | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -95,7 +96,7 @@ async def run_pipeline(
                             illustration=branch_ill,
                             style_guide=style_guide,
                             workflow_template=workflow_template,
-                            output_dir=output_dir,
+                            image_store=image_store,
                             claude=claude,
                             runpod=runpod,
                             repo=branch_repo,
@@ -114,7 +115,7 @@ async def run_pipeline(
                         illustration=ill,
                         style_guide=style_guide,
                         workflow_template=workflow_template,
-                        output_dir=output_dir,
+                        image_store=image_store,
                         claude=claude,
                         runpod=runpod,
                         repo=repo,

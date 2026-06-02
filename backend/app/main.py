@@ -25,6 +25,7 @@ from app.services.claude import (
     load_reference_docs,
 )
 from app.services.runpod import RunPodClient
+from app.services.storage import ConfigurationError, get_image_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -110,7 +111,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # See MEMORY.md → "Orphan RUNNING runs".
         await _reap_orphan_runs()
 
+        # Construct the configured image-store backend. With the local
+        # backend this is a no-op wrapper around `output_dir`; with `r2`
+        # it validates the credential block and raises ConfigurationError
+        # before any traffic is served. `output_dir` is still touched here
+        # because the `/static` mount below depends on it existing even
+        # when no images are ever written there (R2 deploys).
         os.makedirs(settings.output_dir, exist_ok=True)
+        try:
+            image_store = get_image_store(settings)
+        except ConfigurationError as e:
+            logger.error("Startup failed: %s", e)
+            raise
 
         # Load character_config.json — refuse to start if missing or malformed
         char_config_path = os.path.join(os.path.dirname(__file__), "character_config.json")
@@ -153,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             claude=claude_client,
             runpod=runpod_client,
             workflow=workflow_template,
-            output_dir=settings.output_dir,
+            image_store=image_store,
             character_config=character_config,
         )
 

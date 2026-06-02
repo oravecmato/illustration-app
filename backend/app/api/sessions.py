@@ -187,7 +187,7 @@ def _schedule_finalize(
                     runpod=runs_api._runpod_client,
                     event_bus=event_bus,
                     workflow_template=runs_api._workflow_template,
-                    output_dir=runs_api._output_dir,
+                    image_store=runs_api._image_store,
                     cancel_flag=cancel_flag,
                     character_config=runs_api._character_config,
                     session_factory=factory,

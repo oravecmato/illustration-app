@@ -40,6 +40,7 @@ from app.schemas.api import (
 from app.schemas.claude import StyleGuide
 from app.services.claude import ClaudeClient
 from app.services.runpod import RunPodClient
+from app.services.storage import ImageStore
 from app.utils.hashing import compute_source_hash
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ _cancel_flags: dict[str, asyncio.Event] = {}
 _claude_client: ClaudeClient | None = None
 _runpod_client: RunPodClient | None = None
 _workflow_template: dict | None = None
-_output_dir: str | None = None
+_image_store: ImageStore | None = None
 _character_config: dict | None = None
 
 
@@ -64,14 +65,14 @@ def set_clients(
     claude: ClaudeClient,
     runpod: RunPodClient,
     workflow: dict,
-    output_dir: str,
+    image_store: ImageStore,
     character_config: dict | None = None,
 ) -> None:
-    global _claude_client, _runpod_client, _workflow_template, _output_dir, _character_config
+    global _claude_client, _runpod_client, _workflow_template, _image_store, _character_config
     _claude_client = claude
     _runpod_client = runpod
     _workflow_template = workflow
-    _output_dir = output_dir
+    _image_store = image_store
     _character_config = character_config
 
 
@@ -225,7 +226,8 @@ def _build_illustration_response(
     """
     image_url = None
     if ill.image_path:
-        image_url = f"/static/{ill.image_path}"
+        assert _image_store is not None, "image_store not initialized"
+        image_url = _image_store.url_for(ill.image_path)
 
     current_concept = ill.current_concept
     concept_state = None
@@ -295,7 +297,8 @@ async def _load_manual_session_summary(
     sub_phase = "concept_design"
     if ms is not None:
         if ms.last_manual_image_path:
-            last_image_url = f"/static/{ms.last_manual_image_path}"
+            assert _image_store is not None, "image_store not initialized"
+            last_image_url = _image_store.url_for(ms.last_manual_image_path)
         sub_phase = ms.sub_phase or "concept_design"
     return ManualSessionSummary(
         messages=[

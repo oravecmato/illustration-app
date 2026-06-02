@@ -1,80 +1,69 @@
-"""Save and load image files to/from disk."""
+"""Image key conventions + thin helpers over the configured ``ImageStore``.
 
-import os
+This module owns the canonical *key shapes* (§ 8.7) for the three classes of
+rendered images: canonical auto-pipeline scenes, per-attempt history snapshots,
+and manual-flow attempts. The actual persistence is delegated to whichever
+``ImageStore`` backend is configured (``LocalImageStore`` or ``R2ImageStore``)
+so the orchestrator and the manual service never reach for ``aiofiles``
+directly.
+"""
 
-import aiofiles
+from app.services.storage import ImageStore
 
 
-async def save_image(image_bytes: bytes, output_dir: str, run_id: str, scene_index: int) -> str:
-    """Save image bytes to OUTPUT_DIR/runs/<run_id>/scene_<scene_index>.png.
+def canonical_key(run_id: str, scene_index: int) -> str:
+    """Logical key for the canonical, user-facing scene image."""
+    return f"runs/{run_id}/scene_{scene_index}.png"
 
-    Returns the relative path (relative to output_dir).
-    """
-    relative_path = f"runs/{run_id}/scene_{scene_index}.png"
-    full_path = os.path.join(output_dir, relative_path)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    async with aiofiles.open(full_path, "wb") as f:
-        await f.write(image_bytes)
-    return relative_path
+
+def history_key(
+    run_id: str, illustration_id: str, concept_attempt: int, prompt_attempt: int
+) -> str:
+    """Logical key for a per-attempt history snapshot (one row in
+    ``illustration_attempt_history``)."""
+    return f"runs/{run_id}/history/{illustration_id}_{concept_attempt}_{prompt_attempt}.png"
+
+
+def manual_key(run_id: str, scene_index: int, manual_attempt: int) -> str:
+    """Logical key for a single manual-flow attempt (§ 6A.4)."""
+    return f"runs/{run_id}/manual_{scene_index}_{manual_attempt}.png"
+
+
+async def save_image(image_bytes: bytes, store: ImageStore, run_id: str, scene_index: int) -> str:
+    """Persist the canonical scene image and return its logical key."""
+    return await store.save(canonical_key(run_id, scene_index), image_bytes)
 
 
 async def save_manual_image(
     image_bytes: bytes,
-    output_dir: str,
+    store: ImageStore,
     run_id: str,
     scene_index: int,
     manual_attempt: int,
 ) -> str:
-    """Save a manual-attempt image (§ 6A).
-
-    Path: ``OUTPUT_DIR/runs/<run_id>/manual_<scene_index>_<manual_attempt>.png``.
-    Returns the relative path (relative to ``output_dir``).
-    """
-    relative_path = f"runs/{run_id}/manual_{scene_index}_{manual_attempt}.png"
-    full_path = os.path.join(output_dir, relative_path)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    async with aiofiles.open(full_path, "wb") as f:
-        await f.write(image_bytes)
-    return relative_path
+    """Persist a manual-flow attempt image (§ 6A) and return its logical key."""
+    return await store.save(manual_key(run_id, scene_index, manual_attempt), image_bytes)
 
 
 async def save_history_image(
     image_bytes: bytes,
-    output_dir: str,
+    store: ImageStore,
     run_id: str,
     illustration_id: str,
     concept_attempt: int,
     prompt_attempt: int,
 ) -> str:
-    """Save an auto-pipeline attempt's image for the history table (§ 5).
-
-    Path: ``OUTPUT_DIR/runs/<run_id>/history/<illustration_id>_<c>_<p>.png``.
-    Returns the relative path (relative to ``output_dir``). One row per
-    ``(illustration_id, concept_attempt, prompt_attempt)``; overwriting
-    the same (c, p) pair is treated as a re-render of the same attempt.
-    """
-    relative_path = (
-        f"runs/{run_id}/history/{illustration_id}_{concept_attempt}_{prompt_attempt}.png"
+    """Persist an auto-pipeline attempt's image for the history table (§ 5)
+    and return its logical key. Overwriting the same (c, p) pair is
+    treated as a re-render of the same attempt."""
+    return await store.save(
+        history_key(run_id, illustration_id, concept_attempt, prompt_attempt),
+        image_bytes,
     )
-    full_path = os.path.join(output_dir, relative_path)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    async with aiofiles.open(full_path, "wb") as f:
-        await f.write(image_bytes)
-    return relative_path
 
 
-async def copy_image(source_relative_path: str, output_dir: str, dest_relative_path: str) -> str:
-    """Copy an already-saved image to a new relative path under output_dir.
-
-    Used by the manual flow when promoting an accepted manual render to the
-    canonical ``scene_<scene_index>.png`` location.
-    Returns the destination relative path.
-    """
-    source_full = os.path.join(output_dir, source_relative_path)
-    dest_full = os.path.join(output_dir, dest_relative_path)
-    os.makedirs(os.path.dirname(dest_full), exist_ok=True)
-    async with aiofiles.open(source_full, "rb") as src:
-        data = await src.read()
-    async with aiofiles.open(dest_full, "wb") as dst:
-        await dst.write(data)
-    return dest_relative_path
+async def copy_image(source_key: str, store: ImageStore, dest_key: str) -> str:
+    """Copy bytes already in the store from one logical key to another.
+    Used by the salvage promotion (history → canonical) and by the manual
+    flow when promoting an accepted attempt."""
+    return await store.copy(source_key, dest_key)

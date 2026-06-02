@@ -27,6 +27,7 @@ from app.services.claude import ClaudeClient
 from app.services.images import copy_image, save_history_image, save_image
 from app.services.manual import ManualService
 from app.services.runpod import RunPodClient, RunPodTimeoutError
+from app.services.storage import ImageStore
 from app.services.workflow import replace_placeholders
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ async def run_branch(
     illustration: Illustration,
     style_guide: StyleGuide,
     workflow_template: dict,
-    output_dir: str,
+    image_store: ImageStore,
     claude: ClaudeClient,
     runpod: RunPodClient,
     repo: RunRepository,
@@ -523,7 +524,7 @@ async def run_branch(
             # parity even though they are filtered out of salvage).
             history_image_path = await save_history_image(
                 image_bytes,
-                output_dir,
+                image_store,
                 illustration.run_id,
                 illustration.id,
                 concept_attempt,
@@ -545,16 +546,14 @@ async def run_branch(
             if verdict.ok:
                 # Save image and mark as completed
                 image_path = await save_image(
-                    image_bytes, output_dir, illustration.run_id, illustration.scene_index
+                    image_bytes, image_store, illustration.run_id, illustration.scene_index
                 )
                 await repo.update_illustration(
                     illustration,
                     state=IllustrationState.COMPLETED,
                     image_path=image_path,
                 )
-                image_url = (
-                    f"/static/runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
-                )
+                image_url = image_store.url_for(image_path)
                 await event_bus.publish(
                     "illustration_completed",
                     {
@@ -647,7 +646,7 @@ async def run_branch(
         repo=repo,
         event_bus=event_bus,
         claude=claude,
-        output_dir=output_dir,
+        image_store=image_store,
         source_language=source_language,
         transition=transition,
     )
@@ -667,7 +666,7 @@ async def run_branch(
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         workflow_template=workflow_template,
-        output_dir=output_dir,
+        image_store=image_store,
         character_config=char_config,
     )
     await manual_service.open_manual_flow(illustration, source_language=source_language)
@@ -998,7 +997,7 @@ async def _do_salvage_review(
     repo: RunRepository,
     event_bus: EventBus,
     claude: ClaudeClient,
-    output_dir: str,
+    image_store: ImageStore,
     source_language: str,
     transition,
 ) -> bool:
@@ -1203,7 +1202,7 @@ async def _do_salvage_review(
 
     # Copy the historical attempt image to the canonical scene slot.
     canonical_relative = f"runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
-    await copy_image(chosen_row.image_path, output_dir, canonical_relative)
+    await copy_image(chosen_row.image_path, image_store, canonical_relative)
 
     # Persist paragraph rewrite if it differs from the current text.
     if new_paragraph_text != current_paragraph_text and 0 <= paragraph_index < len(blocks):
@@ -1238,7 +1237,7 @@ async def _do_salvage_review(
         payload["paragraph_text_override"] = salvage.paragraph_text_override
     await event_bus.publish("illustration_salvage_resolved", payload)
 
-    image_url = f"/static/runs/{illustration.run_id}/scene_{illustration.scene_index}.png"
+    image_url = image_store.url_for(canonical_relative)
     await event_bus.publish(
         "illustration_completed",
         {

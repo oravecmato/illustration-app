@@ -34,6 +34,7 @@ from app.main import create_app
 from app.services.character_config import load_character_config
 from app.services.claude import ClaudeClient, load_agent_prompts, load_reference_docs
 from app.services.runpod import RunPodClient
+from app.services.storage import LocalImageStore
 
 IMAGE_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200).decode()
 ENDPOINT_ID = "test-endpoint"
@@ -216,7 +217,7 @@ async def app_client(tmp_path):
         claude=claude_client,
         runpod=runpod_client,
         workflow=workflow_template,
-        output_dir=output_dir,
+        image_store=LocalImageStore(output_dir),
         character_config=character_config,
     )
 

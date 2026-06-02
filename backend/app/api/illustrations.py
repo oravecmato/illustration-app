@@ -39,7 +39,8 @@ async def _build_manual_response(
     sub_phase = "concept_design"
     if ms is not None:
         if ms.last_manual_image_path:
-            last_image_url = f"/static/{ms.last_manual_image_path}"
+            assert runs_api._image_store is not None, "image_store not initialized"
+            last_image_url = runs_api._image_store.url_for(ms.last_manual_image_path)
         sub_phase = ms.sub_phase or "concept_design"
     return ManualSessionResponse(
         illustration_id=illustration.id,
@@ -98,7 +99,7 @@ async def get_manual_chat(
                     event_bus=runs_api._run_buses.get(illustration.run_id),
                     cancel_flag=runs_api._cancel_flags.get(illustration.run_id),
                     workflow_template=runs_api._workflow_template or {},
-                    output_dir=runs_api._output_dir or "",
+                    image_store=runs_api._image_store,
                     character_config=runs_api._character_config,
                 )
                 await service.open_manual_flow(illustration, source_language=run.source_language)
@@ -133,7 +134,7 @@ async def post_manual_message(
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         workflow_template=runs_api._workflow_template or {},
-        output_dir=runs_api._output_dir or "",
+        image_store=runs_api._image_store,
         character_config=runs_api._character_config,
     )
 
@@ -176,7 +177,7 @@ async def accept_manual_attempt(
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         workflow_template=runs_api._workflow_template or {},
-        output_dir=runs_api._output_dir or "",
+        image_store=runs_api._image_store,
         character_config=runs_api._character_config,
     )
 
@@ -222,7 +223,7 @@ async def iterate_manual_image(
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         workflow_template=runs_api._workflow_template or {},
-        output_dir=runs_api._output_dir or "",
+        image_store=runs_api._image_store,
         character_config=runs_api._character_config,
     )
 
@@ -264,7 +265,7 @@ async def regenerate_illustration(
         event_bus=event_bus,
         cancel_flag=cancel_flag,
         workflow_template=runs_api._workflow_template or {},
-        output_dir=runs_api._output_dir or "",
+        image_store=runs_api._image_store,
         character_config=runs_api._character_config,
     )
 

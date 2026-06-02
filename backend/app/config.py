@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,18 @@ class Settings(BaseSettings):
     workflow_path: str = "./app/workflows/default.json"
     agents_dir: str = "./app/agents"
     allowed_origin: str = "http://localhost:5173"
+
+    # Image storage backend (§ 8.7). `local` writes under `output_dir` and
+    # serves via the `/static` mount; `r2` writes to Cloudflare R2 and serves
+    # directly from the bucket's public r2.dev URL. R2 fields below are
+    # validated at startup (services/storage.py) only when backend == "r2".
+    image_store_backend: Literal["local", "r2"] = "local"
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket: str = ""
+    r2_public_base: str = ""
+    r2_prefix: str = "dev"
 
 
 _settings: Settings | None = None

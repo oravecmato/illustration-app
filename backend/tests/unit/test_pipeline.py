@@ -13,6 +13,9 @@ import pytest
 
 from app.db.models import IllustrationState, RunStatus
 from app.schemas.claude import StyleGuide
+from app.services.storage import LocalImageStore
+
+_TEST_IMAGE_STORE = LocalImageStore("/tmp")
 
 STYLE_GUIDE = StyleGuide(
     overall_style_positive="anime style",
@@ -99,7 +102,7 @@ async def test_three_illustrations_spawn_three_branches():
             runpod=AsyncMock(),
             event_bus=event_bus,
             workflow_template={},
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             cancel_flag=cancel_flag,
         )
 
@@ -134,7 +137,7 @@ async def test_all_branches_succeed_run_completed():
             runpod=AsyncMock(),
             event_bus=event_bus,
             workflow_template={},
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             cancel_flag=cancel_flag,
         )
 
@@ -175,7 +178,7 @@ async def test_mixed_outcome_run_still_completed():
             runpod=AsyncMock(),
             event_bus=event_bus,
             workflow_template={},
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             cancel_flag=cancel_flag,
         )
 
@@ -213,7 +216,7 @@ async def test_cancellation_marks_run_cancelled():
             runpod=AsyncMock(),
             event_bus=event_bus,
             workflow_template={},
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             cancel_flag=cancel_flag,
         )
 
@@ -245,7 +248,7 @@ async def test_unhandled_exception_gives_internal_error():
             runpod=AsyncMock(),
             event_bus=event_bus,
             workflow_template={},
-            output_dir="/tmp",
+            image_store=_TEST_IMAGE_STORE,
             cancel_flag=cancel_flag,
         )
 
