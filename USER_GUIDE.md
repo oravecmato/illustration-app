@@ -1,283 +1,277 @@
-# Anime ilustrátor — používateľská príručka
+# Anime Illustrator — user guide
 
-Anime ilustrátor je webová aplikácia, v ktorej sa spolu s asistentom
-(Claude) v krátkom rozhovore dohodneš na podobe príbehu, a aplikácia
-ti k nemu vyrobí sériu **piatich vizuálne konzistentných anime
-ilustrácií**. Samotné kreslenie prebieha na GPU u tretej strany
-(RunPod ComfyUI Serverless, model *Illustrious XL* s LoRA postavami z
-My Hero Academia), texty a kontrolu kvality má na starosti Claude.
+Anime Illustrator is a web app where you sketch out a story together with an
+assistant (Claude) in a short conversation, and the app then produces a series
+of **five visually consistent anime illustrations** for it. The actual drawing
+runs on third-party GPU hardware (RunPod ComfyUI Serverless, *Illustrious XL*
+model with character LoRAs from My Hero Academia); the text and the quality
+control are handled by Claude.
 
-Aplikácia je nasadená ako **súkromné demo** dostupné iba cez pozývací
-odkaz alebo prístupový kľúč. Beží v cloude (frontend na Cloudflare
-Pages, backend na Fly.io); od teba sa neočakáva žiadna inštalácia.
-
----
-
-## Prístup
-
-### Cez pozývací odkaz
-
-Najjednoduchšia cesta: prevádzkovateľ ti pošle odkaz v tvare
-`https://anime-illustrator.pages.dev/?invite=<kľúč>`. Otvor ho a
-aplikácia si tvoj kľúč zapamätá v prehliadači — ďalej už pracuješ
-bez zadávania kľúča.
-
-### Cez ručne vložený kľúč
-
-Ak si kľúč dostal iba ako text, choď na
-`https://anime-illustrator.pages.dev/`, na uvítacej stránke vlož
-kľúč do políčka „Prístupový kľúč" a potvrď. Kľúč sa uloží do
-`localStorage` prehliadača a pri ďalšej návšteve už nebudeš musieť
-nič zadávať.
-
-### Limity na kľúč
-
-Každý kľúč má pridelený počet **dokončených príbehov**, ktoré môže
-v rámci dema vyrobiť (zvyčajne 2–5). Keď ho vyčerpáš, aplikácia ti
-to oznámi a požiada o kontakt na prevádzkovateľa. Ak príbeh zlyhá z
-dôvodu výpadku GPU alebo iného infraštruktúrneho problému (nie
-preto, že by sa Claude vzdal), kvóta sa ti za daný príbeh
-**automaticky vráti**.
-
-Jeden chat má strop **20 správ od teba**. Ak ho dosiahneš,
-aplikácia ťa pošle začať nový príbeh — staré zostanú dostupné na
-prezeranie cez priame URL.
+The app is deployed as a **private demo** accessible only via an invite link
+or an access key. It runs in the cloud (frontend on Cloudflare Pages, backend
+on Fly.io); no installation is expected from you.
 
 ---
 
-## Tvorba príbehu — krok za krokom
+## Access
 
-### Krok 1 — výber jazyka
+### Via an invite link
 
-Vpravo hore je prepínač jazykov (vlajky **SK / CZ / GB**). Jazyk
-ovplyvňuje dve veci:
-- jazyk rozhrania (popisy, tlačidlá, hlášky),
-- jazyk samotného príbehu — Claude bude rozprávať a písať v tomto
-  jazyku.
+The easiest path: the operator sends you a link of the form
+`https://anime-illustrator.pages.dev/?invite=<key>`. Open it and the app will
+remember your key in the browser — from then on you work without entering the
+key again.
 
-Jazyk môžeš meniť aj **počas behu** alebo na hotovom príbehu — text
-sa preloží, obrázky ostanú rovnaké. Preklad sa cachuje, takže
-prepnutie tam a späť je už okamžité.
+### Via a manually entered key
 
-### Krok 2 — rozhovor s asistentom
+If you only received the key as text, go to
+`https://anime-illustrator.pages.dev/`, paste the key into the "Access key"
+field on the welcome screen and confirm. The key is stored in the browser's
+`localStorage`, so on your next visit you won't have to enter anything.
 
-Na úvodnej obrazovke je chatové okno. Asistent (Claude v role
-„spolutvorcu") sa ťa pýta na nápad, postavy, prostredie, náladu.
-Pravidlá, ktoré aplikácia v MVP vyžaduje a o ktorých sa asistent
-postará automaticky:
+### Per-key limits
 
-- **Najviac jeden chlapec / muž** (v anime štýle podľa Izuku
-  Midoriya, MHA).
-- **Najviac jedno dievča / žena** (v štýle Kyoka Jiro, MHA).
-- **Matka** ako voliteľná tretia postava, no iba ak je v príbehu
-  aspoň jedna z predošlých dvoch.
-- Voliteľne **jedna ne-ľudská postava** (zviera, robot, plyšák…) a
-  **dôležité predmety**, ktoré v príbehu rezonujú.
-- **5 ilustrácií** rozdelených medzi maximálne 5 prostredí, pričom
-  hlavná postava sa musí objaviť aspoň 2-krát.
+Every key has a pre-allocated number of **completed stories** it can produce
+within the demo (typically 2–5). Once you exhaust it, the app tells you and
+asks you to contact the operator. If a story fails because of a GPU outage or
+another infrastructure problem (not because Claude gave up), the quota for
+that story is **refunded automatically**.
 
-Keď je asistent s briefom spokojný, zhrnie ti ho a požiada o
-**potvrdenie**. Stačí napísať „áno" (alebo navrhnúť úpravu — vtedy
-sa rozhovor predĺži). Po potvrdení sa pod kapotou spustí druhý
-Claude agent, ktorý napíše samotný príbeh a rozplánuje 5
-ilustračných scén. Trvá to rádovo 20–40 sekúnd.
-
-### Krok 3 — sledovanie generovania
-
-Po potvrdení briefu sa stránka prepne na detail príbehu
-(`/<jazyk>/runs/<id>`). Hore vidíš:
-
-- **Názov príbehu** (najprv krátky topic, potom finálny titul).
-- **Stav** (Beží / Hotovo / Zlyhalo / Zrušené) a **počítadlo**
-  „Hotové K z 5".
-- **Tlačidlo „Zrušiť beh"** počas behu.
-- Voliteľný **banner** s vysvetlením, ak beh ako celok zlyhal.
-
-Pod tým sa zobrazuje samotný príbeh — odseky textu sa striedajú s
-ilustráciami presne tak, ako budú vyzerať vo finálnej knihe. Kým
-sa text alebo obrázok pripravuje, na jeho mieste je skeleton
-(svetlosivá plocha v správnom tvare), takže layout neposkakuje.
-
-Stránku **pokojne obnov alebo zavri** a vráť sa neskôr cez tú istú
-URL — beh pokračuje na pozadí. Ak pri obnovení zistíš, že sa beh
-od posledného otvorenia dokončil, uvidíš výsledok rovno; ak sa
-prerušil reštart servera, aplikácia sa automaticky pokúsi
-pripojiť späť k bežiacim GPU úlohám (viac v sekcii *Odolnosť*).
-
-### Stavy ilustrácie
-
-Každá z piatich kariet ilustrácií prejde vlastnou postupnosťou
-stavov. Najčastejšie uvidíš:
-
-| Štítok                         | Čo sa deje                                                            |
-|--------------------------------|-----------------------------------------------------------------------|
-| Čaká                           | Karta zatiaľ nezačala (čaká na voľný „slot")                          |
-| Vytváranie promptov            | Claude formuluje, čo má GPU vykresliť                                 |
-| **V rade na GPU**              | Úloha bola odoslaná na RunPod a čaká na voľného workera               |
-| Vytváranie obrázka (pokus K/3) | Worker práve renderuje                                                |
-| Hodnotenie                     | Claude vyhodnocuje hotový obrázok proti zadaniu                       |
-| Úprava promptov                | Obrázok nesedel, Claude prepisuje prompty a skúša znova               |
-| Prepracovanie konceptu         | Po troch neúspešných pokusoch Claude úplne prerobí scénu              |
-| Prepracovanie prostredia       | Vo výnimočnom prípade aj prostredie — keď ani Claude nevie scénu „nakŕmiť" renderru |
-| Prehodnotenie skorších pokusov | Po vyčerpaní auto-rozpočtu sa Claude vráti k histórii a vyberie najlepší skorší pokus |
-| Spoločná tvorba (manuál)       | Auto-pipeline to vzdal, otvára sa chat s „spolu-ilustrátorom"         |
-| Hotovo                         | Úspech, obrázok je zobrazený                                          |
-| Nepodarilo sa                  | Aj manuálny rozpočet sa minul                                         |
-| Zrušené                        | Beh bol zrušený                                                       |
-
-**„V rade na GPU"** je dôležitý rozlišovač: znamená, že úloha čaká
-na voľný hardware (typicky pri demo deployoch s 0–1 teplým
-workerom). Sám sa stane stavu **Vytváranie obrázka** akonáhle
-worker prácu prevezme. Ak by úloha v rade strávila viac než 30
-minút, považuje sa to za výpadok kapacity a karta sa vzdá s
-hláškou — kvóta sa za takéto zlyhanie vráti.
-
-### Krok 4 — výsledok a interakcia
-
-Keď je karta v stave **Hotovo**, ukáže obrázok priamo v príbehu.
-Kliknutím sa otvorí v plnej veľkosti. Pri každej karte je
-**trojbodkové menu** vpravo hore s týmito akciami (pokiaľ máš
-ešte manuálny rozpočet):
-
-- **„Vyrobiť znova"** — otvorí chat s manuálnym asistentom; pôvodný
-  obrázok ostáva ako záloha, kým neakceptuješ nový.
-- **„Zobraziť konverzáciu"** — viditeľné, ak karta už nejakou
-  manuálnou interakciou prešla; ukáže ti dovtedy uložený dialóg a
-  všetky pokusy.
-
-V karte, na ktorej preklik na konceptový popover (malá ikona)
-ukáže, **čo Claude o scéne vie** — koncept, charakter, prostredie a
-príp. ne-ľudská entita v scéne. Slúži najmä na orientáciu, prečo
-obrázok vyzerá tak, ako vyzerá.
-
-### Krok 5 — zrušenie behu
-
-Tlačidlo **„Zrušiť beh"** hore zastaví všetky čakajúce karty.
-Pozor: obrázky, ktoré sú **práve teraz** na GPU, sa dokončia — len
-ich aplikácia po dokončení už nepoužije (RunPod nemá API na
-prerušenie bežiacej úlohy). Hotové karty zostávajú ako sú.
+A single chat is capped at **20 messages from you**. If you hit that, the app
+sends you off to start a new story — the old ones remain available for
+viewing via their direct URL.
 
 ---
 
-## Manuálna spolutvorba („spolu-ilustrátor")
+## Creating a story — step by step
 
-Ak sa auto-pipeline (3 koncepty × 3 obrázky × prípadná záchrana
-z histórie) nepodarí, karta sa **nepoloží do zlyhania** — namiesto
-toho sa na jej mieste otvorí krátky chat s **„spolu-ilustrátorom"**
-(Claude v inej role). Cieľ je dosiahnuť použiteľný obrázok v dialógu
-s tebou.
+### Step 1 — pick a language
 
-Ako to vyzerá:
+There's a language switcher in the top-right corner (flags **SK / CZ / GB**).
+Language affects two things:
+- the language of the interface (labels, buttons, messages),
+- the language of the story itself — Claude will narrate and write in this
+  language.
 
-1. Asistent ťa privíta a stručne sa spýta, čo si v scéne želáš
-   vidieť. Ja ako asistent **nevidím obrázky**, takže každú spätnú
-   väzbu mu opíš slovami („zosvetli pozadie", „pridaj úsmev",
-   „odstráň okuliare").
-2. Keď máš spolu s ním konkrétny koncept, klikni **„Potvrdiť"**.
-   Asistent ti vyrobí prompty a pošle ich na render.
-3. Po každom rendere uvidíš obrázok priamo v paneli a malé tlačidlá
-   **„Akceptovať"** alebo **„Iterovať"**. Akceptovanie ukončí
-   manuálnu spolutvorbu a obrázok sa stane súčasťou príbehu.
-   Iterovanie pridá ďalšiu spätnú väzbu a posunie sa na ďalší
-   pokus.
-4. Manuálny rozpočet je **5 pokusov** na jednu kartu. Ak ho minieš,
-   karta sa preklopí do „Nepodarilo sa". Aj v takom prípade ostane
-   menu **„Zobraziť konverzáciu"** dostupné, takže sa môžeš vrátiť
-   k niektorému z 5 minulých pokusov a akceptovať ho dodatočne.
+You can switch the language **mid-run** or on a finished story too — the text
+is translated, the images stay the same. Translations are cached, so flipping
+back and forth is instant after the first time.
 
-Manuálnu spolutvorbu vieš spustiť aj sám na **hotovom obrázku** cez
-trojbodkové menu → „Vyrobiť znova". Vtedy sa pôvodný obrázok
-zachová ako záloha a manuálny rozpočet sa neresetuje (zdieľa sa s
-prípadným predošlým automatickým fallbackom tej istej karty).
+### Step 2 — chat with the assistant
 
----
+The landing screen shows a chat window. The assistant (Claude in a
+"co-creator" role) asks you about the idea, characters, environment, mood.
+The rules the MVP enforces, which the assistant handles for you automatically:
 
-## Odolnosť voči výpadkom
+- **At most one boy / man** (in anime style, modeled after Izuku Midoriya,
+  MHA).
+- **At most one girl / woman** (in the style of Kyoka Jiro, MHA).
+- A **mother** as an optional third character, but only if at least one of
+  the two above is present.
+- Optionally **one non-human character** (animal, robot, plushie…) and
+  **important objects** that resonate in the story.
+- **5 illustrations** spread across at most 5 environments, with the main
+  character appearing at least twice.
 
-Pre demo nasadenie sa kompaktnosť a cena zmestili pred robustnosť,
-no aplikácia má niekoľko mechanizmov, ktoré bežné krátkodobé
-výpadky znášajú v poriadku:
+When the assistant is happy with the brief, it summarises it and asks for
+your **confirmation**. Just type "yes" (or suggest a tweak — that extends
+the conversation). After confirmation, a second Claude agent kicks in under
+the hood to write the actual story and lay out the 5 illustration scenes.
+This takes roughly 20–40 seconds.
 
-- **Reštart servera počas behu** (deploy, krátky výpadok pamäte) —
-  pri štarte sa všetky bežiace behy klasifikujú a tie, ktoré mali
-  rozbehnutú GPU úlohu, sa **znovu pripoja k tomu istému RunPod
-  job-id**. Stratíš nanajvýš poradové miesto v rade, nie celý
-  rozpočet.
-- **Strata SSE pripojenia** (prepnutie WiFi, uspatie počítača) —
-  prehliadač sa automaticky reconnectne; pri tom dostaneš aktuálny
-  snapshot a SSE pokračuje, akoby sa nič nestalo.
-- **Vyplnená GPU fronta** — keď je úloha viac než 30 min v rade,
-  karta sa vzdá s hláškou „v rade na GPU sa minul čas"; kvóta sa
-  vráti.
-- **Stuck worker** — keď GPU začne úlohu spracovávať, ale 10 minút
-  nedoručí výsledok, aplikácia úlohu skúsi ešte 2-krát s iným
-  semienkom (na inom workerovi). Až potom kartu vzdá.
+### Step 3 — watching the generation
 
----
+After the brief is confirmed, the page switches to the story detail
+(`/<lang>/runs/<id>`). At the top you see:
 
-## Často kladené otázky
+- The **story title** (a short topic first, then the final title).
+- The **state** (Running / Done / Failed / Cancelled) and the **counter**
+  "K of 5 done".
+- The **"Cancel run"** button while the run is in flight.
+- An optional **banner** explaining the failure if the run as a whole failed.
 
-**Koľko ma to bude stáť?**
-Demo má vstavanú kvótu na kľúč — nakoľko aplikácia platí
-prevádzkovateľ. Ty sa o ceny nestaráš, len o počet zostávajúcich
-príbehov.
+Below that the story itself is shown — text paragraphs alternate with
+illustrations exactly the way they'll appear in the final book. While text
+or an image is being prepared, a skeleton placeholder (a light-grey area in
+the right shape) holds its spot, so the layout doesn't jump around.
 
-**Generovanie ide pomaly / niektoré karty stoja v „V rade na GPU".**
-Pri malých demo deployoch obvykle nie sú trvalo bežiaci GPU workeri
-— každá nová karta najprv prebudí worker (~30–60 s) a potom začne
-renderovať. Päť kariet beží paralelne, takže môžeš v jednom čase
-vidieť aj 5× „V rade". Vydrž, posunie sa to.
+Feel free to **refresh or close** the page and come back later via the same
+URL — the run continues in the background. If you find on return that the
+run has finished since you last opened it, you'll see the result directly;
+if a server restart interrupted things, the app will automatically try to
+reconnect to the running GPU jobs (more on this in the *Resilience*
+section).
 
-**Niektoré karty zlyhajú aj po manuále — čo s tým?**
-Najčastejšia príčina je, že požadovaná scéna ide nad rámec toho,
-čo MHA-LoRA model zvládne (príliš veľa postáv, exotické pozy,
-silné štýlové rozpory). Manuálne menu **„Zobraziť konverzáciu"** ti
-dovolí akceptovať ktorýkoľvek z 5 historických manuálnych pokusov;
-často niektorý z nich vyzerá rozumne, len ho asistent vyhodnotil
-ako nedokonalý.
+### Illustration states
 
-**Môžem si svoj príbeh stiahnuť?**
-Nateraz nie — obrázky aj text žijú výlučne na URL behu
-(`/<jazyk>/runs/<id>`). Tú si však môžeš uložiť, otvoriť kedykoľvek
-neskôr a v ľubovoľnom z troch jazykov.
+Each of the five illustration cards goes through its own sequence of states.
+The most common ones you'll see:
 
-**Funguje to na mobile?**
-Aplikácia je responzívna a v prehliadači na telefóne funguje, ale
-pri 5-stĺpcovej mriežke kariet je pohodlnejší tablet alebo
-počítač.
+| Label                           | What's happening                                                                |
+|---------------------------------|---------------------------------------------------------------------------------|
+| Waiting                         | The card hasn't started yet (waiting for a free "slot")                         |
+| Building prompts                | Claude is formulating what the GPU should render                                |
+| **Queued on GPU**               | The job has been sent to RunPod and is waiting for a free worker                |
+| Rendering image (attempt K/3)   | A worker is actively rendering                                                  |
+| Evaluating                      | Claude is scoring the finished image against the brief                          |
+| Revising prompts                | The image didn't match; Claude rewrites the prompts and tries again             |
+| Rethinking concept              | After three failed attempts Claude reworks the scene from scratch               |
+| Rethinking environment          | In rare cases even the environment is swapped — when Claude can't "feed" the renderer the scene |
+| Reviewing earlier attempts      | Once the auto-budget is spent, Claude revisits history and picks the best prior attempt |
+| Co-creating (manual)            | The auto-pipeline gave up; a chat with a "co-illustrator" opens                 |
+| Done                            | Success, the image is displayed                                                 |
+| Failed                          | Even the manual budget ran out                                                  |
+| Cancelled                       | The run was cancelled                                                           |
 
-**Sú moje vstupy niekde uložené?**
-Áno — chat aj výsledný príbeh sa ukladajú v databáze backendu, aby
-si sa k behu mohol vrátiť. Pre dema sú dáta privátne na úrovni
-URL (kto má URL, vidí beh; URL nikde verejne nesúvisíme).
+**"Queued on GPU"** is an important distinction: it means the job is waiting
+for free hardware (typical on demo deploys with 0–1 warm workers). It will
+automatically transition into **Rendering image** as soon as a worker picks
+the job up. If a job spends more than 30 minutes in the queue, that's
+treated as a capacity outage and the card gives up with a notice — the
+quota is refunded for such a failure.
 
-**Stratil som svoj prístupový kľúč.**
-Kontaktuj prevádzkovateľa — kľúče sú jednorazovo generované,
-neexistuje samoobslužné obnovenie. Ak máš ešte aktívnu reláciu v
-prehliadači, na ktorej bol kľúč použitý, kľúč nájdeš v
-`localStorage` pod kľúčom `accessKey`.
+### Step 4 — result and interaction
 
----
+When a card reaches the **Done** state, it shows the image right inside the
+story. Clicking opens it in full size. Every card has a **three-dot menu**
+in the top-right with these actions (as long as you still have manual
+budget):
 
-## Limity (zhrnutie)
+- **"Generate again"** — opens a chat with the manual assistant; the
+  original image is kept as a backup until you accept the new one.
+- **"Show conversation"** — visible if the card already went through some
+  manual interaction; shows the dialog stored so far and all attempts.
 
-| Limit                                          | Hodnota                              |
-|------------------------------------------------|--------------------------------------|
-| Počet ilustrácií na príbeh                     | presne 5                             |
-| Pokusov na koncept                             | 3                                    |
-| Konceptov na ilustráciu                        | 3                                    |
-| Manuálnych pokusov na ilustráciu               | 5                                    |
-| Užívateľských správ na chat                    | 20                                   |
-| Celkom správ (vrátane asistentových) na chat   | 60                                   |
-| Čakanie v GPU rade                             | 30 minút (potom zlyhanie)            |
-| Čakanie na hotový obrázok po prevzatí workerom | 10 minút × 3 pokusy s novým semienkom|
-| Podporované jazyky UI a príbehu                | SK, CZ, EN                           |
+Inside each card a click on the concept popover (a small icon) reveals
+**what Claude knows about the scene** — concept, character, environment and
+any non-human entity in the scene. It's mainly there to help you understand
+why an image looks the way it does.
+
+### Step 5 — cancelling the run
+
+The **"Cancel run"** button at the top stops all pending cards. Heads-up:
+images that are **right now** on the GPU will finish — the app just won't
+use the result afterwards (RunPod has no API to abort an in-flight job).
+Cards that are already done stay as they are.
 
 ---
 
-## Hlásenie problémov
+## Manual co-creation ("co-illustrator")
 
-Ak narazíš na chybu, ktorá v tejto príručke nie je opísaná,
-napíš prevádzkovateľovi (osobe, ktorá ti poslala prístupový kľúč)
-spolu s URL behu, na ktorom sa problém prejavil — z URL vie v
-backende dohľadať detailný log konkrétneho behu.
+If the auto-pipeline (3 concepts × 3 images × an optional history salvage)
+doesn't succeed, the card is **not flipped into failure** — instead a short
+chat with a **"co-illustrator"** (Claude in a different role) opens in its
+place. The goal is to land a usable image in dialog with you.
+
+How it looks:
+
+1. The assistant greets you and briefly asks what you want to see in the
+   scene. The assistant **doesn't see images**, so describe every piece of
+   feedback in words ("brighten the background", "add a smile", "remove the
+   glasses").
+2. Once you have a concrete concept together, click **"Confirm"**. The
+   assistant builds the prompts and ships them off for a render.
+3. After every render you see the image right in the panel and small
+   buttons **"Accept"** or **"Iterate"**. Accepting ends the manual
+   co-creation and the image becomes part of the story. Iterating adds
+   another piece of feedback and advances to the next attempt.
+4. The manual budget is **5 attempts** per card. If you spend it, the card
+   flips to "Failed". Even then the **"Show conversation"** menu remains
+   available, so you can come back to any of the 5 past attempts and accept
+   it after the fact.
+
+You can also start manual co-creation yourself on a **finished image** via
+the three-dot menu → "Generate again". In that case the original image is
+preserved as a backup and the manual budget is not reset (it is shared with
+any prior automatic fallback on the same card).
+
+---
+
+## Resilience to outages
+
+For a demo deploy, compactness and cost won over robustness, but the app
+still has a handful of mechanisms that handle ordinary short outages
+gracefully:
+
+- **Server restart during a run** (deploy, brief OOM) — at startup all
+  running runs are classified and the ones that had an in-flight GPU job
+  **re-attach to the same RunPod job-id**. At worst you lose your position
+  in the queue, not the whole budget.
+- **Lost SSE connection** (WiFi switch, laptop sleep) — the browser
+  reconnects automatically; on reconnect you receive the current snapshot
+  and SSE picks up as if nothing happened.
+- **Saturated GPU queue** — when a job spends over 30 min in the queue, the
+  card gives up with a "GPU queue timed out" message; the quota is
+  refunded.
+- **Stuck worker** — when a GPU starts processing a job but doesn't deliver
+  the result within 10 minutes, the app retries the job up to 2 more times
+  with a fresh seed (on a different worker). Only then does the card give
+  up.
+
+---
+
+## Frequently asked questions
+
+**How much will this cost me?**
+The demo has a built-in per-key quota — the operator pays for the
+infrastructure. You don't worry about prices, only about the number of
+stories you have left.
+
+**Generation is slow / some cards are stuck on "Queued on GPU".**
+On small demo deploys there usually aren't any GPU workers running
+continuously — every new card first warms up a worker (~30–60 s) and only
+then starts rendering. Five cards run in parallel, so you may legitimately
+see all 5 in "Queued" at once. Hang on, it will move.
+
+**Some cards fail even after manual — what do I do?**
+The most common cause is that the requested scene is beyond what the
+MHA-LoRA model can handle (too many characters, exotic poses, strong style
+clashes). The manual **"Show conversation"** menu lets you accept any of
+the 5 historical manual attempts; often one of them looks reasonable, the
+assistant just judged it imperfect.
+
+**Can I download my story?**
+Not for now — both images and text live exclusively at the run URL
+(`/<lang>/runs/<id>`). You can however bookmark that URL, open it any
+time later and in any of the three languages.
+
+**Does it work on mobile?**
+The app is responsive and does work in a phone browser, but the 5-column
+card grid is more comfortable on a tablet or computer.
+
+**Are my inputs stored anywhere?**
+Yes — the chat and the resulting story are persisted in the backend
+database, so you can come back to the run. For the demo the data is
+private at the URL level (whoever has the URL sees the run; we don't link
+the URL publicly anywhere).
+
+**I lost my access key.**
+Contact the operator — keys are generated one-off, there is no
+self-service recovery. If you still have an active browser session in
+which the key was used, you can find it in `localStorage` under the
+`accessKey` key.
+
+---
+
+## Limits (summary)
+
+| Limit                                            | Value                                  |
+|--------------------------------------------------|----------------------------------------|
+| Illustrations per story                          | exactly 5                              |
+| Attempts per concept                             | 3                                      |
+| Concepts per illustration                        | 3                                      |
+| Manual attempts per illustration                 | 5                                      |
+| User messages per chat                           | 20                                     |
+| Total messages (incl. assistant) per chat        | 60                                     |
+| Wait in the GPU queue                            | 30 minutes (then failure)              |
+| Wait for a finished image after worker pickup    | 10 minutes × 3 attempts with new seed  |
+| Supported UI and story languages                 | SK, CZ, EN                             |
+
+---
+
+## Reporting problems
+
+If you hit a bug that isn't described in this guide, message the operator
+(the person who sent you the access key) together with the URL of the run
+where the problem showed up — from the URL they can dig the detailed log
+of that specific run out of the backend.
